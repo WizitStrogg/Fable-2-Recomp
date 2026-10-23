@@ -35,6 +35,7 @@
 
 #include <cctype>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -225,6 +226,11 @@ class KeyboardGamepadDriver final : public rex::input::InputDriver {
   KeyboardGamepadDriver(rex::ui::Window* window, size_t window_z_order)
       : rex::input::InputDriver(window, window_z_order) {}
 
+  // Reports whether a host overlay (settings, co-op, console, ...) is open.
+  // While one is, the mouse is released and keys/mouse buttons are not sent to
+  // the game, so the overlay can be clicked and typed into.
+  void SetOverlayOpenQuery(std::function<bool()> query) { overlay_open_ = std::move(query); }
+
   ~KeyboardGamepadDriver() override {
     if (cursor_hidden_) {
       if (rex::ui::Window* w = GameWindow())
@@ -280,11 +286,21 @@ class KeyboardGamepadDriver final : public rex::input::InputDriver {
     bool has_unlock_key = unlock_vk != 0;
     if (focused) {
       bool unlock_down = has_unlock_key && (GetAsyncKeyState(unlock_vk) & 0x8000);
-      if (unlock_down && !unlock_down_prev_) console_open_ = !console_open_;
+      // When the unlock key is also the settings-overlay key (F4 by default),
+      // the overlay state (overlay_open_) already covers it; toggling a second
+      // flag here could get out of step with the overlay.
+      const bool key_opens_overlay =
+          overlay_open_ &&
+          rex::cvar::GetFlagByName("bind_settings") == REXCVAR_GET(mouse_unlock_key);
+      if (unlock_down && !unlock_down_prev_ && !key_opens_overlay) console_open_ = !console_open_;
       unlock_down_prev_ = unlock_down;
     }
 
-    if (focused) {
+    // A host overlay or the F4 menu has the mouse and keyboard: no gamepad
+    // bindings and no mouse look while it is open.
+    const bool menu_open = console_open_ || (overlay_open_ && overlay_open_());
+
+    if (focused && !menu_open) {
       for (const auto& m : bindings_) {
         if (has_unlock_key && m.vk == unlock_vk) continue;  // not gamepad input
         if ((GetAsyncKeyState(m.vk) & 0x8000) == 0) continue;  // not held
@@ -312,7 +328,7 @@ class KeyboardGamepadDriver final : public rex::input::InputDriver {
     // away releases the lock) and on the debug menu being closed (F4) so the
     // cursor is free while the menu is open. Fable 2 inverts Y, so mouse-up
     // (dy<0) maps to +ry (look up).
-    bool looking = focused && REXCVAR_GET(mouse_look) && !console_open_;
+    bool looking = focused && REXCVAR_GET(mouse_look) && !menu_open;
 
     // Hide/restore the cursor via the SDK Window. This is a thread-safe
     // "desired state" that the UI thread applies, so it actually takes effect
@@ -422,6 +438,7 @@ class KeyboardGamepadDriver final : public rex::input::InputDriver {
   bool mouse_centered_ = false;  // set once the cursor is first pinned
   bool cursor_hidden_ = false;   // set while the SDK window cursor is hidden
   bool console_open_ = false;    // debug menu open -> mouse lock released
+  std::function<bool()> overlay_open_;  // host overlay open -> same as console_open_
   bool unlock_down_prev_ = false;  // prev-poll state of the unlock key
   // The game window (from the runtime's display window), used for recentering
   // and cursor visibility.

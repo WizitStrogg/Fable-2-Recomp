@@ -124,8 +124,9 @@ class Fable2App : public rex::ReXApp {
     config.input_factory = [this](bool tool_mode) ->
         std::unique_ptr<rex::system::IInputSystem> {
       auto system = rex::input::CreateDefaultInputSystem(tool_mode);
-      system->AddDriver(
-          std::make_unique<fable2::KeyboardGamepadDriver>(system->window(), 0));
+      auto keyboard = std::make_unique<fable2::KeyboardGamepadDriver>(system->window(), 0);
+      keyboard->SetOverlayOpenQuery([this] { return IsAnyOverlayOpen(); });
+      system->AddDriver(std::move(keyboard));
 #ifdef FABLE2_REMOTE_CONTROL
       // Remote (AI) pad: driven over localhost TCP by an external harness
       // (src/input/remote_control_server.h). OR-merges with the pads above; not
