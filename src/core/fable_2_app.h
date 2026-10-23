@@ -170,8 +170,8 @@ class Fable2App : public rex::ReXApp {
     // depth_bias_shader is a GPU-plugin cvar, so it is seeded here too.
     if (fable2::config::Get().dog_fur_depth_bias &&
         rex::cvar::GetFlagSource("depth_bias_shader") == rex::cvar::Source::kDefault) {
-      if (rex::cvar::SetFlagByName("depth_bias_shader", "014F8A02DB7B19CA") &&
-          rex::cvar::SetFlagByName("depth_bias_shader_units", "16")) {
+      if (rex::cvar::SetFlagByName("depth_bias_shader", "014F8A02DB7B19CA,03D91B35ACD56079") &&
+          rex::cvar::SetFlagByName("depth_bias_shader_units", "64")) {
         REXSYS_INFO("[fable2-config] seeded dog fur depth bias (dog_fur_depth_bias=true)");
       } else {
         REXSYS_WARN("[fable2-config] dog fur depth bias cvars missing "
