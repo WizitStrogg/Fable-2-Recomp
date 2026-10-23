@@ -7,6 +7,11 @@
 -- starts QC060_NewBeginning normally, which loads Bower Lake.
 -- Skipping from inside the running childhood instead leaves QC060 waiting on
 -- a black screen for a Bower Lake load that never comes (rig launches 5-7).
+if not (GameflowBase and Gameflow and ScriptEnum and ScriptEnum.DebugQC060) then
+  print("[coop] skip: not yet (no gameflow in this Lua state)")
+  return
+end
+if CoopSkipInstalled then return end
 local target = ScriptEnum.DebugQC060
 local function wrap(owner)
   local orig = rawget(owner, "SetGameflowPosition")
@@ -25,5 +30,6 @@ end
 local where = Gameflow and Gameflow.PositionInGameflow
 local wrapped_base = wrap(GameflowBase)
 local wrapped_own = Gameflow and wrap(Gameflow)
+CoopSkipInstalled = true
 print("[coop] skip: wrapper installed (base " .. tostring(wrapped_base) .. ", own " ..
   tostring(wrapped_own) .. ") at gameflow position " .. tostring(where))

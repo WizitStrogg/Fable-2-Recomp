@@ -102,6 +102,8 @@ struct SessionState {
   uint32_t load_epoch = 0;  // first game script load after the card pick
 };
 inline std::atomic<int64_t> g_qc060_started_ms{0};  // "QC060_NewBeginning Starting" printed
+inline std::atomic<bool> g_skip_installed{false};      // coop_skip_childhood.lua took
+inline std::atomic<bool> g_childhood_started{false};   // the game moved to QC010 itself
 inline SessionState& S() {
   static SessionState s;
   return s;
@@ -134,6 +136,8 @@ inline void on_host_start() {
     S().newgame_ms = S().card_ms = S().skip_ms = 0;
     S().load_epoch = 0;
     g_qc060_started_ms.store(0);
+    g_skip_installed.store(false);
+    g_childhood_started.store(false);
     REXSYS_INFO("[coop] host start: campaign {} with {}, host hero {}", S().cid, S().partner_name,
                 S().host_female ? "female" : "male");
   }
@@ -202,20 +206,28 @@ inline void session_tick() {
         }
         REXSYS_INFO("[coop] host start: picking the {} hero card", s.host_female ? "girl" : "boy");
       }
-      // 2. The new game's scripts are up (the first game script load after the
-      //    card; the state probe still says MainMenu in the world): install
-      //    the skip at once, before the gameflow leaves GAMEFLOW_START (about
-      //    10 s later, launch 5). See coop_skip_childhood.lua for why it must
-      //    not be skipped from inside the running childhood.
+      // 2. Install the skip before the gameflow leaves GAMEFLOW_START: from the
+      //    first game script load after the card, run coop_skip_childhood.lua
+      //    every 500 ms until it reports "installed" (the first run can land
+      //    before the world's Lua state exists, launch 8). The world's scripts
+      //    come up ~4 s before the game starts the childhood. See the Lua file
+      //    for why it must not be skipped from inside the running childhood.
       if (s.card_ms && !s.load_epoch) s.load_epoch = fable2::f5lua::g_load_epoch.load() + 1;
-      if (s.card_ms && !s.skip_ms && fable2::f5lua::ready() &&
+      if (s.card_ms && !g_skip_installed.load() && fable2::f5lua::ready() &&
           fable2::f5lua::g_load_epoch.load() >= s.load_epoch) {
-        s.skip_ms = now;
-        REXSYS_INFO("[coop] host start: new game scripts up, installing the skip to adulthood (QC060)");
-        fable2::luaconsole::RunFile("coop_skip_childhood.lua");
+        if (g_childhood_started.load()) {
+          if (s.skip_ms >= 0) {
+            REXSYS_INFO("[coop] host start: FAIL - the childhood started before the skip was in place");
+            s.skip_ms = -1;
+          }
+        } else if (now - s.skip_ms >= 500) {
+          if (!s.skip_ms) REXSYS_INFO("[coop] host start: new game scripts up, installing the skip to adulthood (QC060)");
+          s.skip_ms = now;
+          fable2::luaconsole::RunFile("coop_skip_childhood.lua");
+        }
       }
       // 3. Adulthood started and settled: the partner may join.
-      if (s.skip_ms && g_qc060_started_ms.load() && now - g_qc060_started_ms.load() > 20000 &&
+      if (g_skip_installed.load() && g_qc060_started_ms.load() && now - g_qc060_started_ms.load() > 20000 &&
           lobby::GetLobbyStatus().in_world) {
         s.s = Session::kHostInWorld;
         s.since_ms = now;
@@ -401,6 +413,11 @@ inline const bool g_installed = [] {
   fable2::fronthooks::g_press_hook = &OnPress;
   fable2::luaconsole::AddLineHandler("QC060_NewBeginning Starting", [](std::string_view) {
     g_qc060_started_ms.store(fable2::f5lua::steady_ms());
+  });
+  fable2::luaconsole::AddLineHandler("[coop] skip: wrapper installed",
+                                     [](std::string_view) { g_skip_installed.store(true); });
+  fable2::luaconsole::AddLineHandler("Skipping gameflow to 1", [](std::string_view) {
+    if (!g_skip_installed.load()) g_childhood_started.store(true);
   });
   g_prev_frame_hook = fable2::f5lua::g_frame_hook;  // the lobby's (fable2_coop_lobby.h)
   fable2::f5lua::g_frame_hook = &OnFrame;
