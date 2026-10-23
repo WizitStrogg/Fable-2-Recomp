@@ -165,12 +165,10 @@ inline std::vector<Heard> heard(const char* key) {
 
 inline int64_t g_next_tick_ms = 0;
 
-inline void Tick() {
-  if (!g_open.load()) return;
-  const int64_t now = fable2::f5lua::steady_ms();
-  if (now < g_next_tick_ms) return;
-  g_next_tick_ms = now + 250;
-  std::lock_guard<std::mutex> l(L().m);
+// One lobby step under the lock. Returns a callback to run after unlocking:
+// callbacks may open or close the lobby, which takes the same lock (launch 5:
+// partner_go called Close() while Tick held the lock and the game died).
+inline std::function<void()> tick_locked() {
   auto& lb = L();
   if (lb.role == Role::kHost) {
     lb.host.OnSeats(heard("coop_seat"));
@@ -192,7 +190,7 @@ inline void Tick() {
     if (lb.partner.state == PartnerState::kBrowsing) {
       lb.listing = lb.partner.List(heard("coop_lobby"));
       lobby::PublishData("coop_seat", "");
-      return;
+      return {};
     }
     std::optional<Heard> rec, go;
     for (auto& h : heard("coop_lobby"))
@@ -203,16 +201,30 @@ inline void Tick() {
     if (lb.partner.state == PartnerState::kBrowsing) {
       lb.notice = "The host left the lobby";
       lb.cursor = 0;
-      return;
+      return {};
     }
     lobby::PublishData("coop_seat", Format(lb.partner.seat));
     if (start_join) {
       const uint32_t ip = lb.partner.host_ip;
       REXSYS_INFO("[lobby] coop_go received, joining {}", ip);
       lb.notice = "Joining " + lb.partner.seat.host;
-      if (lb.cb.partner_go) lb.cb.partner_go(ip);
+      if (lb.cb.partner_go) return [cb = lb.cb.partner_go, ip] { cb(ip); };
     }
   }
+  return {};
+}
+
+inline void Tick() {
+  if (!g_open.load()) return;
+  const int64_t now = fable2::f5lua::steady_ms();
+  if (now < g_next_tick_ms) return;
+  g_next_tick_ms = now + 250;
+  std::function<void()> after;
+  {
+    std::lock_guard<std::mutex> l(L().m);
+    after = tick_locked();
+  }
+  if (after) after();
 }
 
 // --- menu rows -------------------------------------------------------------------
