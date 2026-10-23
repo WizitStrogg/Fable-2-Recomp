@@ -44,6 +44,14 @@ inline int g_pass_a = 0;            // injected A presses to let through
 inline int64_t g_last_press_ms = 0;
 inline bool g_past_title = false;   // the title's "Press A" was passed this visit
 inline uint32_t g_last_mask = 0;
+// The A that closes a panel is still held on the next poll, so the game's own
+// dispatch receives it right after the panel closes (launch 3: it reopened the
+// chooser). Solo / Start let that press through to the stock New Game; Back
+// swallows it. A tap released before the next poll never arrives: then an A
+// is injected once the deadline passes.
+inline int64_t g_swallow_a_until = 0;
+inline int64_t g_pass_deadline = 0;
+constexpr int64_t kLeakWindowMs = 600;
 
 // The front end: title prompt, menu movie or main menu. The state probe
 // reports the title as PressAScreen or already as MainMenu, so both count.
@@ -55,12 +63,18 @@ inline bool in_main_menu() {
 
 inline void open_chooser();
 
-// Solo: let the next A reach the stock New Game. The A that picked Solo was
-// eaten by the chooser, so inject a fresh one after the release.
+// Lets the next A press (normally the one that closed the panel) reach the
+// stock New Game.
+inline void pass_next_a_to_new_game() {
+  g_pass_a = 1;
+  g_pass_deadline = fable2::f5lua::steady_ms() + kLeakWindowMs;
+}
+
+inline void swallow_closing_a() { g_swallow_a_until = fable2::f5lua::steady_ms() + kLeakWindowMs; }
+
 inline void on_solo() {
   REXSYS_INFO("[coop] new game: Solo");
-  g_pass_a = 1;
-  fable2::cooplobby::InjectPress(static_cast<uint16_t>(fable2::cooplobby::kA), 250, 200);
+  pass_next_a_to_new_game();
 }
 
 // --- the co-op session after Start (host) or go (partner) ---------------------------
@@ -77,7 +91,11 @@ struct SessionState {
   uint32_t go_seq = 0;
   int64_t since_ms = 0;
   bool partner_spawned = false;
+  bool host_female = false;
+  // Start -> stock New Game -> hero card -> childhood -> skip to QC060 (T021)
+  int64_t newgame_ms = 0, card_ms = 0, skip_ms = 0;
 };
+inline std::atomic<int64_t> g_qc060_started_ms{0};  // "QC060_NewBeginning Starting" printed
 inline SessionState& S() {
   static SessionState s;
   return s;
@@ -92,9 +110,9 @@ inline std::string new_campaign_id() {
   return buf;
 }
 
-// Host pressed Start. T021 (New Game + skip to adulthood) is not built yet,
-// so the rig starts the host's world from its newest save: inject Down
-// (cursor to Continue) and A once the panel has closed.
+// Host pressed Start (spec D4): the stock New Game, the hero card from the
+// lobby's gender, the childhood world, then the game's own gameflow skip to
+// QC060 (session_tick); the partner is sent coop_go once adulthood starts.
 inline void on_host_start() {
   {
     auto& lb = fable2::cooplobby::L();
@@ -106,12 +124,14 @@ inline void on_host_start() {
     S().partner_ip = lb.host.partner_ip;
     S().since_ms = fable2::f5lua::steady_ms();
     S().partner_spawned = false;
-    REXSYS_INFO("[coop] host start: campaign {} with {} (T021 pending: world from the newest save)",
-                S().cid, S().partner_name);
+    S().host_female = lb.host.rec.gender1 == fable2::cooplobby::Gender::kFemale;
+    S().newgame_ms = S().card_ms = S().skip_ms = 0;
+    g_qc060_started_ms.store(0);
+    REXSYS_INFO("[coop] host start: campaign {} with {}, host hero {}", S().cid, S().partner_name,
+                S().host_female ? "female" : "male");
   }
   fable2::cooplobby::HidePanel();
-  fable2::cooplobby::InjectPress(static_cast<uint16_t>(fable2::cooplobby::kDown), 300, 200);
-  fable2::cooplobby::InjectPress(static_cast<uint16_t>(fable2::cooplobby::kA), 900, 200);
+  pass_next_a_to_new_game();
 }
 
 // Partner: the host's world is up. Join it (the F9 path, proven by P3).
@@ -133,6 +153,7 @@ inline void open_host_lobby(fable2::cooplobby::Kind kind, const std::string& cid
   cb.partner_go = on_partner_go;
   cb.back = [] {
     REXSYS_INFO("[coop] lobby closed, back to the chooser");
+    swallow_closing_a();
     open_chooser();
   };
   fable2::cooplobby::OpenHost(kind, cid, partner, cb);
@@ -156,7 +177,30 @@ inline void session_tick() {
   auto& s = S();
   switch (s.s) {
     case Session::kHostStarting:
-      if (lobby::GetLobbyStatus().in_world) {
+      // 1. The stock hero cards come up ~20 s after New Game: pick the card
+      //    the host chose in the lobby (boy is selected first; Right = girl).
+      if (s.newgame_ms && !s.card_ms && now - s.newgame_ms > 30000) {
+        s.card_ms = now;
+        if (s.host_female) {
+          fable2::cooplobby::InjectPress(static_cast<uint16_t>(fable2::cooplobby::kRight), 0, 200);
+          fable2::cooplobby::InjectPress(static_cast<uint16_t>(fable2::cooplobby::kA), 700, 200);
+        } else {
+          fable2::cooplobby::InjectPress(static_cast<uint16_t>(fable2::cooplobby::kA), 0, 200);
+        }
+        REXSYS_INFO("[coop] host start: picking the {} hero card", s.host_female ? "girl" : "boy");
+      }
+      // 2. Childhood world loaded and its scripts settled: skip to adulthood.
+      if (s.card_ms && !s.skip_ms && now - s.card_ms > 20000 && fable2::f5lua::ready() &&
+          !in_main_menu() && now - fable2::f5lua::g_load_at_ms.load() > 15000) {
+        s.skip_ms = now;
+        REXSYS_INFO("[coop] host start: childhood loaded, skipping to adulthood (QC060)");
+        fable2::luaconsole::RunChunk(
+            "print('[coop] skip: from ' .. tostring(Gameflow.PositionInGameflow) .. ' to ' .. "
+            "tostring(ScriptEnum.DebugQC060)); Gameflow:SetGameflowPosition(ScriptEnum.DebugQC060, true)");
+      }
+      // 3. Adulthood started and settled: the partner may join.
+      if (s.skip_ms && g_qc060_started_ms.load() && now - g_qc060_started_ms.load() > 20000 &&
+          lobby::GetLobbyStatus().in_world) {
         s.s = Session::kHostInWorld;
         s.since_ms = now;
         g_seen_spawn_epoch = fable2::coophero::g_spawn_epoch.load();
@@ -215,7 +259,10 @@ inline void open_chooser() {
   fable2::cooplobby::Callbacks cb;
   cb.solo = on_solo;
   cb.coop = on_coop;
-  cb.back = [] { REXSYS_INFO("[coop] new game chooser: Back"); };
+  cb.back = [] {
+    REXSYS_INFO("[coop] new game chooser: Back");
+    swallow_closing_a();
+  };
   fable2::cooplobby::OpenChooser(cb);
 }
 
@@ -252,14 +299,18 @@ inline bool OnPress(PPCContext& ctx, uint8_t* /*base*/) {
 
   if (mask & kA) {
     if (g_pass_a > 0) {
-      // The injected A (both of its dispatch calls) goes to the stock menu.
+      // The closing (or injected) A, both of its dispatch calls, goes to the
+      // stock menu: New Game starts.
       if (!repeat) {
         --g_pass_a;
-        g_armed = g_row != kNewGameRow;  // the stock New Game is starting
-        REXSYS_INFO("[coop] new game: injected A passed to the stock menu");
+        g_armed = false;
+        REXSYS_INFO("[coop] new game: A passed to the stock New Game");
+        std::lock_guard<std::mutex> l(S().m);
+        if (S().s == Session::kHostStarting && !S().newgame_ms) S().newgame_ms = now;
       }
       return false;
     }
+    if (now < g_swallow_a_until) return true;  // the A that closed a panel with Back
     if (repeat) return g_row == kNewGameRow && g_armed;  // second call of a swallowed press
     if (g_row == kNewGameRow && g_armed) {
       REXSYS_INFO("[coop] new game: A on New Game, showing Solo / Co-op");
@@ -283,11 +334,22 @@ inline bool OnPress(PPCContext& ctx, uint8_t* /*base*/) {
 inline void (*g_prev_frame_hook)() = nullptr;
 inline void OnFrame() {
   if (g_prev_frame_hook) g_prev_frame_hook();
-  if (REXCVAR_GET(coop_campaign)) session_tick();
+  if (!REXCVAR_GET(coop_campaign)) return;
+  // A quick tap released before the next poll: the closing A never reached
+  // the dispatch, so send one.
+  if (g_pass_a > 0 && g_pass_deadline && fable2::f5lua::steady_ms() > g_pass_deadline) {
+    g_pass_deadline = 0;
+    REXSYS_INFO("[coop] new game: closing A did not arrive, injecting one");
+    fable2::cooplobby::InjectPress(static_cast<uint16_t>(fable2::cooplobby::kA), 0, 200);
+  }
+  session_tick();
 }
 
 inline const bool g_installed = [] {
   fable2::fronthooks::g_press_hook = &OnPress;
+  fable2::luaconsole::AddLineHandler("QC060_NewBeginning Starting", [](std::string_view) {
+    g_qc060_started_ms.store(fable2::f5lua::steady_ms());
+  });
   g_prev_frame_hook = fable2::f5lua::g_frame_hook;  // the lobby's (fable2_coop_lobby.h)
   fable2::f5lua::g_frame_hook = &OnFrame;
   return true;

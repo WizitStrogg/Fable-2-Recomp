@@ -63,6 +63,7 @@ struct LobbyRecord {  // published by the host
   std::string cid;      // campaign id (continue only)
   std::string host;     // host's player name
   std::string partner;  // seated partner (new) or the campaign's partner (continue)
+  Gender gender1 = Gender::kMale;  // host's hero (picks the hero card at Start)
   Gender gender2 = Gender::kMale;
   std::string childhood = "skip";
   bool hready = false;
@@ -89,7 +90,7 @@ inline std::string Format(const LobbyRecord& r) {
   s += r.kind == Kind::kNew ? "new" : "continue";
   if (r.kind == Kind::kContinue) s += "|cid=" + Clean(r.cid);
   s += "|host=" + Clean(r.host) + "|partner=" + Clean(r.partner);
-  s += std::string("|gender2=") + GenderChar(r.gender2) + "|childhood=" + Clean(r.childhood);
+  s += std::string("|gender1=") + GenderChar(r.gender1) + "|gender2=" + GenderChar(r.gender2) + "|childhood=" + Clean(r.childhood);
   s += std::string("|hready=") + (r.hready ? "1" : "0") + "|state=" + Clean(r.state);
   return s;
 }
@@ -101,6 +102,7 @@ inline std::optional<LobbyRecord> ParseLobby(std::string_view line) {
   r.cid = (*f)["cid"];
   r.host = (*f)["host"];
   r.partner = (*f)["partner"];
+  r.gender1 = GenderFrom((*f)["gender1"]);
   r.gender2 = GenderFrom((*f)["gender2"]);
   r.childhood = (*f)["childhood"];
   r.hready = (*f)["hready"] == "1";

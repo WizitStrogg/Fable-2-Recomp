@@ -217,7 +217,7 @@ inline void Tick() {
 
 // --- menu rows -------------------------------------------------------------------
 
-enum class Row { kChildhood, kReady, kStart, kBack, kGame, kGender, kLeave, kSolo, kCoop, kJoinOther };
+enum class Row { kChildhood, kReady, kStart, kBack, kGame, kGender, kLeave, kSolo, kCoop, kJoinOther, kHostGender };
 
 struct RowItem {
   Row row;
@@ -238,7 +238,11 @@ inline std::vector<RowItem> rows_locked() {
     const auto& rec = lb.host.rec;
     for (size_t i = 0; i < lb.others.size(); ++i)
       r.push_back({Row::kJoinOther, "Join " + lb.others[i].rec.host + "'s co-op campaign", true, i});
-    if (rec.kind == Kind::kNew) r.push_back({Row::kChildhood, "Childhood: Skip to adulthood"});
+    if (rec.kind == Kind::kNew) {
+      r.push_back({Row::kHostGender, std::string("Your hero: ") +
+                                         (rec.gender1 == Gender::kFemale ? "Female" : "Male")});
+      r.push_back({Row::kChildhood, "Childhood: Skip to adulthood"});
+    }
     r.push_back({Row::kReady, std::string("Ready: ") + (rec.hready ? "Yes" : "No")});
     r.push_back({Row::kStart, "Start", lb.host.state == HostState::kBothReady && lb.host.partner_proto_ok});
     r.push_back({Row::kBack, "Back"});
@@ -317,6 +321,10 @@ inline std::function<void()> act_locked(int dy, int dx, bool a, bool b, bool x) 
         lb.notice = "Joined " + target.rec.host + "'s lobby";
         REXSYS_INFO("[lobby] joining {}'s lobby as partner", target.rec.host);
       }
+      break;
+    case Row::kHostGender:
+      lb.host.rec.gender1 =
+          lb.host.rec.gender1 == Gender::kFemale ? Gender::kMale : Gender::kFemale;
       break;
     case Row::kChildhood:
       break;  // one option for now (Sparrow and Rose is feature 005)
@@ -434,7 +442,8 @@ inline std::string view_locked() {
   if (lb.role == Role::kHost) {
     const auto& rec = lb.host.rec;
     v += "SPlayers\n";
-    v += "L" + rec.host + " (host)  " + ready(rec.hready) + "\n";
+    v += "L" + rec.host + " (host)  " + (rec.gender1 == Gender::kFemale ? "female" : "male") +
+         " hero  " + ready(rec.hready) + "\n";
     if (lb.host.partner_ip)
       v += "L" + rec.partner + "  " + (rec.gender2 == Gender::kFemale ? "female" : "male") +
            " hero  " + ready(lb.host.partner_ready) + "\n";

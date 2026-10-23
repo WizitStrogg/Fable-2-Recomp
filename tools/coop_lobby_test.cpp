@@ -19,7 +19,9 @@ int main() {
   LobbyRecord l;
   l.host = "Josh";
   l.gender2 = Gender::kFemale;
-  CHECK(Format(l) == "COOPLOBBY:v1|kind=new|host=Josh|partner=|gender2=F|childhood=skip|hready=0|state=Hosting");
+  CHECK(Format(l) == "COOPLOBBY:v1|kind=new|host=Josh|partner=|gender1=M|gender2=F|childhood=skip|hready=0|state=Hosting");
+  l.gender1 = Gender::kFemale;
+  CHECK(ParseLobby(Format(l))->gender1 == Gender::kFemale);
   CHECK(ParseLobby(Format(l))->gender2 == Gender::kFemale);
   CHECK(!ParseLobby("COOPLOBBY:v2|kind=new|host=Josh"));
   CHECK(!ParseLobby("COOPLOBBYX:v1|host=Josh"));
