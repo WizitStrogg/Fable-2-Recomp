@@ -31,6 +31,8 @@ with `D:\`.
 - [ ] T005 [P] Rig front-end driving: confirm the remote-control server and `tools/fable2_control.py` work for both instances (separate ports), so lobby flows can run with no human input
 - [x] T006 Back up rig saves to `D:\Fable2-LAN\backups\<time>-001-start\`; hash all solo slots of mod-a and mod-b (baseline for SC-003) → done: `D:\Fable2-LAN\backups\20261023-122842-001-start\` (mod-a/b/c saves, 42 files); baselines `D:\Fable2-LAN\research\001-evidence\hashes\mod-{a,b,c}-baseline-20261023-122842.txt`
 
+- [ ] T006a Graphics fixes (Josh, 2026-10-23, via the graphics thread): once the coordinator passes the systemlink merge id of WizitStrogg/rexglue-sdk PR #1 (7e3 clamp, depth_bias_shader comma list, memexport readback fix), merge systemlink into `coop/001-coop-campaign` in `thirdparty/rexglue-sdk`, update the pointer; in Fable-2-Recomp seed `depth_bias_shader = '014F8A02DB7B19CA,03D91B35ACD56079'` with `depth_bias_shader_units = 64` (`src/core/fable_2_app.h` dog_fur_depth_bias seeding, default `fable_2.toml`); rebuild; confirm on the rig the cvars are present and the game starts
+
 ---
 
 ## Phase 2: Proofs and foundations (blocking)
