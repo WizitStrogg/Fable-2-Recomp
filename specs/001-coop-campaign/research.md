@@ -143,3 +143,15 @@ Rig findings that change the plan:
 - The title prompt ("Press A to start") uses the same dispatch with the same registers while the state probe already says MainMenu, so the front end lets the first A of each front-end visit through.
 - Game-side ImGui dialogs cannot link (ImGui is inside rexruntime.dll); the SDK draws a generic lobby panel from a text view (`rex_ui_set_lobby_view`).
 - `saveuid` stamp in data-model.md: replace with a per-save stamp (decided when T030 is built).
+
+## Rig launches 3-10 (2026-10-23): what each found
+
+- Launch 3: panel's closing A leaked into the menu hook (reopened the chooser). Fixed: closing A passes to New Game (Start/Solo) or is swallowed (Back).
+- Launch 4: skip waited on the state probe, which reports MainMenu inside the world. Fixed: script-load counter.
+- Launch 5: partner's go callback ran under the lobby lock and re-entered it (partner game died). Fixed: callbacks run after unlocking.
+- Launch 6: partner's join prompt A was caught by the front-end hook (started a Solo game). Fixed: hook passes presses during a join.
+- Launch 7: skipping from inside the running childhood leaves QC060 on a black screen waiting for a Bower Lake load (Lua check: BowerLake not loaded, screen faded). Fixed: redirect the new game's own SetGameflowPosition(QC010) to QC060 (src/lua/coop_skip_childhood.lua), the path launch 2 took.
+- Launch 8: the first wrapper run landed before the world's Lua state existed. Fixed: retry every 500 ms.
+- Launch 9: skip verified ("Skipping QC010" -> "QC060_NewBeginning Starting"). Host crashed (write of guest 0x4EADC200) seconds after the partner's join reached it, during QC060's opening.
+- Launch 10: host crashed during QC060's opening with no join at all (read of guest 0x0F), 0.4 s after the v13 own-hero auto-capture Lua ran; in launch 9 the same capture ran 6 s before that crash. So the launch 9 "join crash" was probably this capture, not the join. The capture is now paused during the campaign start (T028b makes it safe everywhere); T028a's rig proof must check whether a join during a cutscene is really unsafe.
+- QC060's own script provides the save call for P6: AutoSaveGame(true, true); and the co-op unlock point: Multiplayer.DisplayCoopScreen() at the end of its opening (the go signal now waits for it).
