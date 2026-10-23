@@ -32,6 +32,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
@@ -58,6 +59,12 @@ REXCVAR_DEFINE_STRING(coop_partner_profile, "", "Network",
                       "profile received from the partner (for testing)");
 REXCVAR_DEFINE_INT32(coop_apply_delay_ms, 1500, "Network",
                      "Delay between the henchman spawning and applying the partner's hero");
+REXCVAR_DEFINE_STRING(coop_story_sync, "ask", "Network",
+                      "After playing in someone else's game, bring their story progress into "
+                      "your own save: 'ask', 'always' or 'never' (forward only)");
+REXCVAR_DEFINE_STRING(coop_story_pending, "", "Network",
+                      "Read-only: the story waiting to be brought into this save "
+                      "('<host> position <n>'), empty if none");
 
 namespace fable2::coophero {
 
@@ -253,8 +260,20 @@ inline void host_apply(const lobby::LobbyStatus& status, int64_t now) {
   }
 }
 
+// Story position inside a COOPSTORY value ("...|pos=<n>|..."), -1 if absent.
+inline int story_pos(std::string_view value) {
+  const auto p = value.find("|pos=");
+  if (p == std::string_view::npos) return -1;
+  return std::atoi(std::string(value.substr(p + 5, 8)).c_str());
+}
+
+inline void set_pending_label(const std::string& label) {
+  rex::cvar::SetFlagByName("coop_story_pending", label);
+}
+
 inline void joiner_story(const lobby::LobbyStatus& status) {
   if (status.joined_host_ip == 0) return;
+  if (REXCVAR_GET(coop_story_sync) == "never") return;
   for (const auto& s : lobby::GetPeerData("story")) {
     if (s.ip != status.joined_host_ip) continue;
     if (s.revision == g_story_rev && s.ip == g_story_ip) return;
@@ -267,18 +286,53 @@ inline void joiner_story(const lobby::LobbyStatus& status) {
       REXSYS_ERROR("[coop] cannot write {}", pending_story_file().string());
       return;
     }
+    const int pos = story_pos(s.value);
     out << "host=" << s.gamertag << "\n"
         << "host_address=" << s.address << "\n"
+        << "host_pos=" << pos << "\n"
         << "received=" << timestamp() << "\n"
         << "revision=" << s.revision << "\n"
         << s.value << "\n";
-    REXSYS_INFO("[coop] saved {}'s story (rev {}) to {}", s.gamertag, s.revision,
-                pending_story_file().string());
+    set_pending_label(s.gamertag + " position " + std::to_string(pos));
+    REXSYS_INFO("[coop] saved {}'s story (position {}, rev {}) to {}", s.gamertag, pos,
+                s.revision, pending_story_file().string());
     return;
   }
 }
 
+inline void CmdStoryDiscard(std::string_view) {
+  std::error_code ec;
+  std::filesystem::remove(pending_story_file(), ec);
+  set_pending_label("");
+  REXSYS_INFO("[coop] pending story discarded");
+}
+
+inline void CmdStoryApply(std::string_view) {
+  // Applying needs this PC's own save loaded and the forward-only check
+  // against its Gameflow position (research/03-story-sync.md); not built yet.
+  REXSYS_WARN("[coop] bringing the host's story into this save is not available yet; "
+              "the pending story is kept");
+}
+
+// Shows a pending story left from an earlier session (F6 reads the cvar).
+inline void load_pending_label() {
+  std::ifstream in(pending_story_file());
+  if (!in) return;
+  std::string line, host, pos;
+  while (std::getline(in, line)) {
+    if (line.rfind("host=", 0) == 0) host = line.substr(5);
+    if (line.rfind("host_pos=", 0) == 0) pos = line.substr(9);
+  }
+  if (!host.empty()) set_pending_label(host + " position " + pos);
+}
+
+inline bool g_pending_label_loaded = false;
+
 inline void OnFrame() {
+  if (!g_pending_label_loaded) {
+    g_pending_label_loaded = true;
+    load_pending_label();
+  }
   const int64_t now = now_ms();
   if (now < g_next_check_ms) return;
   g_next_check_ms = now + kCheckEveryMs;
@@ -336,6 +390,10 @@ inline const bool g_installed = Install();
 
 }  // namespace fable2::coophero
 
+REXCVAR_DEFINE_COMMAND_ARGS(coop_story_apply, fable2::coophero::CmdStoryApply, "Network",
+                            "Bring the pending story from the co-op host into this save");
+REXCVAR_DEFINE_COMMAND_ARGS(coop_story_discard, fable2::coophero::CmdStoryDiscard, "Network",
+                            "Forget the pending story from the co-op host");
 REXCVAR_DEFINE_COMMAND_ARGS(coop_apply, fable2::coophero::CmdCoopApply, "Network",
                             "Apply a hero to the co-op henchman: no argument = the partner's, "
                             "'own' = this PC's last coop_capture, or a COOPHERO line");
