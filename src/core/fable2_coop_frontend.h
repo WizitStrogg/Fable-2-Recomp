@@ -104,6 +104,8 @@ struct SessionState {
 inline std::atomic<int64_t> g_qc060_started_ms{0};  // "QC060_NewBeginning Starting" printed
 inline std::atomic<bool> g_skip_installed{false};      // coop_skip_childhood.lua took
 inline std::atomic<bool> g_childhood_started{false};   // the game moved to QC010 itself
+inline std::atomic<int64_t> g_coop_screen_ms{0};       // QC060's co-op introduction finished
+inline std::atomic<bool> g_coop_screen_hook_failed{false};
 inline SessionState& S() {
   static SessionState s;
   return s;
@@ -138,6 +140,8 @@ inline void on_host_start() {
     g_qc060_started_ms.store(0);
     g_skip_installed.store(false);
     g_childhood_started.store(false);
+    g_coop_screen_ms.store(0);
+    g_coop_screen_hook_failed.store(false);
     REXSYS_INFO("[coop] host start: campaign {} with {}, host hero {}", S().cid, S().partner_name,
                 S().host_female ? "female" : "male");
   }
@@ -193,7 +197,7 @@ inline void session_tick() {
   std::lock_guard<std::mutex> l(S().m);
   auto& s = S();
   switch (s.s) {
-    case Session::kHostStarting:
+    case Session::kHostStarting: {
       // 1. The stock hero cards come up ~20 s after New Game: pick the card
       //    the host chose in the lobby (boy is selected first; Right = girl).
       if (s.newgame_ms && !s.card_ms && now - s.newgame_ms > 30000) {
@@ -227,7 +231,15 @@ inline void session_tick() {
         }
       }
       // 3. Adulthood started and settled: the partner may join.
-      if (g_skip_installed.load() && g_qc060_started_ms.load() && now - g_qc060_started_ms.load() > 20000 &&
+      // Only after QC060's opening (autosave, movie, the game's own co-op
+      // screen) is the world ready for a partner: a join during the opening
+      // crashed the host (launch 9). Fallback if the screen hook failed.
+      const int64_t ready_ms =
+          g_coop_screen_ms.load() ? g_coop_screen_ms.load() + 10000
+          : (g_coop_screen_hook_failed.load() && g_qc060_started_ms.load())
+              ? g_qc060_started_ms.load() + 150000
+              : 0;
+      if (g_skip_installed.load() && ready_ms && now > ready_ms &&
           lobby::GetLobbyStatus().in_world) {
         s.s = Session::kHostInWorld;
         s.since_ms = now;
@@ -237,6 +249,7 @@ inline void session_tick() {
         REXSYS_INFO("[coop] host world up: published {}", go);
       }
       break;
+    }
     case Session::kHostInWorld: {
       if (!s.partner_spawned && fable2::coophero::g_spawn_epoch.load() != g_seen_spawn_epoch) {
         s.partner_spawned = true;
@@ -414,6 +427,11 @@ inline const bool g_installed = [] {
   fable2::luaconsole::AddLineHandler("QC060_NewBeginning Starting", [](std::string_view) {
     g_qc060_started_ms.store(fable2::f5lua::steady_ms());
   });
+  fable2::luaconsole::AddLineHandler("[coop] skip: co-op screen done", [](std::string_view) {
+    g_coop_screen_ms.store(fable2::f5lua::steady_ms());
+  });
+  fable2::luaconsole::AddLineHandler("[coop] skip: co-op screen hook failed",
+                                     [](std::string_view) { g_coop_screen_hook_failed.store(true); });
   fable2::luaconsole::AddLineHandler("[coop] skip: wrapper installed",
                                      [](std::string_view) { g_skip_installed.store(true); });
   fable2::luaconsole::AddLineHandler("Skipping gameflow to 1", [](std::string_view) {

@@ -33,3 +33,19 @@ local wrapped_own = Gameflow and wrap(Gameflow)
 CoopSkipInstalled = true
 print("[coop] skip: wrapper installed (base " .. tostring(wrapped_base) .. ", own " ..
   tostring(wrapped_own) .. ") at gameflow position " .. tostring(where))
+
+-- QC060's opening ends with Multiplayer.DisplayCoopScreen(), the game's own
+-- co-op introduction; only after it is the adult world ready for a partner
+-- (rig launch 9: a join during the opening crashed the host). Report it.
+if not CoopScreenWrapped and Multiplayer and Multiplayer.DisplayCoopScreen then
+  local ok, err = pcall(function()
+    local orig = Multiplayer.DisplayCoopScreen
+    Multiplayer.DisplayCoopScreen = function(...)
+      local r = { orig(...) }
+      print("[coop] skip: co-op screen done, adulthood ready for the partner")
+      return unpack(r)
+    end
+  end)
+  CoopScreenWrapped = ok
+  print("[coop] skip: co-op screen hook " .. (ok and "installed" or ("failed: " .. tostring(err))))
+end
