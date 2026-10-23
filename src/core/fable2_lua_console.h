@@ -152,15 +152,12 @@ inline bool not_ready_warning() {
   return true;
 }
 
-inline void CmdLua(std::string_view args) {
-  const std::string chunk = trim(args);
-  if (chunk.empty()) {
-    REXSYS_INFO("lua: usage: lua <chunk>   (lua =<expr> prints a value)");
-    return;
-  }
+// Queues a Lua chunk to run in the game (same path as the `lua` command).
+// Callable from any thread. Returns false if it could not be queued.
+inline bool RunChunk(const std::string& chunk) {
   if (fable2::f5lua::g_data_root.empty()) {
     REXSYS_ERROR("lua: game data folder not known yet");
-    return;
+    return false;
   }
   const int slot = g_next_slot.fetch_add(1) % kSlots;
   const std::string name = "console_" + std::to_string(slot) + ".lua";
@@ -169,12 +166,22 @@ inline void CmdLua(std::string_view args) {
     std::ofstream out(file, std::ios::binary | std::ios::trunc);
     if (!out) {
       REXSYS_ERROR("lua: cannot write {}", file.string());
-      return;
+      return false;
     }
     out << wrap_chunk(chunk);
   }
   not_ready_warning();
   fable2::f5lua::request_run("scripts/recomp/" + name);
+  return true;
+}
+
+inline void CmdLua(std::string_view args) {
+  const std::string chunk = trim(args);
+  if (chunk.empty()) {
+    REXSYS_INFO("lua: usage: lua <chunk>   (lua =<expr> prints a value)");
+    return;
+  }
+  RunChunk(chunk);
 }
 
 inline void CmdLuaFile(std::string_view args) {

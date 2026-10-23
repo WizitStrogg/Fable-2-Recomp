@@ -264,7 +264,12 @@ inline bool run_external(PPCContext& ctx, uint8_t* base, const std::string& path
 // Per-frame entry point. Called from the MainRenderLoop_82B9CD68 hook (in
 // fps_meter.h). Runs the external file when F5 is latched. This makes F5
 // responsive (fires on the very next frame).
+// Optional per-frame callback (guest main thread), e.g. the co-op module
+// deciding to queue a script. Must not call guest code itself.
+inline void (*g_frame_hook)() = nullptr;
+
 inline void poll_mainloop(PPCContext& ctx, uint8_t* base) {
+  if (g_frame_hook) g_frame_hook();
   std::string path;
   if (g_f5_pending.exchange(false)) {
     path = REXCVAR_GET(f5_lua_path);

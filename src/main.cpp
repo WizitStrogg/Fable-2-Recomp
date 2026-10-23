@@ -7,6 +7,8 @@
 #include "fable2_f5_lua.h"
 // `lua` / `luafile` console commands + Lua print() capture (uses the F5 runner).
 #include "fable2_lua_console.h"
+// Co-op: apply the partner's own hero to the henchman (coop_apply, spawn hook).
+#include "fable2_coop_hero.h"
 
 #include "fable_2_app.h"
 #include "fps_meter.h"
