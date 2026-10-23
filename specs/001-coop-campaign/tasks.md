@@ -24,12 +24,12 @@ with `D:\`.
 
 ## Phase 1: Setup
 
-- [ ] T001 Create branch `coop/001-coop-campaign` from `systemlink` in `Fable-2-Recomp` and `thirdparty/rexglue-sdk`; commit `.specify/`, `.claude/skills/speckit-*`, `CLAUDE.md` and `specs/` as the first commit; push both branches to the WizitStrogg forks
-- [ ] T002 [P] Create `D:\Fable2-LAN\research\001-evidence\` with a `README.txt` index
-- [ ] T003 [P] Write `tools/coop_diff.py` (diff two `COOPHERO` lines, exit 1 on difference)
-- [ ] T004 [P] Write `D:\Fable2-LAN\tools\hash_slots.ps1`: SHA-256 of every file in every save slot of an instance, to a dated text file; compare mode
+- [x] T001 Create branch `coop/001-coop-campaign` from `systemlink` in `Fable-2-Recomp` and `thirdparty/rexglue-sdk`; commit `.specify/`, `.claude/skills/speckit-*`, `CLAUDE.md` and `specs/` as the first commit; push both branches to the WizitStrogg forks → done 2026-10-23: branches pushed to WizitStrogg forks (Fable-2-Recomp 8a511f9; SDK fast-forwarded to systemlink tip e23c647, the v13 source, pointer commit 8bf0c41)
+- [x] T002 [P] Create `D:\Fable2-LAN\research\001-evidence\` with a `README.txt` index → done: `D:\Fable2-LANesearch-evidence\README.txt`
+- [x] T003 [P] Write `tools/coop_diff.py` (diff two `COOPHERO` lines, exit 1 on difference) → done: field-by-field diff of v1/v2 lines (numbers by value), exit 0/1/2; self-tested
+- [x] T004 [P] Write `D:\Fable2-LAN\tools\hash_slots.ps1`: SHA-256 of every file in every save slot of an instance, to a dated text file; compare mode → done: `hash` and `compare` modes; compare fails only on changes to pre-existing HeroNNN slots (new slots and profile/achievement files are notes); self-tested
 - [ ] T005 [P] Rig front-end driving: confirm the remote-control server and `tools/fable2_control.py` work for both instances (separate ports), so lobby flows can run with no human input
-- [ ] T006 Back up rig saves to `D:\Fable2-LAN\backups\<time>-001-start\`; hash all solo slots of mod-a and mod-b (baseline for SC-003)
+- [x] T006 Back up rig saves to `D:\Fable2-LAN\backups\<time>-001-start\`; hash all solo slots of mod-a and mod-b (baseline for SC-003) → done: `D:\Fable2-LANackups61023-122842-001-start\` (mod-a/b/c saves, 42 files); baselines `research-evidence\hashes\mod-{a,b,c}-baseline-20261023-122842.txt`
 
 ---
 
