@@ -52,6 +52,18 @@ def rig_pids(name: str) -> list:
     return pids
 
 
+def other_games() -> list:
+    """fable_2.exe processes not started from a rig instance (another thread's
+    rig or Josh playing). The rig waits while any is running."""
+    out = subprocess.run(
+        ["powershell", "-NoProfile", "-Command",
+         "Get-CimInstance Win32_Process -Filter \"Name='fable_2.exe'\" | "
+         "ForEach-Object { \"$($_.ProcessId)|$($_.ExecutablePath)\" }"],
+        capture_output=True, text=True).stdout
+    rig = {os.path.join(instance_dir(n), "fable_2.exe").lower() for n in INSTANCES}
+    return [line for line in out.splitlines() if line.partition("|")[2].strip().lower() not in rig]
+
+
 def newest_log(name: str):
     d = os.path.join(instance_dir(name), "logs")
     logs = [os.path.join(d, f) for f in os.listdir(d) if f.endswith(".log")]
@@ -75,6 +87,9 @@ class Instance:
     def start(self, trace: bool = False, timeout: float = 120.0, env_extra=None):
         if rig_pids(self.name):
             raise RuntimeError(f"{self.name}: already running")
+        others = other_games()
+        if others:
+            raise RuntimeError(f"another game is running, not starting: {others}")
         env = dict(os.environ)
         if trace:
             env.update(FABLE2_FUNC_TRACE="1", FABLE2_FUNC_TRACE_LOG="0",
