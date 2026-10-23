@@ -92,6 +92,11 @@ struct SessionState {
   int64_t since_ms = 0;
   bool partner_spawned = false;
   bool host_female = false;
+  bool quit_sent = false;  // host after a partner loss: QuitToFrontEnd requested
+  // Partner: the host to join, the last join attempt, and since when joined.
+  uint32_t host_ip = 0;
+  int64_t last_try_ms = 0, joined_since_ms = 0;
+  int tries = 0;
   // Start -> stock New Game -> hero card -> childhood -> skip to QC060 (T021)
   int64_t newgame_ms = 0, card_ms = 0, skip_ms = 0;
   uint32_t load_epoch = 0;  // first game script load after the card pick
@@ -137,15 +142,21 @@ inline void on_host_start() {
 }
 
 // Partner: the host's world is up. Join it (the F9 path, proven by P3).
+// Partner: the host's world is up. The join itself happens in session_tick:
+// only while the host's session says it has a free slot, and again every
+// 15 s if the host refuses (launch 7: the host was still in QC060's opening
+// and answered the join with a refusal).
 inline void on_partner_go(uint32_t ip) {
   {
     std::lock_guard<std::mutex> l(S().m);
     S().s = Session::kPartnerJoining;
     S().since_ms = fable2::f5lua::steady_ms();
+    S().host_ip = ip;
+    S().last_try_ms = S().joined_since_ms = 0;
+    S().tries = 0;
   }
   fable2::cooplobby::Close();
-  const bool ok = lobby::JoinLanPeer(ip);
-  REXSYS_INFO("[coop] partner: joining host {:08X}: {}", ip, ok ? "started" : "no joinable game");
+  REXSYS_INFO("[coop] partner: go from host {:08X}, joining when its game is joinable", ip);
 }
 
 inline void open_host_lobby(fable2::cooplobby::Kind kind, const std::string& cid,
@@ -191,20 +202,17 @@ inline void session_tick() {
         }
         REXSYS_INFO("[coop] host start: picking the {} hero card", s.host_female ? "girl" : "boy");
       }
-      // 2. Childhood world loaded (a game script load after the card) and
-      //    settled: skip to adulthood. The state probe still says MainMenu in
-      //    the world, so the load counter decides. The childhood runs while
-      //    the gameflow waits at QC060, so asking for QC060 ends the childhood
-      //    and starts QC060 normally (launch 4, P2STATE gfpos=8).
+      // 2. The new game's scripts are up (the first game script load after the
+      //    card; the state probe still says MainMenu in the world): install
+      //    the skip at once, before the gameflow leaves GAMEFLOW_START (about
+      //    10 s later, launch 5). See coop_skip_childhood.lua for why it must
+      //    not be skipped from inside the running childhood.
       if (s.card_ms && !s.load_epoch) s.load_epoch = fable2::f5lua::g_load_epoch.load() + 1;
       if (s.card_ms && !s.skip_ms && fable2::f5lua::ready() &&
-          fable2::f5lua::g_load_epoch.load() >= s.load_epoch &&
-          now - fable2::f5lua::g_load_at_ms.load() > 15000) {
+          fable2::f5lua::g_load_epoch.load() >= s.load_epoch) {
         s.skip_ms = now;
-        REXSYS_INFO("[coop] host start: childhood loaded, skipping to adulthood (QC060)");
-        fable2::luaconsole::RunChunk(
-            "print('[coop] skip: from ' .. tostring(Gameflow.PositionInGameflow) .. ' to ' .. "
-            "tostring(ScriptEnum.DebugQC060)); Gameflow:SetGameflowPosition(ScriptEnum.DebugQC060, true)");
+        REXSYS_INFO("[coop] host start: new game scripts up, installing the skip to adulthood (QC060)");
+        fable2::luaconsole::RunFile("coop_skip_childhood.lua");
       }
       // 3. Adulthood started and settled: the partner may join.
       if (s.skip_ms && g_qc060_started_ms.load() && now - g_qc060_started_ms.load() > 20000 &&
@@ -229,20 +237,26 @@ inline void session_tick() {
       for (const auto& p : lobby::GetLanPeers())
         if (p.ip == s.partner_ip) quiet = p.seconds_since_seen;
       if (quiet < 0 || quiet > 6) {
-        // Partner lost (proof P6). Saving first is the next step (the save
-        // routine is found by tracing a pause-menu save); here: back to the
-        // front end and wait in the campaign's lobby.
-        REXSYS_INFO("[coop] host: partner {} lost (quiet {} s), returning to the front end",
-                    s.partner_name, quiet);
+        // Partner lost (proof P6): save with the game's own autosave call
+        // (QC060 uses AutoSaveGame(true, true)), then, once it has had time
+        // to finish, back to the front end to wait in the campaign's lobby.
+        REXSYS_INFO("[coop] host: partner {} lost (quiet {} s), saving", s.partner_name, quiet);
         s.s = Session::kHostPartnerLost;
         s.since_ms = now;
+        s.quit_sent = false;
         fable2::luaconsole::RunChunk(
-            "print('[coop] QuitToFrontEnd: ' .. tostring(pcall(Debug.QuitToFrontEnd)))");
+            "print('[coop] AutoSaveGame: ' .. tostring(pcall(AutoSaveGame, true, true)))");
       }
       break;
     }
     case Session::kHostPartnerLost:
-      if (!lobby::GetLobbyStatus().in_world && in_main_menu() && now - s.since_ms > 3000) {
+      if (!s.quit_sent && now - s.since_ms > 10000) {
+        s.quit_sent = true;
+        REXSYS_INFO("[coop] host: returning to the front end");
+        fable2::luaconsole::RunChunk(
+            "print('[coop] QuitToFrontEnd: ' .. tostring(pcall(Debug.QuitToFrontEnd)))");
+      }
+      if (s.quit_sent && !lobby::GetLobbyStatus().in_world && in_main_menu() && now - s.since_ms > 13000) {
         REXSYS_INFO("[coop] host: back at the front end, waiting for {} in the lobby", s.partner_name);
         s.s = Session::kNone;
         after = [cid = s.cid, partner = s.partner_name] {
@@ -250,16 +264,36 @@ inline void session_tick() {
         };
       }
       break;
-    case Session::kPartnerJoining:
+    case Session::kPartnerJoining: {
+      // Joined only counts once it holds for 10 s (a refused join shows the
+      // joined state for a few milliseconds).
       if (lobby::GetLobbyStatus().joined_host_ip) {
-        REXSYS_INFO("[coop] partner: in the host's world");
+        if (!s.joined_since_ms) s.joined_since_ms = now;
+        if (now - s.joined_since_ms > 10000) {
+          REXSYS_INFO("[coop] partner: in the host's world (after {} attempt(s))", s.tries);
+          s.s = Session::kNone;
+          g_armed = false;  // in the host's world: pause-menu presses are not New Game
+        }
+        break;
+      }
+      s.joined_since_ms = 0;
+      if (now - s.since_ms > 300000) {
+        REXSYS_INFO("[coop] partner: no join in 5 min ({} attempt(s)), giving up", s.tries);
         s.s = Session::kNone;
-        g_armed = false;  // in the host's world: pause-menu presses are not New Game
-      } else if (now - s.since_ms > 120000) {
-        REXSYS_INFO("[coop] partner: join did not complete in 2 min, back to the menu");
-        s.s = Session::kNone;
+        break;
+      }
+      bool joinable = false;
+      for (const auto& p : lobby::GetLanPeers())
+        if (p.ip == s.host_ip) joinable = p.in_world && p.joinable;
+      if (joinable && now - s.last_try_ms > 15000) {
+        s.last_try_ms = now;
+        ++s.tries;
+        const bool ok = lobby::JoinLanPeer(s.host_ip);
+        REXSYS_INFO("[coop] partner: join attempt {} to {:08X}: {}", s.tries, s.host_ip,
+                    ok ? "started" : "no joinable game");
       }
       break;
+    }
     case Session::kNone:
       break;
   }
