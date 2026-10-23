@@ -82,7 +82,15 @@ inline std::string& pending_line() {
 inline void emit_line(std::string line) {
   while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
   if (line.empty()) return;
-  REXSYS_INFO("[lua] {}", line);
+  // Our own scripts' output and the co-op lines go to the console; anything
+  // else the game's scripts print only to the log file.
+  const bool ours = fable2::f5lua::g_running.load() || line.rfind("COOP", 0) == 0 ||
+                    line.rfind("[coop", 0) == 0 || line.rfind("[lua error]", 0) == 0;
+  if (ours) {
+    REXSYS_INFO("[lua] {}", line);
+  } else {
+    REXSYS_DEBUG("[lua] {}", line);
+  }
   std::vector<LineHandler> matched;
   {
     std::lock_guard<std::mutex> l(mtx());
@@ -227,12 +235,31 @@ REXCVAR_DEFINE_COMMAND_ARGS(lua, fable2::luaconsole::CmdLua, "Lua",
 REXCVAR_DEFINE_COMMAND_ARGS(luafile, fable2::luaconsole::CmdLuaFile, "Lua",
                             "Run data/scripts/recomp/<name>.lua in the game");
 
+namespace fable2::luaconsole {
+// Set while the stock Lua print runs on this thread: all its fputs output is
+// print text, whatever FILE* it passes.
+inline thread_local bool g_in_print = false;
+}  // namespace fable2::luaconsole
+
+// The engine replaces the Lua globals print / cprint / _ALERT with its own C
+// function (registered by sub_82A19EB0 via lua_pushcclosure 0x8219AB28 and
+// lua_setfield 0x82A1EC08). In this retail build it formats the text and then
+// discards it, so nothing printed by Lua ever reached stdout. Route it to the
+// game VM's stock luaB_print (sub_82A20768, "'tostring' must return a string to
+// 'print'"), which writes through fputs below. Same lua_CFunction contract.
+extern "C" void sub_82A20768(PPCContext& ctx, uint8_t* base);
+extern "C" void sub_82A19CD8(PPCContext& ctx, uint8_t* base) {
+  fable2::luaconsole::g_in_print = true;
+  sub_82A20768(ctx, base);
+  fable2::luaconsole::g_in_print = false;
+}
+
 // CRT fputs(const char* str, FILE* stream). Lua print() writes through it to
 // stdout; capture that text, then let the original run.
 extern "C" void __imp__sub_82CA89A0(PPCContext& ctx, uint8_t* base);
 extern "C" void sub_82CA89A0(PPCContext& ctx, uint8_t* base) {
   namespace ta = fable2::textappend;
-  if (ctx.r4.u32 == fable2::luaconsole::kGuestStdout) {
+  if (ctx.r4.u32 == fable2::luaconsole::kGuestStdout || fable2::luaconsole::g_in_print) {
     const uint32_t str = ctx.r3.u32;
     if (str != 0 && ta::rdable2(base, str, 1)) {
       const char* p = reinterpret_cast<const char*>(ta::host_addr(base, str));
