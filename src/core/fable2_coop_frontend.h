@@ -29,6 +29,7 @@
 
 #include "fable2_coop_campaign.h"
 #include "fable2_coop_lobby.h"
+#include "fable2_coop_template.h"
 #include "fable2_front_hooks.h"
 #include "../diagnostics/fable2_state_probe.h"
 
@@ -100,6 +101,10 @@ struct SessionState {
   // Start -> stock New Game -> hero card -> childhood -> skip to QC060 (T021)
   int64_t newgame_ms = 0, card_ms = 0, skip_ms = 0;
   uint32_t load_epoch = 0;  // first game script load after the card pick
+  // Starter-save start (default): the slot made from the template, its gender,
+  // and when the loaded world was first seen settled.
+  bool from_template = false, template_female = false, gender_sent = false;
+  std::string slot_name;
 };
 inline std::atomic<int64_t> g_qc060_started_ms{0};  // "QC060_NewBeginning Starting" printed
 inline std::atomic<bool> g_skip_installed{false};      // coop_skip_childhood.lua took
@@ -124,6 +129,24 @@ inline std::string new_campaign_id() {
 // lobby's gender, the childhood world, then the game's own gameflow skip to
 // QC060 (session_tick); the partner is sent coop_go once adulthood starts.
 inline void on_host_start() {
+  // Default start: the starter save. Make the campaign slot first; if that
+  // fails the lobby stays open and says why.
+  std::optional<fable2::cooptemplate::NewSlot> slot;
+  std::optional<fable2::cooptemplate::TemplateInfo> tmpl;
+  const bool from_template = !REXCVAR_GET(coop_childhood_skip);
+  if (from_template) {
+    std::string error;
+    tmpl = fable2::cooptemplate::ReadTemplate();
+    slot = fable2::cooptemplate::CreateCampaignSlot(&error);
+    if (!slot) {
+      auto& lb = fable2::cooplobby::L();
+      std::lock_guard<std::mutex> l(lb.m);
+      lb.host.state = fable2::cooplobby::HostState::kBothReady;
+      lb.host.rec.state = fable2::cooplobby::Name(lb.host.state);
+      lb.notice = "Cannot start: " + error;
+      return;
+    }
+  }
   {
     auto& lb = fable2::cooplobby::L();
     std::lock_guard<std::mutex> l1(lb.m);
@@ -143,11 +166,25 @@ inline void on_host_start() {
     g_coop_screen_ms.store(0);
     g_coop_screen_hook_failed.store(false);
     fable2::coophero::g_capture_paused.store(true);  // until the adult world is ready
-    REXSYS_INFO("[coop] host start: campaign {} with {}, host hero {}", S().cid, S().partner_name,
-                S().host_female ? "female" : "male");
+    S().from_template = from_template;
+    S().template_female = tmpl && tmpl->female;
+    S().gender_sent = false;
+    S().slot_name = slot ? slot->name : "";
+    S().load_epoch = fable2::f5lua::g_load_epoch.load() + 1;  // the world load that follows
+    REXSYS_INFO("[coop] host start: campaign {} with {}, host hero {}, {}", S().cid, S().partner_name,
+                S().host_female ? "female" : "male",
+                from_template ? "starter save " + S().slot_name : std::string("gameflow skip"));
   }
   fable2::cooplobby::HidePanel();
-  pass_next_a_to_new_game();
+  if (from_template) {
+    // Continue loads the newest save, which is the new slot: the panel's
+    // closing A is swallowed, then Down (cursor to Continue) and A.
+    swallow_closing_a();
+    fable2::cooplobby::InjectPress(static_cast<uint16_t>(fable2::cooplobby::kDown), 700, 200);
+    fable2::cooplobby::InjectPress(static_cast<uint16_t>(fable2::cooplobby::kA), 1400, 200);
+  } else {
+    pass_next_a_to_new_game();
+  }
 }
 
 // Partner: the host's world is up. Join it (the F9 path, proven by P3).
@@ -199,6 +236,34 @@ inline void session_tick() {
   auto& s = S();
   switch (s.s) {
     case Session::kHostStarting: {
+      if (s.from_template) {
+        // The starter save's world loads, settles, gets the lobby's gender,
+        // then the partner may join (the template is past QC060's opening).
+        const bool loaded = fable2::f5lua::ready() &&
+                            fable2::f5lua::g_load_epoch.load() >= s.load_epoch &&
+                            lobby::GetLobbyStatus().in_world;
+        const int64_t settled = now - fable2::f5lua::g_load_at_ms.load();
+        if (loaded && settled > 10000 && !s.gender_sent) {
+          s.gender_sent = true;
+          if (s.host_female != s.template_female) {
+            REXSYS_INFO("[coop] host start: hero gender {} -> {}", s.template_female ? "F" : "M",
+                        s.host_female ? "F" : "M");
+            fable2::luaconsole::RunChunk(std::string(
+                "print('[coop] hero gender: ' .. tostring(pcall(Player.ChangePlayerEntityType, GetPlayerHero(), '") +
+                (s.host_female ? "CreatureHeroFemale" : "CreatureHero") + "')))");
+          }
+        }
+        if (loaded && settled > 20000 && s.gender_sent) {
+          s.s = Session::kHostInWorld;
+          s.since_ms = now;
+          g_seen_spawn_epoch = fable2::coophero::g_spawn_epoch.load();
+          const std::string go = fable2::cooplobby::Format(fable2::cooplobby::GoRecord{s.cid, ++s.go_seq});
+          lobby::PublishData("coop_go", go);
+          REXSYS_INFO("[coop] host world up (starter save {}): published {}", s.slot_name, go);
+          fable2::coophero::g_capture_paused.store(false);
+        }
+        break;
+      }
       // 1. The stock hero cards come up ~20 s after New Game: pick the card
       //    the host chose in the lobby (boy is selected first; Right = girl).
       if (s.newgame_ms && !s.card_ms && now - s.newgame_ms > 30000) {

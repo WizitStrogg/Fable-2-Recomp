@@ -68,7 +68,7 @@ switches to its fallback; only a failed fallback is raised to Josh.
 **Independent Test**: rig: A creates, B joins, both arrive at the adult start, B's gender as chosen, marker on A, solo slots unchanged
 
 - [ ] T020 [US1] Lobby `new` flow: host advertises, partner lists and seats, gender and childhood choices, ready states, host-only Start (`fable2_coop_lobby.h`)
-- [ ] T021 [US1] Start: host runs the original New Game, then the skip to adulthood (`data/scripts/recomp/coop_campaign.lua`) per P2, with defaults for anything the skip misses
+- [ ] T021 [US1] Start: host runs the original New Game, then the skip to adulthood (`data/scripts/recomp/coop_campaign.lua`) per P2, with defaults for anything the skip misses → (changed 2026-10-23, research.md "P2 -> fallback A") Start copies the starter-save template into the next HeroNNN and Continue loads it; the gameflow skip is kept behind coop_childhood_skip (off). Waiting for Josh's childhood playthrough in mod-c for the template.
 - [ ] T022 [US1] Partner join after `coop_go` via the P3 path; player 2 spawned as `CreatureHero`/`CreatureHeroFemale` per the chosen gender (v13 selector override)
 - [ ] T023 [US1] Write `coop_campaign.toml` after the first successful save with both in the world (`fable2_coop_campaign.h`)
 - [ ] T024 [US1] Rig verification, 3 runs: full flow driven by `fable2_control.py`; screenshots of lobby and both worlds; marker contents; solo slot hashes unchanged
