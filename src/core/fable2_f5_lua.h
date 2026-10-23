@@ -45,6 +45,7 @@
 #include <algorithm>
 #include <deque>
 #include <filesystem>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <utility>
@@ -345,9 +346,42 @@ inline size_t queued_count() {
   return g_queue.size() + (g_f5_pending.load() ? 1 : 0);
 }
 
+// Native tasks: host code that must call guest functions on the script VM
+// thread at a safe point (same points and guards as queued scripts).
+using NativeTask = std::function<void(PPCContext&, uint8_t*)>;
+inline std::mutex g_native_mtx;
+inline std::deque<NativeTask> g_native_tasks;
+inline std::atomic<size_t> g_native_count{0};
+inline void request_native(NativeTask task) {
+  std::lock_guard<std::mutex> l(g_native_mtx);
+  g_native_tasks.push_back(std::move(task));
+  g_native_count.store(g_native_tasks.size());
+}
+inline void run_native(PPCContext& ctx, uint8_t* base) {
+  if (g_native_count.load() == 0 || g_running.load()) return;
+  if (g_lua_thread.load() != current_thread_id()) return;
+  NativeTask task;
+  {
+    std::lock_guard<std::mutex> l(g_native_mtx);
+    if (g_native_tasks.empty()) return;
+    task = std::move(g_native_tasks.front());
+    g_native_tasks.pop_front();
+    g_native_count.store(g_native_tasks.size());
+  }
+  g_running = true;
+  const PPCContext saved = ctx;
+  try {
+    task(ctx, base);
+  } catch (...) {
+  }
+  ctx = saved;
+  g_running = false;
+}
+
 // Called by the dispatcher probe after the game's own call returned, at
 // dispatch depth 0. Runs the F5 file when latched, otherwise one queued script.
 inline void run_pending(PPCContext& ctx, uint8_t* base, const std::string& via) {
+  run_native(ctx, base);
   if (g_running.load() || (g_queued.load() == 0 && !g_f5_pending.load())) return;
   if (!REXCVAR_GET(coop_lua_runner)) {
     std::lock_guard<std::mutex> l(g_queue_mtx);

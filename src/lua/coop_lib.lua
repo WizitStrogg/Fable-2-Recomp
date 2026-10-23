@@ -39,18 +39,19 @@ local XP_TYPES = {
   EExperienceType.EXPERIENCE_WILL
 }
 
--- GetID can return a userdata (not a plain number) in this build; only plain
--- numbers fit the profile line, so anything else is skipped (noted once).
-local noted_id_type = false
+-- Item record ids are light userdata; tostring() shows the 32-bit id
+-- ("userdata: BD511D47"). The profile carries those 8 hex digits, and the apply
+-- turns them back into a record with GDB.GetRecord("#BD511D47") (the recomp
+-- resolves "#" names to the id itself, see fable2_coop_hero.h).
 local function record_id(item)
   local id = try("GetRecord", function() return item:GetRecord():GetID() end)
-  if type(id) == "number" then return id end
-  local n = tonumber(tostring(id))
-  if n then return n end
-  if id ~= nil and not noted_id_type then
-    noted_id_type = true
-    print("[coop] note: item record id is a " .. type(id) .. " (" .. tostring(id) .. "), skipped")
-  end
+  if id == nil then return nil end
+  local hex = tostring(id):match("(%x%x%x%x%x%x%x%x)%s*$")
+  return hex and hex:upper() or nil
+end
+
+local function id_from_hex(hex)
+  return try("GDB.GetRecord #" .. hex, function() return GDB.GetRecord("#" .. hex):GetID() end)
 end
 
 function CoopHero.Capture(entity)
@@ -67,7 +68,8 @@ function CoopHero.Capture(entity)
   for name, value in pairs(EHeroAbilityType) do
     if type(value) == "number" then
       local level = try("GetHeroAbilityLevel " .. name, Stats.GetHeroAbilityLevel, entity, value)
-      if level and level > 0 then
+      -- One enum entry is not a real ability and reads back garbage.
+      if level and level > 0 and level <= 10 then
         p.ab[#p.ab + 1] = {value, level}
       end
     end
@@ -117,8 +119,8 @@ function CoopHero.Parse(line)
   for _, k in ipairs({"mor", "pur", "fat", "str", "skl", "wil", "ren"}) do p[k] = tonumber(f[k]) end
   for a, l in (f.ab or ""):gmatch("(%-?%d+):(%-?%d+)") do p.ab[#p.ab + 1] = {tonumber(a), tonumber(l)} end
   for v in (f.xp or ""):gmatch("[^,]+") do p.xp[#p.xp + 1] = tonumber(v) end
-  for v in (f.worn or ""):gmatch("[^,]+") do p.worn[#p.worn + 1] = tonumber(v) end
-  for v in (f.weap or ""):gmatch("[^,]+") do p.weap[#p.weap + 1] = tonumber(v) end
+  for v in (f.worn or ""):gmatch("%x+") do p.worn[#p.worn + 1] = v end
+  for v in (f.weap or ""):gmatch("%x+") do p.weap[#p.weap + 1] = v end
   return p
 end
 
@@ -143,14 +145,20 @@ function CoopHero.Apply(entity, p, opts)
     try("SetHeroAbilityLevel", Stats.SetHeroAbilityLevel, entity, a[1], a[2])
   end
   if opts.clothes ~= false then
-    for _, id in ipairs(p.worn) do
-      try("AddAndReplaceItemOfRecordID " .. tostring(id),
-        AppearanceModifierManager.AddAndReplaceItemOfRecordID, entity, id)
+    for _, hex in ipairs(p.worn) do
+      local id = id_from_hex(hex)
+      if id then
+        -- Wearing takes an item the creature owns: give it first.
+        try("AddItemOfType " .. hex, Inventory.AddItemOfType, entity, id)
+        try("AddAndReplaceItemOfRecordID " .. hex,
+          AppearanceModifierManager.AddAndReplaceItemOfRecordID, entity, id)
+      end
     end
   end
   if opts.weapons ~= false then
-    for _, id in ipairs(p.weap) do
-      try("AddItemOfType " .. tostring(id), Inventory.AddItemOfType, entity, id)
+    for _, hex in ipairs(p.weap) do
+      local id = id_from_hex(hex)
+      if id then try("AddItemOfType " .. hex, Inventory.AddItemOfType, entity, id) end
     end
   end
 end

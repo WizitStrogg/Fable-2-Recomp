@@ -33,6 +33,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
@@ -41,6 +42,7 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include <rex/cvar.h>
 #include <rex/filesystem.h>
@@ -157,7 +159,9 @@ inline bool ApplyToHenchman(const std::string& profile, const std::string& why) 
   chunk += "if not hench or not hench:IsAlive() then print(\"[coop] apply: no live henchman\") return end\n";
   chunk += "local profile = CoopHero.Parse([" + eq + "[" + profile + "]" + eq + "])\n";
   chunk += "if not profile then print(\"[coop] apply: bad profile\") return end\n";
-  chunk += "CoopHero.Apply(hench, profile)\n";
+  // The hero body comes from the record selector at spawn; swapping the
+  // entity type here would rebuild it and drop the clothes applied next.
+  chunk += "CoopHero.Apply(hench, profile, {body = false})\n";
   chunk += "print(\"[coop] apply done\")\n";
   return fable2::luaconsole::RunChunk(chunk);
 }
@@ -179,6 +183,30 @@ inline std::string timestamp() {
 #endif
   std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &tm);
   return buf;
+}
+
+// Gender of player 2's hero: 1 female, 0 male, -1 unknown. On the host it is
+// the partner's (from their published profile), on a joiner its own.
+inline std::atomic<int> g_partner_female{-1};
+inline int profile_female(std::string_view profile) {
+  const auto p = profile.find("|g=");
+  if (p == std::string_view::npos || p + 3 >= profile.size()) return -1;
+  return profile[p + 3] == 'F' ? 1 : 0;
+}
+inline void update_partner_gender(const lobby::LobbyStatus& status) {
+  int female = -1;
+  if (status.in_world && status.joined_host_ip == 0) {
+    const lobby::PeerData* best = nullptr;
+    const auto heroes = lobby::GetPeerData("hero");
+    for (const auto& h : heroes) {
+      if (!best || h.seconds_since_received < best->seconds_since_received) best = &h;
+    }
+    if (best) female = profile_female(best->value);
+  } else {
+    std::lock_guard<std::mutex> l(mtx());
+    female = profile_female(own_profile());
+  }
+  g_partner_female.store(female);
 }
 
 // --- line handlers (run on the game thread from the print() capture) ----------
@@ -442,10 +470,97 @@ inline void camera_tick(const lobby::LobbyStatus& status, int64_t now) {
 
 inline bool g_pending_label_loaded = false;
 
-// Own-hero apply is not part of this build (v12 ships the joiner camera only):
-// applying stats to the henchman awards titles and shows pop-ups on the host.
-// It returns in v13 with a safe apply and the joiner's real look.
-constexpr bool kOwnHeroInThisBuild = false;
+// --- joiner: dress player 2 natively ------------------------------------------
+// A joiner runs no Lua while visiting, and the host's own-hero apply cannot
+// dress player 2 (its clothing is reset by the joiner's state). So the joiner
+// puts its own clothes on its player 2 creature: for each worn record id in its
+// profile call the core appearance add sub_8256FC80(appearance object, record
+// id). The appearance object is embedded in the entity: vtable 0x82003048
+// followed by a pointer back to the entity (the game's own binding passes it;
+// at entity+0xA0 on the host's creatures, entity+0x1E0 on a joiner's player 2),
+// so it is found by searching the entity for that pair.
+constexpr uint32_t kAppearanceVtable = 0x82003048;
+inline uint32_t find_appearance(const uint8_t* base, uint32_t entity) {
+  namespace ta = fable2::textappend;
+  if (!entity || !ta::rdable2(base, entity, 0x400)) return 0;
+  for (uint32_t off = 0; off < 0x400; off += 4) {
+    if (ta::load_be(base, entity + off) == kAppearanceVtable &&
+        ta::load_be(base, entity + off + 4) == entity) {
+      return entity + off;
+    }
+  }
+  return 0;
+}
+extern "C" void sub_8256FC80(PPCContext& ctx, uint8_t* base);
+inline uint32_t entity_component(const uint8_t* base, uint32_t entity, uint32_t type) {
+  namespace ta = fable2::textappend;
+  if (!entity || !ta::rdable2(base, entity + 72, 8)) return 0;
+  const uint32_t b = ta::load_be(base, entity + 72), e = ta::load_be(base, entity + 76);
+  for (uint32_t p = b; p < e && p - b < 8 * 512 && ta::rdable2(base, p, 8); p += 8) {
+    if (ta::load_be(base, p) == type) return ta::load_be(base, p + 4);
+  }
+  return 0;
+}
+inline std::vector<uint32_t> profile_worn(std::string_view profile) {
+  std::vector<uint32_t> ids;
+  const auto p = profile.find("|worn=");
+  if (p == std::string_view::npos) return ids;
+  std::string_view rest = profile.substr(p + 6);
+  rest = rest.substr(0, rest.find('|'));
+  while (!rest.empty()) {
+    const auto comma = rest.find(',');
+    const std::string item(rest.substr(0, comma));
+    if (item.size() == 8) ids.push_back(static_cast<uint32_t>(std::strtoul(item.c_str(), nullptr, 16)));
+    if (comma == std::string_view::npos) break;
+    rest = rest.substr(comma + 1);
+  }
+  return ids;
+}
+inline void dress_player2(PPCContext& ctx, uint8_t* base) {
+  namespace ta = fable2::textappend;
+  const uint32_t entity = fable2::coopcam::g_p2_entity.load();
+  const uint32_t appearance = find_appearance(base, entity);
+  std::string profile;
+  {
+    std::lock_guard<std::mutex> l(mtx());
+    profile = own_profile();
+  }
+  const auto ids = profile_worn(profile);
+  if (!appearance || ids.empty()) {
+    REXSYS_INFO("[coop] dress player 2: nothing to do (entity 0x{:08X}, appearance 0x{:08X}, {} items)",
+                entity, appearance, ids.size());
+    return;
+  }
+  for (uint32_t id : ids) {
+    ctx.r3.u64 = appearance;
+    ctx.r4.u64 = id;
+    sub_8256FC80(ctx, base);
+  }
+  REXSYS_INFO("[coop] dressed player 2 with {} items from this hero's profile", ids.size());
+}
+REXCVAR_DEFINE_BOOL(coop_dress_native, false, "Network",
+                    "Testing: dress player 2 natively on the joiner");
+inline std::atomic<int64_t> g_p2_spawn_ms{0};
+inline int g_dress_stage = 0;
+inline void dress_tick(int64_t now) {
+  const int64_t spawned = g_p2_spawn_ms.load();
+  if (!spawned || !fable2::coopcam::g_joined.load() || !REXCVAR_GET(coop_own_hero) ||
+      !REXCVAR_GET(coop_dress_native)) {
+    return;
+  }
+  if (g_dress_stage == 0 && now - spawned > 1500) {
+    g_dress_stage = 1;
+    fable2::f5lua::request_native(&dress_player2);
+  } else if (g_dress_stage == 1 && now - spawned > 6000) {
+    g_dress_stage = 2;
+    fable2::f5lua::request_native(&dress_player2);
+  }
+}
+
+// Own hero (v13): player 2 spawns with a real hero body (record selector
+// override below) and the partner's profile is applied with title awards
+// suppressed (AddUnlockedTitle override below).
+constexpr bool kOwnHeroInThisBuild = true;
 
 // F5 menu cleanup: once after every save load (when the game's script load
 // has settled), remove an F5 menu script that an older build saved into the
@@ -470,6 +585,7 @@ inline void OnFrame() {
   if (now < g_next_check_ms) return;
   g_next_check_ms = now + kCheckEveryMs;
   f5_cleanup_tick(now);
+  dress_tick(now);
   const lobby::LobbyStatus status = lobby::GetLobbyStatus();
   if (!status.networking_enabled) return;
   const uint64_t world_key = status.joined_host_ip != 0 ? status.joined_host_ip
@@ -480,6 +596,7 @@ inline void OnFrame() {
   g_world_key = world_key;
   joiner_story(status);
   camera_tick(status, now);
+  update_partner_gender(status);
   if (!kOwnHeroInThisBuild || !REXCVAR_GET(coop_own_hero)) return;
   auto_capture(status, now);
   host_apply(status, now);
@@ -545,6 +662,89 @@ extern "C" void __imp__sub_8231FA68(PPCContext& ctx, uint8_t* base);
 extern "C" void sub_8231FA68(PPCContext& ctx, uint8_t* base) {
   __imp__sub_8231FA68(ctx, base);
   REXSYS_INFO("[coop] henchman spawned");
+  fable2::coophero::g_p2_spawn_ms.store(fable2::coophero::now_ms());
+  fable2::coophero::g_dress_stage = 0;
   fable2::coophero::g_spawn_epoch.fetch_add(1);
   fable2::coophero::g_spawned_at_ms.store(fable2::coophero::now_ms());
+}
+
+// Henchman record selector (research/02-hench-lua-rewards.md):
+// r3 = out string, r5 = 0..2 female good/neutral/evil henchman, 3..5 male,
+// 6/7 children. Both PCs call it for player 2. With own hero on, return the
+// hero body (CreatureHero / CreatureHeroFemale, the records the game's own
+// scripts swap the hero between) in the partner's real gender.
+extern "C" void __imp__sub_8231EEE0(PPCContext& ctx, uint8_t* base);
+extern "C" void ConstructRefCounted_8222CF18(PPCContext& ctx, uint8_t* base);
+extern "C" void sub_8231EEE0(PPCContext& ctx, uint8_t* base) {
+  const uint32_t index = ctx.r5.u32;
+  if (!fable2::coophero::kOwnHeroInThisBuild || !REXCVAR_GET(coop_own_hero) || index > 5) {
+    __imp__sub_8231EEE0(ctx, base);
+    return;
+  }
+  const int known = fable2::coophero::g_partner_female.load();
+  const bool female = known >= 0 ? known == 1 : index <= 2;
+  static uint32_t s_names[2] = {0, 0};
+  uint32_t& name = s_names[female ? 1 : 0];
+  if (!name) {
+    const char* text = female ? "CreatureHeroFemale" : "CreatureHero";
+    const size_t len = std::strlen(text) + 1;
+    name = fable2::textappend::guest_alloc(ctx, base, len);
+    if (!name) {
+      __imp__sub_8231EEE0(ctx, base);
+      return;
+    }
+    std::memcpy(reinterpret_cast<void*>(fable2::textappend::host_addr(base, name)), text, len);
+  }
+  const uint32_t out = ctx.r3.u32;
+  ctx.r4.u32 = name;
+  ctx.r5.s64 = -1;
+  ConstructRefCounted_8222CF18(ctx, base);
+  ctx.r3.u32 = out;
+  REXSYS_INFO("[coop] player 2 body: {} (selector index {}, gender {})",
+              female ? "CreatureHeroFemale" : "CreatureHero", index,
+              known < 0 ? "from co-op screen" : "from hero profile");
+}
+
+// Stats.AddUnlockedTitle native (also reached from ModifyFat & co). Our own
+// scripts (the own-hero apply) must never award titles or show the title
+// message on the host: skip it while one of them runs.
+extern "C" void __imp__sub_8249F8A0(PPCContext& ctx, uint8_t* base);
+extern "C" void sub_8249F8A0(PPCContext& ctx, uint8_t* base) {
+  if (fable2::f5lua::g_running.load()) {
+    REXSYS_INFO("[coop] title award skipped during a co-op script");
+    ctx.r3.u64 = 0;
+    return;
+  }
+  __imp__sub_8249F8A0(ctx, base);
+}
+
+// Record name -> record id (called by GDB.GetRecord(name) via sub_8219C690):
+// r3 = database, r4 = name C-string. Item record ids reach Lua only as light
+// userdata, so the co-op profile carries them as 8 hex digits and the apply
+// turns them back with GDB.GetRecord("#XXXXXXXX"): a name of that form is
+// returned as the id itself.
+extern "C" void __imp__sub_8217EC80(PPCContext& ctx, uint8_t* base);
+extern "C" void sub_8217EC80(PPCContext& ctx, uint8_t* base) {
+  const uint32_t name = ctx.r4.u32;
+  if (name && fable2::textappend::rdable2(base, name, 10)) {
+    const char* p = reinterpret_cast<const char*>(fable2::textappend::host_addr(base, name));
+    if (p[0] == '#' && p[9] == '\0') {
+      uint32_t id = 0;
+      bool hex = true;
+      for (int i = 1; i <= 8 && hex; ++i) {
+        const char c = p[i];
+        const int v = c >= '0' && c <= '9' ? c - '0'
+                      : c >= 'A' && c <= 'F' ? c - 'A' + 10
+                      : c >= 'a' && c <= 'f' ? c - 'a' + 10
+                                             : -1;
+        if (v < 0) hex = false;
+        id = (id << 4) | uint32_t(v < 0 ? 0 : v);
+      }
+      if (hex) {
+        ctx.r3.u64 = id;
+        return;
+      }
+    }
+  }
+  __imp__sub_8217EC80(ctx, base);
 }
