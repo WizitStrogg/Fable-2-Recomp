@@ -147,7 +147,7 @@ inline std::string read_lib() {
 // Queues CoopHero.Apply(<henchman>, <profile>). Returns false if nothing was
 // queued (no usable profile, no library).
 inline bool ApplyToHenchman(const std::string& profile, const std::string& why) {
-  if (profile.rfind("COOPHERO:v1|", 0) != 0) {
+  if (profile.rfind("COOPHERO:v1|", 0) != 0 && profile.rfind("COOPHERO:v2|", 0) != 0) {
     REXSYS_WARN("[coop] no usable hero profile to apply ({})", why);
     return false;
   }

@@ -9,6 +9,8 @@
 #include "fable2_lua_console.h"
 // Co-op: apply the partner's own hero to the henchman (coop_apply, spawn hook).
 #include "fable2_coop_hero.h"
+// Co-op campaign (feature 001): coop_campaign switch, "proto" announcement.
+#include "fable2_coop_campaign.h"
 
 #include "fable_2_app.h"
 #include "fps_meter.h"

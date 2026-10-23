@@ -8,6 +8,11 @@
 --   COOPHERO:v1|g=M|mor=..|pur=..|fat=..|str=..|skl=..|wil=..|ren=..
 --           |ab=<abilityvalue>:<level>,...|xp=<gen>,<str>,<skl>,<wil>
 --           |worn=<recordid>,...|weap=<recordid>,...
+-- Profile v2 (co-op campaign file coop_player2.txt, specs/002-player2-kit/data-model.md)
+-- adds |hgt=..|age=..|xpt=<4 totals>|items=<recordid>:<count>,...|title=<id>|rev=<n>.
+-- Serialize keeps writing v1 (what v13 partners accept); SerializeV2 writes v2.
+-- Clothing dye and the unlocked-title list have no Lua getter; hair and tattoos
+-- are worn items, so they travel in worn.
 -- Every engine call is wrapped in pcall: a missing binding or a dead entity
 -- prints a note instead of stopping the script.
 
@@ -91,6 +96,23 @@ function CoopHero.Capture(entity)
       if id then p.weap[#p.weap + 1] = id end
     end
   end
+  -- v2 fields
+  p.hgt = try("GetHeight", Stats.GetHeight, entity)
+  p.age = try("GetAge", Age.GetAge, entity)
+  p.xpt = {}
+  for i, t in ipairs(XP_TYPES) do
+    p.xpt[i] = try("Experience.GetTotalEarned", Experience.GetTotalEarned, entity, t) or 0
+  end
+  p.title = try("GetTitle", Stats.GetTitle, entity)
+  -- Items: record id -> count, read in one pass; itemtotal lets the reader
+  -- check nothing was skipped (an item whose record could not be read).
+  p.items = {}
+  p.itemtotal = try("GetNumberOfItems", Inventory.GetNumberOfItems, entity) or 0
+  for i = 0, p.itemtotal - 1 do
+    local item = try("GetItemByIndex", Inventory.GetItemByIndex, entity, i)
+    local id = item and record_id(item)
+    if id then p.items[id] = (p.items[id] or 0) + 1 end
+  end
   return p
 end
 
@@ -110,17 +132,41 @@ function CoopHero.Serialize(p)
     "|worn=" .. table.concat(p.worn, ",") .. "|weap=" .. table.concat(p.weap, ",")
 end
 
+-- v2 line: the v1 fields plus the v2 ones. Items are sorted by record id so
+-- two captures of the same hero give the same line (coop_diff.py).
+function CoopHero.SerializeV2(p, rev)
+  local xpt = {}
+  for i, v in ipairs(p.xpt or {}) do xpt[i] = num(v) end
+  local ids = {}
+  for id in pairs(p.items or {}) do ids[#ids + 1] = id end
+  table.sort(ids)
+  local items = {}
+  for _, id in ipairs(ids) do items[#items + 1] = id .. ":" .. p.items[id] end
+  local v1 = CoopHero.Serialize(p):gsub("^COOPHERO:v1|", "")
+  return "COOPHERO:v2|" .. v1 .. "|hgt=" .. num(p.hgt) .. "|age=" .. tostring(p.age or "") ..
+    "|xpt=" .. table.concat(xpt, ",") .. "|items=" .. table.concat(items, ",") ..
+    "|itemtotal=" .. tostring(p.itemtotal or "") .. "|title=" .. tostring(p.title or "") ..
+    "|rev=" .. tostring(rev or 0)
+end
+
 function CoopHero.Parse(line)
-  local body = line:match("^COOPHERO:v1|(.*)$")
+  local version, body = line:match("^COOPHERO:(v[12])|(.*)$")
   if not body then return nil end
   local f = {}
   for k, v in body:gmatch("(%w+)=([^|]*)") do f[k] = v end
-  local p = {male = f.g ~= "F", ab = {}, xp = {}, worn = {}, weap = {}}
+  local p = {male = f.g ~= "F", ab = {}, xp = {}, worn = {}, weap = {}, version = version}
   for _, k in ipairs({"mor", "pur", "fat", "str", "skl", "wil", "ren"}) do p[k] = tonumber(f[k]) end
   for a, l in (f.ab or ""):gmatch("(%-?%d+):(%-?%d+)") do p.ab[#p.ab + 1] = {tonumber(a), tonumber(l)} end
   for v in (f.xp or ""):gmatch("[^,]+") do p.xp[#p.xp + 1] = tonumber(v) end
   for v in (f.worn or ""):gmatch("%x+") do p.worn[#p.worn + 1] = v end
   for v in (f.weap or ""):gmatch("%x+") do p.weap[#p.weap + 1] = v end
+  if version == "v2" then
+    p.hgt, p.age, p.title = tonumber(f.hgt), tonumber(f.age), f.title
+    p.itemtotal = tonumber(f.itemtotal)
+    p.xpt, p.items = {}, {}
+    for v in (f.xpt or ""):gmatch("[^,]+") do p.xpt[#p.xpt + 1] = tonumber(v) end
+    for id, n in (f.items or ""):gmatch("(%x+):(%d+)") do p.items[id] = tonumber(n) end
+  end
   return p
 end
 
@@ -159,6 +205,28 @@ function CoopHero.Apply(entity, p, opts)
     for _, hex in ipairs(p.weap) do
       local id = id_from_hex(hex)
       if id then try("AddItemOfType " .. hex, Inventory.AddItemOfType, entity, id) end
+    end
+  end
+  if p.version == "v2" and opts.v2 ~= false then
+    move_to("Height", Stats.GetHeight, Stats.ModifyHeight, entity, p.hgt)
+    if p.age then try("SetAge", Age.SetAge, entity, p.age) end
+    for i, t in ipairs(XP_TYPES) do
+      local want = p.xp[i]
+      local have = want and try("Experience.Get", Experience.Get, entity, t)
+      if have and want ~= have then
+        try("Experience.Modify", Experience.Modify, entity, t, want - have, false)
+      end
+    end
+    -- Items are only ever added up to the saved count, never removed: a hero
+    -- holding more than the file says keeps it (reported by coop_diff.py).
+    for hex, want in pairs(p.items or {}) do
+      local id = id_from_hex(hex)
+      if id then
+        local have = try("GetNumberOfItemsOfType", Inventory.GetNumberOfItemsOfType, entity, id) or 0
+        for _ = have + 1, want do try("AddItemOfType " .. hex, Inventory.AddItemOfType, entity, id) end
+      else
+        print("[coop] item " .. hex .. " unknown in this game; skipped")
+      end
     end
   end
 end
