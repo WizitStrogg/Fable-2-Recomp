@@ -1,74 +1,108 @@
-// fable_2 - "bring your own hero" scaffolding for System Link co-op.
+// fable_2 - "bring your own hero" and story sharing for System Link co-op.
 //
 // The co-op partner appears in the host's world as a henchman. This module
 // turns that henchman into the partner's own hero by running CoopHero.Apply
-// (data/scripts/recomp/coop_lib.lua) on it with the partner's profile line:
+// (data/scripts/recomp/coop_lib.lua) on it with the partner's profile line
 //   COOPHERO:v1|g=..|mor=..|...|worn=<record ids>|weap=<record ids>
+// and shares the host's story state with the joiner.
 //
-// Pieces:
-//   * Own profile: `luafile coop_capture` prints this PC's COOPHERO line; the
-//     line handler keeps the latest one (OwnProfile()) for the LAN data
-//     channel to publish.
-//   * Partner profile: cvar coop_partner_profile (set by the LAN data channel
-//     once it exists, or by hand from the console for testing).
-//   * Henchman spawn: an override of the spawn function sub_8231FA68 records
-//     when a henchman appears; with coop_auto_apply on, the partner profile is
-//     applied coop_apply_delay_ms later (the entity needs a moment to settle).
-//   * Console: `coop_apply` applies the partner profile now, `coop_apply own`
-//     applies this PC's own profile (local-view fallback / self test).
+// Data travels over the LAN lobby's keyed data channel
+// (rex::kernel::xam::lobby::PublishData / GetPeerData):
+//   "hero"  = a player's latest COOPHERO line (printed by coop_capture)
+//   "story" = the host's COOPSTORY parts, joined (printed by
+//             coop_story_capture)
+//
+// With coop_own_hero on:
+//   * every PC runs coop_capture once its save is loaded (and every few
+//     minutes after), which publishes its "hero";
+//   * the host (in its own world, not in someone else's) applies the most
+//     recent partner "hero" to the henchman once the henchman has spawned,
+//     again for every new revision and after every respawn.
+// The joiner always keeps the host's latest "story" in
+// saves/coop_story_pending.txt (not applied yet).
+//
+// Console: `coop_apply` applies the partner's hero now, `coop_apply own`
+// applies this PC's own profile (local-view fallback / self test), or
+// `coop_apply <COOPHERO line>`.
 
 #pragma once
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <mutex>
 #include <sstream>
 #include <string>
 #include <string_view>
 
 #include <rex/cvar.h>
+#include <rex/filesystem.h>
+#include <rex/kernel/xam/lan_lobby.h>
 #include <rex/logging.h>
 #include <rex/ppc/context.h>
 
 #include "fable2_f5_lua.h"
 #include "fable2_lua_console.h"
 
+REXCVAR_DEFINE_BOOL(coop_own_hero, false, "Network",
+                    "Co-op partners appear as their own hero instead of the premade "
+                    "henchman (experimental)");
 REXCVAR_DEFINE_STRING(coop_partner_profile, "", "Network",
-                      "COOPHERO profile line of the co-op partner, applied to the henchman "
-                      "(filled in by the LAN data channel; can be set by hand for testing)");
-REXCVAR_DEFINE_BOOL(coop_auto_apply, false, "Network",
-                    "Turn the henchman into the partner's own hero automatically when it "
-                    "spawns (experimental)");
+                      "Override: a COOPHERO line to apply to the henchman instead of the "
+                      "profile received from the partner (for testing)");
 REXCVAR_DEFINE_INT32(coop_apply_delay_ms, 1500, "Network",
                      "Delay between the henchman spawning and applying the partner's hero");
 
 namespace fable2::coophero {
 
-inline std::mutex& mtx() {
-  static std::mutex m;
-  return m;
-}
-inline std::string& own_profile_storage() {
-  static std::string s;
-  return s;
-}
-
-// Latest COOPHERO line printed on this PC (by coop_capture), or empty.
-inline std::string OwnProfile() {
-  std::lock_guard<std::mutex> l(mtx());
-  return own_profile_storage();
-}
+namespace lobby = rex::kernel::xam::lobby;
 
 using Clock = std::chrono::steady_clock;
-inline std::atomic<int64_t> g_spawned_at_ms{0};  // 0 = nothing pending
-
 inline int64_t now_ms() {
   return std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now().time_since_epoch())
       .count();
 }
+
+inline std::mutex& mtx() {
+  static std::mutex m;
+  return m;
+}
+
+// --- state (guarded by mtx unless atomic) ----------------------------------
+inline std::string& own_profile() {
+  static std::string s;
+  return s;
+}
+inline std::map<int, std::string>& story_parts() {
+  static std::map<int, std::string> m;
+  return m;
+}
+inline std::atomic<int64_t> g_spawned_at_ms{0};  // last henchman spawn
+inline std::atomic<uint32_t> g_spawn_epoch{0};   // increments per spawn
+
+// Host-side apply bookkeeping (game thread only).
+inline uint32_t g_applied_rev = 0;
+inline uint32_t g_applied_ip = 0;
+inline uint32_t g_applied_epoch = 0;
+// Joiner-side story bookkeeping (game thread only).
+inline uint32_t g_story_rev = 0;
+inline uint32_t g_story_ip = 0;
+// Auto-capture timing (game thread only).
+inline int64_t g_ready_since_ms = 0;
+inline int64_t g_next_capture_ms = 0;
+inline int64_t g_next_check_ms = 0;
+
+constexpr int64_t kFirstCaptureDelayMs = 20'000;
+constexpr int64_t kCaptureEveryMs = 120'000;
+constexpr int64_t kCheckEveryMs = 500;
+
+// --- helpers ---------------------------------------------------------------
 
 inline std::string read_lib() {
   const auto file = fable2::f5lua::g_data_root / "data" / "scripts" / "recomp" / "coop_lib.lua";
@@ -83,8 +117,8 @@ inline std::string read_lib() {
 }
 
 // Queues CoopHero.Apply(<henchman>, <profile>). Returns false if nothing was
-// queued (no profile, no library).
-inline bool ApplyToHenchman(const std::string& profile, const char* why) {
+// queued (no usable profile, no library).
+inline bool ApplyToHenchman(const std::string& profile, const std::string& why) {
   if (profile.rfind("COOPHERO:v1|", 0) != 0) {
     REXSYS_WARN("[coop] no usable hero profile to apply ({})", why);
     return false;
@@ -98,50 +132,213 @@ inline bool ApplyToHenchman(const std::string& profile, const char* why) {
   chunk += "local profile = CoopHero.Parse([" + eq + "[" + profile + "]" + eq + "])\n";
   chunk += "if not profile then print(\"[coop] apply: bad profile\") return end\n";
   chunk += "CoopHero.Apply(hench, profile)\n";
-  chunk += "print(\"[coop] applied hero profile to the henchman (" + std::string(why) + ")\")\n";
-  REXSYS_INFO("[coop] applying hero profile to the henchman ({})", why);
+  chunk += "print(\"[coop] apply done\")\n";
   return fable2::luaconsole::RunChunk(chunk);
 }
 
-// Per-frame (guest main thread): auto-apply after a henchman spawn.
-inline void OnFrame() {
-  const int64_t spawned = g_spawned_at_ms.load();
-  if (spawned == 0) return;
-  if (now_ms() - spawned < REXCVAR_GET(coop_apply_delay_ms)) return;
-  g_spawned_at_ms.store(0);
-  if (!REXCVAR_GET(coop_auto_apply)) return;
-  ApplyToHenchman(REXCVAR_GET(coop_partner_profile), "henchman spawned");
+inline bool is_host(const lobby::LobbyStatus& s) { return s.in_world && s.joined_host_ip == 0; }
+
+inline std::filesystem::path pending_story_file() {
+  return rex::filesystem::GetExecutableFolder() / "saves" / "coop_story_pending.txt";
 }
+
+inline std::string timestamp() {
+  const std::time_t t = std::time(nullptr);
+  char buf[32] = {};
+  std::tm tm{};
+#if defined(_WIN32)
+  localtime_s(&tm, &t);
+#else
+  localtime_r(&t, &tm);
+#endif
+  std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &tm);
+  return buf;
+}
+
+// --- line handlers (run on the game thread from the print() capture) ----------
+
+inline void OnHeroLine(std::string_view line) {
+  {
+    std::lock_guard<std::mutex> l(mtx());
+    own_profile().assign(line);
+  }
+  if (REXCVAR_GET(coop_own_hero) && lobby::PublishData("hero", std::string(line))) {
+    REXSYS_INFO("[coop] published this hero ({} bytes)", line.size());
+  }
+}
+
+// "COOPSTORY:v1|part=<i>/<n>|<fields>"
+inline void OnStoryLine(std::string_view line) {
+  const auto p = line.find("|part=");
+  if (p == std::string_view::npos) return;
+  int i = 0, n = 0;
+  if (std::sscanf(std::string(line.substr(p + 6, 16)).c_str(), "%d/%d", &i, &n) != 2 || i < 1 ||
+      n < 1 || i > n) {
+    return;
+  }
+  const auto body_at = line.find('|', p + 6);
+  const std::string body =
+      body_at == std::string_view::npos ? std::string() : std::string(line.substr(body_at + 1));
+  std::string joined;
+  {
+    std::lock_guard<std::mutex> l(mtx());
+    auto& parts = story_parts();
+    if (i == 1) parts.clear();
+    parts[i] = body;
+    if (static_cast<int>(parts.size()) != n) return;
+    joined = "COOPSTORY:v1";
+    for (const auto& [k, v] : parts) joined += "|" + v;
+    parts.clear();
+  }
+  const lobby::LobbyStatus status = lobby::GetLobbyStatus();
+  if (!is_host(status)) {
+    REXSYS_INFO("[coop] story captured ({} bytes); not shared (only the host shares its story)",
+                joined.size());
+    return;
+  }
+  if (lobby::PublishData("story", joined)) {
+    REXSYS_INFO("[coop] published story ({} bytes)", joined.size());
+  }
+}
+
+// --- per frame (game thread) ---------------------------------------------------
+
+inline void auto_capture(int64_t now) {
+  if (!fable2::f5lua::ready()) {
+    g_ready_since_ms = 0;
+    return;
+  }
+  if (g_ready_since_ms == 0) {
+    g_ready_since_ms = now;
+    g_next_capture_ms = now + kFirstCaptureDelayMs;
+  }
+  if (now < g_next_capture_ms) return;
+  g_next_capture_ms = now + kCaptureEveryMs;
+  fable2::f5lua::request_run("scripts/recomp/coop_capture.lua");
+}
+
+inline void host_apply(const lobby::LobbyStatus& status, int64_t now) {
+  if (!is_host(status)) return;
+  const int64_t spawned = g_spawned_at_ms.load();
+  if (spawned == 0 || now - spawned < REXCVAR_GET(coop_apply_delay_ms)) return;
+  const uint32_t epoch = g_spawn_epoch.load();
+
+  const std::string override_profile = REXCVAR_GET(coop_partner_profile);
+  if (!override_profile.empty()) {
+    if (g_applied_epoch == epoch && g_applied_ip == 0 && g_applied_rev == 1) return;
+    g_applied_epoch = epoch;
+    g_applied_ip = 0;
+    g_applied_rev = 1;
+    if (ApplyToHenchman(override_profile, "coop_partner_profile")) {
+      REXSYS_INFO("[coop] applied hero from coop_partner_profile");
+    }
+    return;
+  }
+
+  // Most recently heard partner hero.
+  const auto heroes = lobby::GetPeerData("hero");
+  const lobby::PeerData* best = nullptr;
+  for (const auto& h : heroes) {
+    if (!best || h.seconds_since_received < best->seconds_since_received) best = &h;
+  }
+  if (!best) return;
+  if (best->revision == g_applied_rev && best->ip == g_applied_ip && epoch == g_applied_epoch) {
+    return;
+  }
+  g_applied_rev = best->revision;
+  g_applied_ip = best->ip;
+  g_applied_epoch = epoch;
+  if (ApplyToHenchman(best->value, "hero from " + best->gamertag)) {
+    REXSYS_INFO("[coop] applied hero from {} rev {}", best->gamertag, best->revision);
+  }
+}
+
+inline void joiner_story(const lobby::LobbyStatus& status) {
+  if (status.joined_host_ip == 0) return;
+  for (const auto& s : lobby::GetPeerData("story")) {
+    if (s.ip != status.joined_host_ip) continue;
+    if (s.revision == g_story_rev && s.ip == g_story_ip) return;
+    g_story_rev = s.revision;
+    g_story_ip = s.ip;
+    std::error_code ec;
+    std::filesystem::create_directories(pending_story_file().parent_path(), ec);
+    std::ofstream out(pending_story_file(), std::ios::binary | std::ios::trunc);
+    if (!out) {
+      REXSYS_ERROR("[coop] cannot write {}", pending_story_file().string());
+      return;
+    }
+    out << "host=" << s.gamertag << "\n"
+        << "host_address=" << s.address << "\n"
+        << "received=" << timestamp() << "\n"
+        << "revision=" << s.revision << "\n"
+        << s.value << "\n";
+    REXSYS_INFO("[coop] saved {}'s story (rev {}) to {}", s.gamertag, s.revision,
+                pending_story_file().string());
+    return;
+  }
+}
+
+inline void OnFrame() {
+  const int64_t now = now_ms();
+  if (now < g_next_check_ms) return;
+  g_next_check_ms = now + kCheckEveryMs;
+  const lobby::LobbyStatus status = lobby::GetLobbyStatus();
+  if (!status.networking_enabled) return;
+  joiner_story(status);
+  if (!REXCVAR_GET(coop_own_hero)) return;
+  auto_capture(now);
+  host_apply(status, now);
+}
+
+// --- console ---------------------------------------------------------------
 
 inline void CmdCoopApply(std::string_view args) {
   const std::string arg = fable2::luaconsole::trim(args);
   if (arg == "own") {
-    ApplyToHenchman(OwnProfile(), "own profile");
-  } else if (arg.empty() || arg == "partner") {
-    ApplyToHenchman(REXCVAR_GET(coop_partner_profile), "partner profile");
-  } else {
-    ApplyToHenchman(arg, "profile from the console");
+    std::string own;
+    {
+      std::lock_guard<std::mutex> l(mtx());
+      own = own_profile();
+    }
+    ApplyToHenchman(own, "own profile");
+    return;
   }
+  if (!arg.empty() && arg != "partner") {
+    ApplyToHenchman(arg, "profile from the console");
+    return;
+  }
+  const std::string override_profile = REXCVAR_GET(coop_partner_profile);
+  if (!override_profile.empty()) {
+    ApplyToHenchman(override_profile, "coop_partner_profile");
+    return;
+  }
+  const auto heroes = lobby::GetPeerData("hero");
+  const lobby::PeerData* best = nullptr;
+  for (const auto& h : heroes) {
+    if (!best || h.seconds_since_received < best->seconds_since_received) best = &h;
+  }
+  if (!best) {
+    REXSYS_WARN("[coop] no partner hero received yet");
+    return;
+  }
+  ApplyToHenchman(best->value, "hero from " + best->gamertag);
 }
 
-// Installs the line handler and the per-frame hook. Call once at startup.
-inline void Install() {
-  fable2::luaconsole::AddLineHandler("COOPHERO:", [](std::string_view line) {
-    std::lock_guard<std::mutex> l(mtx());
-    own_profile_storage().assign(line);
-  });
+// Installs the line handlers and the per-frame hook. Runs at static init
+// (this header is included once, from main.cpp).
+inline bool Install() {
+  fable2::luaconsole::AddLineHandler("COOPHERO:", OnHeroLine);
+  fable2::luaconsole::AddLineHandler("COOPSTORY:", OnStoryLine);
   fable2::f5lua::g_frame_hook = &OnFrame;
+  return true;
 }
-
-// Self-install at static init (header is included once, from main.cpp).
-inline const bool g_installed = (Install(), true);
+inline const bool g_installed = Install();
 
 }  // namespace fable2::coophero
 
 REXCVAR_DEFINE_COMMAND_ARGS(coop_apply, fable2::coophero::CmdCoopApply, "Network",
-                            "Apply a hero profile to the co-op henchman: no argument = the "
-                            "partner's (coop_partner_profile), 'own' = this PC's last "
-                            "coop_capture, or a COOPHERO line");
+                            "Apply a hero to the co-op henchman: no argument = the partner's, "
+                            "'own' = this PC's last coop_capture, or a COOPHERO line");
 
 // Henchman spawn (see research/02-hench-lua-rewards.md): note the time, then
 // let the original run.
@@ -149,5 +346,6 @@ extern "C" void __imp__sub_8231FA68(PPCContext& ctx, uint8_t* base);
 extern "C" void sub_8231FA68(PPCContext& ctx, uint8_t* base) {
   __imp__sub_8231FA68(ctx, base);
   REXSYS_INFO("[coop] henchman spawned");
+  fable2::coophero::g_spawn_epoch.fetch_add(1);
   fable2::coophero::g_spawned_at_ms.store(fable2::coophero::now_ms());
 }
