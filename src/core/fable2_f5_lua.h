@@ -8,7 +8,10 @@
 // How it works (all hooks are recompiled-function probes so they have ctx+base):
 //   A) poll_f5() is called per frame from the host input poll; it edge-detects
 //      F5 and latches a flag (g_f5_pending).
-//   B) run_pending() runs on the script VM thread only, from three points:
+//   B) run_pending() runs on the script VM thread only. Main point: right
+//      after the engine's own outermost lua_pcall / lua_resume into a Lua VM
+//      returns (overrides at the end of this file), i.e. in engine C++ code
+//      with no Lua running. Also, mainly during loading:
 //      once per frame from the FrameLimiterWait_82242628 hot function
 //      when no Lua->C++ call is active, and from the dispatcher probe (D)
 //      right after the game's own Lua->C++ call returns at the outermost
@@ -39,10 +42,13 @@
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
+#include <algorithm>
 #include <deque>
 #include <filesystem>
 #include <mutex>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include "rex/cvar.h"
 #include <rex/logging.h>
@@ -306,6 +312,11 @@ inline int64_t g_last_run_ms = 0;
 inline std::atomic<uint32_t> g_probe_hits{0}, g_probe_depth0{0}, g_probe_vm{0};
 inline std::atomic<uint32_t> g_frame_hits{0}, g_frame_vm{0};
 inline std::atomic<int> g_max_depth{0};
+// Nesting of lua_pcall / lua_resume (either VM) on this thread. Both catch Lua
+// errors internally (setjmp) and always return normally, so this cannot be
+// skipped by a longjmp and never leaks.
+inline thread_local int g_vm_depth = 0;
+std::string vm_report();
 // Baseline tracking (script VM thread only): the shallowest dispatch depth
 // seen in the current/last ~1 s window, and when a depth-0 point was last
 // reached on the VM thread.
@@ -403,6 +414,7 @@ inline void poll_mainloop(PPCContext& /*ctx*/, uint8_t* /*base*/) {
               "frame hook hits {}, on VM thread {}",
               g_probe_hits.exchange(0), g_probe_depth0.exchange(0), g_probe_vm.exchange(0),
               g_max_depth.exchange(0), g_frame_hits.exchange(0), g_frame_vm.exchange(0));
+  REXSYS_INFO("[lua] last minute: {}", vm_report());
 }
 
 // Per-frame game-loop entry point (FrameLimiterWait_82242628). Runs queued
@@ -412,7 +424,7 @@ inline void frame_drain(PPCContext& ctx, uint8_t* base) {
   g_frame_hits.fetch_add(1, std::memory_order_relaxed);
   if (current_thread_id() != g_lua_thread.load()) return;
   g_frame_vm.fetch_add(1, std::memory_order_relaxed);
-  if (g_dispatch_depth != 0) return;
+  if (g_dispatch_depth != 0 || g_vm_depth != 0) return;
   g_last_depth0_ms.store(steady_ms(), std::memory_order_relaxed);
   run_pending(ctx, base, "frame");
 }
@@ -528,7 +540,7 @@ extern "C" void LuaBind_RunScript_82806168(PPCContext& ctx, uint8_t* base) {
       REXSYS_INFO("[lua] dispatcher first reached depth 0 on thread {} (script VM thread {})",
                   current_thread_id(), g_lua_thread.load());
     }
-    run_pending(ctx, base, "probe0");
+    if (g_vm_depth == 0) run_pending(ctx, base, "probe0");
   } else if (on_vm && depth == g_baseline_depth &&
              steady_ms() - g_last_depth0_ms.load(std::memory_order_relaxed) >= kBaselineAfterMs) {
     // No depth-0 point for a while: the game's Lua runs inside a long-lived
@@ -543,4 +555,93 @@ extern "C" void LuaBind_RunScript_82806168(PPCContext& ctx, uint8_t* base) {
 // this header is included only by main.cpp.
 void fable2_frame_drain_lua(PPCContext& ctx, uint8_t* base) {
   fable2::f5lua::frame_drain(ctx, base);
+}
+
+// --- Lua VM entry points ------------------------------------------------------
+// The game links two Lua 5.1 VMs. Their core functions were found from the
+// error strings: the game VM (the one the LuaBind thunk and RunScript use) has
+// lua_pcall sub_8219A9B0 (luaD_pcall 0x8219A8E8, f_call 0x82A1ED48, luaD_call
+// 0x82228C70) and lua_resume sub_82277B88; the second VM has lua_pcall
+// sub_821931E8 (luaD_pcall 0x822C05F8) and lua_resume sub_822DDF38.
+//
+// When the outermost call into either VM returns on the script VM thread, no
+// Lua is running on it: drain one queued script there.
+
+namespace fable2::f5lua {
+
+struct VmEntry {
+  const char* via;
+  std::atomic<uint32_t> hits{0};
+  std::atomic<uint32_t> on_vm_thread{0};
+};
+// [vm][0 = lua_pcall, 1 = lua_resume]
+inline VmEntry g_vm_entries[2][2] = {{{"game-vm pcall"}, {"game-vm resume"}},
+                                     {{"other-vm pcall"}, {"other-vm resume"}}};
+
+// Per-thread totals of VM entries, so the log shows which thread owns the Lua
+// traffic.
+struct ThreadCount {
+  uint32_t tid = 0;
+  std::atomic<uint32_t> n{0};
+};
+inline std::mutex g_thread_counts_mtx;
+inline std::vector<ThreadCount*> g_thread_counts;
+inline ThreadCount& my_thread_count() {
+  thread_local ThreadCount* tc = [] {
+    auto* t = new ThreadCount;
+    t->tid = current_thread_id();
+    std::lock_guard<std::mutex> l(g_thread_counts_mtx);
+    g_thread_counts.push_back(t);
+    return t;
+  }();
+  return *tc;
+}
+
+std::string vm_report() {
+  std::string out;
+  for (auto& vm : g_vm_entries) {
+    for (auto& e : vm) {
+      out += std::string(e.via) + " " + std::to_string(e.hits.exchange(0)) + " (VM thread " +
+             std::to_string(e.on_vm_thread.exchange(0)) + "), ";
+    }
+  }
+  std::vector<std::pair<uint32_t, uint32_t>> threads;
+  {
+    std::lock_guard<std::mutex> l(g_thread_counts_mtx);
+    for (auto* t : g_thread_counts) threads.emplace_back(t->n.exchange(0), t->tid);
+  }
+  std::sort(threads.rbegin(), threads.rend());
+  out += "top threads:";
+  for (size_t i = 0; i < threads.size() && i < 3 && threads[i].first != 0; ++i) {
+    out += " t" + std::to_string(threads[i].second) + "=" + std::to_string(threads[i].first);
+  }
+  return out;
+}
+
+template <int Vm, int Kind>
+inline void vm_entry(PPCContext& ctx, uint8_t* base, void (*original)(PPCContext&, uint8_t*)) {
+  VmEntry& e = g_vm_entries[Vm][Kind];
+  ++g_vm_depth;
+  original(ctx, base);
+  --g_vm_depth;
+  e.hits.fetch_add(1, std::memory_order_relaxed);
+  my_thread_count().n.fetch_add(1, std::memory_order_relaxed);
+  if (current_thread_id() != g_lua_thread.load(std::memory_order_relaxed)) return;
+  e.on_vm_thread.fetch_add(1, std::memory_order_relaxed);
+  if (g_vm_depth == 0 && g_dispatch_depth == 0) run_pending(ctx, base, e.via);
+}
+
+}  // namespace fable2::f5lua
+
+extern "C" void sub_8219A9B0(PPCContext& ctx, uint8_t* base) {  // game VM lua_pcall
+  fable2::f5lua::vm_entry<0, 0>(ctx, base, __imp__sub_8219A9B0);
+}
+extern "C" void sub_82277B88(PPCContext& ctx, uint8_t* base) {  // game VM lua_resume
+  fable2::f5lua::vm_entry<0, 1>(ctx, base, __imp__sub_82277B88);
+}
+extern "C" void sub_821931E8(PPCContext& ctx, uint8_t* base) {  // other VM lua_pcall
+  fable2::f5lua::vm_entry<1, 0>(ctx, base, __imp__sub_821931E8);
+}
+extern "C" void sub_822DDF38(PPCContext& ctx, uint8_t* base) {  // other VM lua_resume
+  fable2::f5lua::vm_entry<1, 1>(ctx, base, __imp__sub_822DDF38);
 }
