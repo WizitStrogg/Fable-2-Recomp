@@ -85,6 +85,7 @@ switches to its fallback; only a failed fallback is raised to Josh.
 - [ ] T026 [US2] Partner's Continue → Co-op lists waiting campaigns for this partner; join flow as T022
 - [ ] T027 [US2] Partner loss per P6: host saves, both return to the lobby; host loss: partner returns to the menu with a message
 - [ ] T028 [US2] Refuse strangers: session not joinable by anyone but the partner; lobby rejects other seats
+- [ ] T028a [US2] A join must never crash the host (coordinator, 2026-10-23): rig launch 9 crashed the host ("Unhandled guest access violation: write of guest 0x4EADC200", `mod-a\logs\fable_2_037.log` 16:10:18) when the partner joined during QC060's opening (autosave + movie + co-op screen). (1) Enable the AV probe log on the rig (`src/diagnostics/fable2_av_probe.h`, file output is commented out) and name the faulting guest function. (2) Host keeps its session non-joinable, or queues the join, while a movie, cutscene, loading screen or save runs (find the game's own state for these; candidates: GUI.IsScreenFullyFaded, the movie player, the [content] save bracket). (3) Rig proof: partner joins during a cutscene and during a save; host survives and the join completes afterwards. Applies to rejoins after a drop too.
 - [ ] T029 [US2] Rig verification: A alone cannot enter; B rejoins; kill B mid-session (3 times); third instance `mod-c` cannot join
 
 **Checkpoint**: US2 proven
