@@ -142,6 +142,7 @@ inline void on_host_start() {
     g_childhood_started.store(false);
     g_coop_screen_ms.store(0);
     g_coop_screen_hook_failed.store(false);
+    fable2::coophero::g_capture_paused.store(true);  // until the adult world is ready
     REXSYS_INFO("[coop] host start: campaign {} with {}, host hero {}", S().cid, S().partner_name,
                 S().host_female ? "female" : "male");
   }
@@ -247,6 +248,7 @@ inline void session_tick() {
         const std::string go = fable2::cooplobby::Format(fable2::cooplobby::GoRecord{s.cid, ++s.go_seq});
         lobby::PublishData("coop_go", go);
         REXSYS_INFO("[coop] host world up: published {}", go);
+        fable2::coophero::g_capture_paused.store(false);
       }
       break;
     }

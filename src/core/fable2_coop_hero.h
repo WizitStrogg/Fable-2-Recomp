@@ -265,7 +265,16 @@ inline uint32_t g_capture_load_epoch = 0;
 // after the game is ready, after each settled level load and on returning to
 // your own world, plus once immediately when a join starts (the own world is
 // still loaded for a moment), so the host has a fresh profile.
+// Set by the co-op campaign start (fable2_coop_frontend.h) from Start until
+// the adult world is ready: a capture during QC060's opening (autosave, movie)
+// crashed the host twice (rig launches 9 and 10).
+inline std::atomic<bool> g_capture_paused{false};
+
 inline void auto_capture(const lobby::LobbyStatus& status, int64_t now) {
+  if (g_capture_paused.load()) {
+    g_next_capture_ms = now + kFirstCaptureDelayMs;  // first capture again once resumed
+    return;
+  }
   if (!fable2::f5lua::ready()) {
     g_ready_since_ms = 0;
     return;
