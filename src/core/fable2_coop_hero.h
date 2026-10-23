@@ -49,6 +49,8 @@
 #include <rex/ppc/context.h>
 
 #include "fable2_f5_lua.h"
+#include "fable2_coop_camera.h"
+#include "fable2_coop_camscan.h"
 #include "fable2_lua_console.h"
 
 REXCVAR_DEFINE_BOOL(coop_own_hero, false, "Network",
@@ -440,7 +442,26 @@ inline void camera_tick(const lobby::LobbyStatus& status, int64_t now) {
 
 inline bool g_pending_label_loaded = false;
 
+// Own-hero apply is not part of this build (v12 ships the joiner camera only):
+// applying stats to the henchman awards titles and shows pop-ups on the host.
+// It returns in v13 with a safe apply and the joiner's real look.
+constexpr bool kOwnHeroInThisBuild = false;
+
+// F5 menu cleanup: once after every save load (when the game's script load
+// has settled), remove an F5 menu script that an older build saved into the
+// save (scripts/recomp/coop_f5_cleanup.lua).
+inline uint32_t g_f5_cleanup_epoch = 0;
+inline void f5_cleanup_tick(int64_t now) {
+  if (!fable2::f5lua::ready()) return;
+  const uint32_t epoch = fable2::f5lua::g_load_epoch.load();
+  if (epoch == g_f5_cleanup_epoch || now - fable2::f5lua::g_load_at_ms.load() < 5000) return;
+  g_f5_cleanup_epoch = epoch;
+  fable2::luaconsole::RunFile("coop_f5_cleanup.lua");
+}
+
 inline void OnFrame() {
+  fable2::camscan::poke_tick();
+  fable2::coopcam::follow_tick(REXCVAR_GET(coop_own_camera));
   if (!g_pending_label_loaded) {
     g_pending_label_loaded = true;
     load_pending_label();
@@ -448,16 +469,18 @@ inline void OnFrame() {
   const int64_t now = now_ms();
   if (now < g_next_check_ms) return;
   g_next_check_ms = now + kCheckEveryMs;
+  f5_cleanup_tick(now);
   const lobby::LobbyStatus status = lobby::GetLobbyStatus();
   if (!status.networking_enabled) return;
   const uint64_t world_key = status.joined_host_ip != 0 ? status.joined_host_ip
                              : status.in_world          ? 1ull
                                                         : 0ull;
   g_world_changed = world_key != g_world_key;
+  fable2::coopcam::g_joined.store(status.joined_host_ip != 0);
   g_world_key = world_key;
   joiner_story(status);
   camera_tick(status, now);
-  if (!REXCVAR_GET(coop_own_hero)) return;
+  if (!kOwnHeroInThisBuild || !REXCVAR_GET(coop_own_hero)) return;
   auto_capture(status, now);
   host_apply(status, now);
 }

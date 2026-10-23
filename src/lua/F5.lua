@@ -214,5 +214,22 @@ if not st.registered then
   menutab.__index = _G
   menutab._G = _G
   menutab.Update = update
+  -- Tagged so it can be found, and kept out of save games: the
+  -- GeneralScriptManager saves every running script (GetSaveTable) and
+  -- resumes it on load, which made the menu pop up on every load of a save
+  -- made while it was registered.
+  menutab._RecompF5Menu = true
+  if not rawget(GeneralScriptManager, "__RecompOrigGetSaveTable") then
+    local orig = GeneralScriptManager.GetSaveTable
+    GeneralScriptManager.__RecompOrigGetSaveTable = orig
+    GeneralScriptManager.GetSaveTable = function(...)
+      local t = orig(...)
+      local kept = {}
+      for _, v in ipairs(t) do
+        if not (type(v) == "table" and rawget(v, "_RecompF5Menu")) then kept[#kept + 1] = v end
+      end
+      return kept
+    end
+  end
   GeneralScriptManager.AddScript(menutab)
 end

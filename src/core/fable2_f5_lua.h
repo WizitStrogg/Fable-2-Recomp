@@ -192,7 +192,12 @@ inline void logline(const char* fmt, ...) {
 // Per-frame F5 edge detector. Call from the host input poll (per frame).
 inline void poll_f5() {
 #ifdef _WIN32
-  const bool down = (GetAsyncKeyState(FABLE2_F5_VK) & 0x8000) != 0;
+  // GetAsyncKeyState sees F5 pressed in any application; only count it while
+  // this game's window has focus.
+  DWORD fg_pid = 0;
+  GetWindowThreadProcessId(GetForegroundWindow(), &fg_pid);
+  const bool focused = fg_pid == GetCurrentProcessId();
+  const bool down = focused && (GetAsyncKeyState(FABLE2_F5_VK) & 0x8000) != 0;
   const bool edge = down && !g_f5_down_prev;
   g_f5_down_prev = down;
   if (edge) g_f5_pending.store(true);
@@ -399,7 +404,11 @@ inline int64_t g_next_waiting_log_ms = 0;
 // Per-frame render-thread entry point. Called from the MainRenderLoop_82B9CD68
 // hook (in fps_meter.h). Runs the host-side frame hook and reports scripts
 // left waiting; the scripts themselves run from run_pending().
-inline void poll_mainloop(PPCContext& /*ctx*/, uint8_t* /*base*/) {
+// Guest memory base, for host-side readers (set every frame).
+inline uint8_t* g_base = nullptr;
+
+inline void poll_mainloop(PPCContext& /*ctx*/, uint8_t* base) {
+  g_base = base;
   if (g_frame_hook) g_frame_hook();
   const int64_t now = steady_ms();
   if (now < g_next_waiting_log_ms) return;
