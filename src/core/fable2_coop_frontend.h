@@ -30,7 +30,7 @@
 
 namespace fable2::coopfrontend {
 
-constexpr uint32_t kUp = 1, kDown = 2, kBack = 32, kA = 4096;
+constexpr uint32_t kUp = 1, kDown = 2, kBack = 32, kA = 0x1000, kB = 0x2000;
 constexpr int kNewGameRow = 0, kLastRow = 4;
 constexpr int64_t kDedupMs = 400;
 
@@ -130,9 +130,9 @@ inline bool OnPress(PPCContext& ctx, uint8_t* /*base*/) {
   if (repeat) return false;
   if (mask & kDown) g_row = g_row < kLastRow ? g_row + 1 : kLastRow;
   if (mask & kUp) g_row = g_row > 0 ? g_row - 1 : 0;
-  if (mask & kBack) {
-    // Back from the hero cards (or any sub-screen) lands on the main menu
-    // with New Game selected.
+  if (mask & (kBack | kB)) {
+    // B (or Back) from the hero cards or any sub-screen lands on the main
+    // menu with New Game selected.
     g_armed = true;
     g_row = kNewGameRow;
   }
