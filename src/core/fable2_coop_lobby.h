@@ -61,6 +61,7 @@ struct Lobby {
   HostLobby host;
   PartnerLobby partner;
   std::vector<PartnerLobby::Listing> listing;  // partner, browsing
+  std::vector<PartnerLobby::Listing> others;   // host without a partner: lobbies to join instead
   int cursor = 0;
   std::string notice;  // one line shown under the title
   Callbacks cb;
@@ -135,6 +136,14 @@ inline void Close() {
   close_locked(false);
 }
 
+// Host after Start: hide the panel but keep publishing the lobby record
+// (state Starting), so the seated partner keeps waiting for coop_go.
+inline void HidePanel() {
+  std::lock_guard<std::mutex> l(L().m);
+  L().role = Role::kClosed;
+  g_open.store(false);
+}
+
 // Host, once its world is loaded and the session is up: publish coop_go.
 inline void HostWorldReady(const std::string& cid) {
   std::lock_guard<std::mutex> l(L().m);
@@ -165,6 +174,13 @@ inline void Tick() {
   auto& lb = L();
   if (lb.role == Role::kHost) {
     lb.host.OnSeats(heard("coop_seat"));
+    if (!lb.host.partner_ip) {
+      PartnerLobby me;
+      me.my_name = lb.host.rec.host;
+      lb.others = me.JoinableOthers(heard("coop_lobby"));
+    } else {
+      lb.others.clear();
+    }
     lb.host.partner_proto_ok =
         lb.host.partner_ip && fable2::coopcampaign::PeerSupportsCampaign(lb.host.partner_ip);
     if (lb.host.partner_ip && !lb.host.partner_proto_ok)
@@ -201,7 +217,7 @@ inline void Tick() {
 
 // --- menu rows -------------------------------------------------------------------
 
-enum class Row { kChildhood, kReady, kStart, kBack, kGame, kGender, kLeave, kSolo, kCoop };
+enum class Row { kChildhood, kReady, kStart, kBack, kGame, kGender, kLeave, kSolo, kCoop, kJoinOther };
 
 struct RowItem {
   Row row;
@@ -220,6 +236,8 @@ inline std::vector<RowItem> rows_locked() {
     r.push_back({Row::kBack, "Back"});
   } else if (lb.role == Role::kHost) {
     const auto& rec = lb.host.rec;
+    for (size_t i = 0; i < lb.others.size(); ++i)
+      r.push_back({Row::kJoinOther, "Join " + lb.others[i].rec.host + "'s co-op campaign", true, i});
     if (rec.kind == Kind::kNew) r.push_back({Row::kChildhood, "Childhood: Skip to adulthood"});
     r.push_back({Row::kReady, std::string("Ready: ") + (rec.hready ? "Yes" : "No")});
     r.push_back({Row::kStart, "Start", lb.host.state == HostState::kBothReady && lb.host.partner_proto_ok});
@@ -286,6 +304,20 @@ inline std::function<void()> act_locked(int dy, int dx, bool a, bool b, bool x) 
         return lb.cb.coop;
       }
       break;
+    case Row::kJoinOther:
+      if (a && it.index < lb.others.size()) {
+        // Become the partner in that lobby: drop our own lobby, take a seat.
+        const auto target = lb.others[it.index];
+        lobby::PublishData("coop_lobby", "");
+        lb.role = Role::kPartner;
+        lb.partner = PartnerLobby{};
+        lb.partner.my_name = lb.host.rec.host;
+        lb.partner.Join(target);
+        lb.cursor = 0;
+        lb.notice = "Joined " + target.rec.host + "'s lobby";
+        REXSYS_INFO("[lobby] joining {}'s lobby as partner", target.rec.host);
+      }
+      break;
     case Row::kChildhood:
       break;  // one option for now (Sparrow and Rose is feature 005)
     case Row::kReady:
@@ -336,13 +368,26 @@ inline uint16_t g_prev_buttons = 0;
 
 // Button injection for the stock menu (Solo resumes the original New Game
 // with a fresh A press). Window in steady-clock ms; 0 = none.
-inline std::atomic<int64_t> g_inject_from_ms{0}, g_inject_until_ms{0};
-inline std::atomic<uint16_t> g_inject_buttons{0};
+struct Injected {
+  uint16_t buttons;
+  int64_t from_ms, until_ms;
+};
+inline std::mutex g_inject_mu;
+inline std::vector<Injected> g_injected;
 inline void InjectPress(uint16_t buttons, int64_t delay_ms, int64_t hold_ms) {
   const int64_t now = fable2::f5lua::steady_ms();
-  g_inject_buttons.store(buttons);
-  g_inject_from_ms.store(now + delay_ms);
-  g_inject_until_ms.store(now + delay_ms + hold_ms);
+  std::lock_guard<std::mutex> l(g_inject_mu);
+  g_injected.push_back({buttons, now + delay_ms, now + delay_ms + hold_ms});
+}
+// Buttons injected right now; drops finished presses.
+inline uint16_t injected_now() {
+  const int64_t t = fable2::f5lua::steady_ms();
+  std::lock_guard<std::mutex> l(g_inject_mu);
+  uint16_t b = 0;
+  for (const auto& i : g_injected)
+    if (t >= i.from_ms && t < i.until_ms) b |= i.buttons;
+  std::erase_if(g_injected, [t](const Injected& i) { return t >= i.until_ms; });
+  return b;
 }
 
 // Registered with the SDK input filter in place of the camera's, which it
@@ -354,9 +399,8 @@ inline void input_filter(uint32_t user_index, rex::input::X_INPUT_STATE* state) 
   const uint16_t now = state->gamepad.buttons;
   if (!g_open.load()) {
     g_prev_buttons = now;
-    const int64_t t = fable2::f5lua::steady_ms();
-    if (t >= g_inject_from_ms.load() && t < g_inject_until_ms.load())
-      state->gamepad.buttons.set(static_cast<uint16_t>(now | g_inject_buttons.load()));
+    if (const uint16_t inj = injected_now())
+      state->gamepad.buttons.set(static_cast<uint16_t>(now | inj));
     return;
   }
   const uint16_t pressed = now & ~g_prev_buttons;

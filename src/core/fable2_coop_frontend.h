@@ -18,6 +18,10 @@
 
 #include <atomic>
 #include <cstdint>
+#include <cstdio>
+#include <functional>
+#include <mutex>
+#include <string>
 
 #include <rex/cvar.h>
 #include <rex/logging.h>
@@ -59,15 +63,152 @@ inline void on_solo() {
   fable2::cooplobby::InjectPress(static_cast<uint16_t>(fable2::cooplobby::kA), 250, 200);
 }
 
-inline void on_coop() {
-  REXSYS_INFO("[coop] new game: Co-op, opening the host lobby");
+// --- the co-op session after Start (host) or go (partner) ---------------------------
+
+namespace lobby = rex::kernel::xam::lobby;
+
+enum class Session { kNone, kHostStarting, kHostInWorld, kHostPartnerLost, kPartnerJoining };
+
+struct SessionState {
+  std::mutex m;
+  Session s = Session::kNone;
+  std::string cid, partner_name;
+  uint32_t partner_ip = 0;
+  uint32_t go_seq = 0;
+  int64_t since_ms = 0;
+  bool partner_spawned = false;
+};
+inline SessionState& S() {
+  static SessionState s;
+  return s;
+}
+
+inline std::string new_campaign_id() {
+  static uint64_t salt = 0x9E3779B97F4A7C15ull;
+  salt ^= static_cast<uint64_t>(fable2::f5lua::steady_ms()) * 0x100000001B3ull;
+  salt ^= reinterpret_cast<uintptr_t>(&salt);
+  char buf[17];
+  std::snprintf(buf, sizeof(buf), "%016llX", static_cast<unsigned long long>(salt));
+  return buf;
+}
+
+// Host pressed Start. T021 (New Game + skip to adulthood) is not built yet,
+// so the rig starts the host's world from its newest save: inject Down
+// (cursor to Continue) and A once the panel has closed.
+inline void on_host_start() {
+  {
+    auto& lb = fable2::cooplobby::L();
+    std::lock_guard<std::mutex> l1(lb.m);
+    std::lock_guard<std::mutex> l2(S().m);
+    S().s = Session::kHostStarting;
+    S().cid = new_campaign_id();
+    S().partner_name = lb.host.rec.partner;
+    S().partner_ip = lb.host.partner_ip;
+    S().since_ms = fable2::f5lua::steady_ms();
+    S().partner_spawned = false;
+    REXSYS_INFO("[coop] host start: campaign {} with {} (T021 pending: world from the newest save)",
+                S().cid, S().partner_name);
+  }
+  fable2::cooplobby::HidePanel();
+  fable2::cooplobby::InjectPress(static_cast<uint16_t>(fable2::cooplobby::kDown), 300, 200);
+  fable2::cooplobby::InjectPress(static_cast<uint16_t>(fable2::cooplobby::kA), 900, 200);
+}
+
+// Partner: the host's world is up. Join it (the F9 path, proven by P3).
+inline void on_partner_go(uint32_t ip) {
+  {
+    std::lock_guard<std::mutex> l(S().m);
+    S().s = Session::kPartnerJoining;
+    S().since_ms = fable2::f5lua::steady_ms();
+  }
+  fable2::cooplobby::Close();
+  const bool ok = lobby::JoinLanPeer(ip);
+  REXSYS_INFO("[coop] partner: joining host {:08X}: {}", ip, ok ? "started" : "no joinable game");
+}
+
+inline void open_host_lobby(fable2::cooplobby::Kind kind, const std::string& cid,
+                            const std::string& partner) {
   fable2::cooplobby::Callbacks cb;
-  cb.host_start = [] { REXSYS_INFO("[coop] host start (T021: run New Game + skip to adulthood)"); };
+  cb.host_start = on_host_start;
+  cb.partner_go = on_partner_go;
   cb.back = [] {
     REXSYS_INFO("[coop] lobby closed, back to the chooser");
     open_chooser();
   };
-  fable2::cooplobby::OpenHost(fable2::cooplobby::Kind::kNew, "", "", cb);
+  fable2::cooplobby::OpenHost(kind, cid, partner, cb);
+}
+
+inline void on_coop() {
+  REXSYS_INFO("[coop] new game: Co-op, opening the host lobby");
+  open_host_lobby(fable2::cooplobby::Kind::kNew, "", "");
+}
+
+// Session watcher (render thread, ~2 Hz).
+inline int64_t g_next_session_ms = 0;
+inline uint32_t g_seen_spawn_epoch = 0;
+inline void session_tick() {
+  const int64_t now = fable2::f5lua::steady_ms();
+  if (now < g_next_session_ms) return;
+  g_next_session_ms = now + 500;
+  std::function<void()> after;  // runs once the session lock is released
+  {
+  std::lock_guard<std::mutex> l(S().m);
+  auto& s = S();
+  switch (s.s) {
+    case Session::kHostStarting:
+      if (lobby::GetLobbyStatus().in_world) {
+        s.s = Session::kHostInWorld;
+        s.since_ms = now;
+        g_seen_spawn_epoch = fable2::coophero::g_spawn_epoch.load();
+        const std::string go = fable2::cooplobby::Format(fable2::cooplobby::GoRecord{s.cid, ++s.go_seq});
+        lobby::PublishData("coop_go", go);
+        REXSYS_INFO("[coop] host world up: published {}", go);
+      }
+      break;
+    case Session::kHostInWorld: {
+      if (!s.partner_spawned && fable2::coophero::g_spawn_epoch.load() != g_seen_spawn_epoch) {
+        s.partner_spawned = true;
+        lobby::PublishData("coop_go", "");  // joined: a stale go must not pull a rejoin
+        lobby::PublishData("coop_lobby", "");
+        REXSYS_INFO("[coop] host: player 2 is in the world");
+      }
+      if (!s.partner_spawned) break;
+      int quiet = -1;
+      for (const auto& p : lobby::GetLanPeers())
+        if (p.ip == s.partner_ip) quiet = p.seconds_since_seen;
+      if (quiet < 0 || quiet > 6) {
+        // Partner lost (proof P6). Saving first is the next step (the save
+        // routine is found by tracing a pause-menu save); here: back to the
+        // front end and wait in the campaign's lobby.
+        REXSYS_INFO("[coop] host: partner {} lost (quiet {} s), returning to the front end",
+                    s.partner_name, quiet);
+        s.s = Session::kHostPartnerLost;
+        s.since_ms = now;
+        fable2::luaconsole::RunChunk(
+            "print('[coop] QuitToFrontEnd: ' .. tostring(pcall(Debug.QuitToFrontEnd)))");
+      }
+      break;
+    }
+    case Session::kHostPartnerLost:
+      if (!lobby::GetLobbyStatus().in_world && in_main_menu() && now - s.since_ms > 3000) {
+        REXSYS_INFO("[coop] host: back at the front end, waiting for {} in the lobby", s.partner_name);
+        s.s = Session::kNone;
+        after = [cid = s.cid, partner = s.partner_name] {
+          open_host_lobby(fable2::cooplobby::Kind::kContinue, cid, partner);
+        };
+      }
+      break;
+    case Session::kPartnerJoining:
+      if (lobby::GetLobbyStatus().joined_host_ip) {
+        REXSYS_INFO("[coop] partner: in the host's world");
+        s.s = Session::kNone;
+      }
+      break;
+    case Session::kNone:
+      break;
+  }
+  }
+  if (after) after();
 }
 
 inline void open_chooser() {
@@ -139,8 +280,16 @@ inline bool OnPress(PPCContext& ctx, uint8_t* /*base*/) {
   return false;
 }
 
+inline void (*g_prev_frame_hook)() = nullptr;
+inline void OnFrame() {
+  if (g_prev_frame_hook) g_prev_frame_hook();
+  if (REXCVAR_GET(coop_campaign)) session_tick();
+}
+
 inline const bool g_installed = [] {
   fable2::fronthooks::g_press_hook = &OnPress;
+  g_prev_frame_hook = fable2::f5lua::g_frame_hook;  // the lobby's (fable2_coop_lobby.h)
+  fable2::f5lua::g_frame_hook = &OnFrame;
   return true;
 }();
 

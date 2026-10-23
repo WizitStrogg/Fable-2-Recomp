@@ -93,6 +93,16 @@ int main() {
   p2.OnHost(Heard{1, "Josh", seated, 12}, std::nullopt);
   CHECK(p2.state == PartnerState::kBrowsing);
 
+  // Host view: other open lobbies to join, never its own, never full or foreign campaigns.
+  PartnerLobby me;
+  me.my_name = "Josh";
+  auto others = me.JoinableOthers(
+      {{1, "Josh", "COOPLOBBY:v1|kind=new|host=Josh|partner=|gender2=M|childhood=skip|hready=0|state=Hosting", 1},
+       {2, "Calvin", "COOPLOBBY:v1|kind=new|host=Calvin|partner=|gender2=M|childhood=skip|hready=0|state=Hosting", 1},
+       {3, "Eve", "COOPLOBBY:v1|kind=new|host=Eve|partner=Bob|gender2=M|childhood=skip|hready=0|state=PartnerJoined", 1},
+       {4, "Dan", "COOPLOBBY:v1|kind=continue|cid=c|host=Dan|partner=Josh|gender2=M|childhood=skip|hready=0|state=Hosting", 1}});
+  CHECK(others.size() == 2 && others[0].rec.host == "Calvin" && others[1].rec.host == "Dan");
+
   std::printf("%s (%d failed)\n", g_fail ? "FAILED" : "ALL PASSED", g_fail);
   return g_fail ? 1 : 0;
 }

@@ -256,6 +256,15 @@ struct PartnerLobby {
     return out;
   }
 
+  // For a host whose lobby has no partner yet: other players' open new
+  // lobbies and campaigns waiting for this player (never this player's own).
+  std::vector<Listing> JoinableOthers(const std::vector<Heard>& lobbies) const {
+    std::vector<Listing> out;
+    for (auto& l : List(lobbies))
+      if (l.joinable && l.rec.host != my_name) out.push_back(l);
+    return out;
+  }
+
   void Join(const Listing& l) {
     host_ip = l.ip;
     seat.host = l.rec.host;
