@@ -94,6 +94,7 @@ struct SessionState {
   bool host_female = false;
   // Start -> stock New Game -> hero card -> childhood -> skip to QC060 (T021)
   int64_t newgame_ms = 0, card_ms = 0, skip_ms = 0;
+  uint32_t load_epoch = 0;  // first game script load after the card pick
 };
 inline std::atomic<int64_t> g_qc060_started_ms{0};  // "QC060_NewBeginning Starting" printed
 inline SessionState& S() {
@@ -126,6 +127,7 @@ inline void on_host_start() {
     S().partner_spawned = false;
     S().host_female = lb.host.rec.gender1 == fable2::cooplobby::Gender::kFemale;
     S().newgame_ms = S().card_ms = S().skip_ms = 0;
+    S().load_epoch = 0;
     g_qc060_started_ms.store(0);
     REXSYS_INFO("[coop] host start: campaign {} with {}, host hero {}", S().cid, S().partner_name,
                 S().host_female ? "female" : "male");
@@ -189,9 +191,15 @@ inline void session_tick() {
         }
         REXSYS_INFO("[coop] host start: picking the {} hero card", s.host_female ? "girl" : "boy");
       }
-      // 2. Childhood world loaded and its scripts settled: skip to adulthood.
-      if (s.card_ms && !s.skip_ms && now - s.card_ms > 20000 && fable2::f5lua::ready() &&
-          !in_main_menu() && now - fable2::f5lua::g_load_at_ms.load() > 15000) {
+      // 2. Childhood world loaded (a game script load after the card) and
+      //    settled: skip to adulthood. The state probe still says MainMenu in
+      //    the world, so the load counter decides. The childhood runs while
+      //    the gameflow waits at QC060, so asking for QC060 ends the childhood
+      //    and starts QC060 normally (launch 4, P2STATE gfpos=8).
+      if (s.card_ms && !s.load_epoch) s.load_epoch = fable2::f5lua::g_load_epoch.load() + 1;
+      if (s.card_ms && !s.skip_ms && fable2::f5lua::ready() &&
+          fable2::f5lua::g_load_epoch.load() >= s.load_epoch &&
+          now - fable2::f5lua::g_load_at_ms.load() > 15000) {
         s.skip_ms = now;
         REXSYS_INFO("[coop] host start: childhood loaded, skipping to adulthood (QC060)");
         fable2::luaconsole::RunChunk(
