@@ -114,12 +114,17 @@ inline uint32_t g_story_rev = 0;
 inline uint32_t g_story_ip = 0;
 // Auto-capture timing (game thread only).
 inline int64_t g_ready_since_ms = 0;
-inline int64_t g_next_capture_ms = 0;
+inline int64_t g_next_capture_ms = 0;  // 0 = no capture scheduled
 inline int64_t g_next_check_ms = 0;
+// Which world we are in (host: 1, joined: host ip, else 0); a change is a
+// session event (load into a world, join, leave).
+inline uint64_t g_world_key = ~0ull;
+inline bool g_world_changed = false;
 
 constexpr int64_t kFirstCaptureDelayMs = 20'000;
-constexpr int64_t kCaptureEveryMs = 120'000;
 constexpr int64_t kCheckEveryMs = 500;
+// Game script loads (level loads) come in bursts: act once they settle.
+constexpr int64_t kLoadSettleMs = 5'000;
 
 // --- helpers ---------------------------------------------------------------
 
@@ -227,12 +232,16 @@ inline void auto_capture(int64_t now) {
     g_ready_since_ms = 0;
     return;
   }
+  // Capture once after the game finished loading, and again on each world
+  // change (joining someone, back to your own world). No periodic re-runs.
   if (g_ready_since_ms == 0) {
     g_ready_since_ms = now;
     g_next_capture_ms = now + kFirstCaptureDelayMs;
+  } else if (g_world_changed) {
+    g_next_capture_ms = now + kFirstCaptureDelayMs;
   }
-  if (now < g_next_capture_ms) return;
-  g_next_capture_ms = now + kCaptureEveryMs;
+  if (g_next_capture_ms == 0 || now < g_next_capture_ms) return;
+  g_next_capture_ms = 0;
   fable2::f5lua::request_run("scripts/recomp/coop_capture.lua");
 }
 
@@ -341,13 +350,14 @@ inline void load_pending_label() {
 // --- camera and leash (research/04-camera.md) -------------------------------
 //
 // Applied through Lua on each PC while it is in a world (hosting, or in
-// someone else's game): re-run whenever the settings change and every
-// kCameraEveryMs (level loads can reload the camera scripts). The chunk is
-// idempotent: it keeps the game's original functions and wraps them.
+// someone else's game): re-run only when the settings change, on a world
+// change, and after a level load (the game reloading its scripts can reset
+// the camera tables). The chunk is idempotent: it keeps the game's original
+// functions and wraps them.
 
 inline std::string g_camera_signature;  // settings last applied ("" = never / restored)
-inline int64_t g_next_camera_ms = 0;
-constexpr int64_t kCameraEveryMs = 15'000;
+inline uint32_t g_camera_load_epoch = 0;   // game script-load epoch last applied after
+inline uint32_t g_camera_spawn_epoch = 0;  // henchman spawn epoch last applied after
 
 inline std::string camera_chunk(bool own_camera, bool follow_partner, int outdoor, int indoor) {
   std::string c;
@@ -391,12 +401,21 @@ inline void camera_tick(const lobby::LobbyStatus& status, int64_t now) {
   if (!any && g_camera_signature.empty()) return;  // nothing to do, nothing to undo
   const std::string signature = std::to_string(own_camera) + std::to_string(follow_partner) +
                                 "/" + std::to_string(outdoor) + "/" + std::to_string(indoor);
-  if (signature == g_camera_signature && now < g_next_camera_ms) return;
-  g_next_camera_ms = now + kCameraEveryMs;
-  if (signature != g_camera_signature) {
-    REXSYS_INFO("[coop] camera: own_camera={} follow_partner={} leash={}m/{}m", own_camera,
-                follow_partner, outdoor, indoor);
-  }
+  const uint32_t load_epoch = fable2::f5lua::g_load_epoch.load();
+  const uint32_t spawn_epoch = g_spawn_epoch.load();
+  const bool loaded = load_epoch != g_camera_load_epoch &&
+                      now - fable2::f5lua::g_load_at_ms.load() >= kLoadSettleMs;
+  const bool spawned = spawn_epoch != g_camera_spawn_epoch;
+  if (signature == g_camera_signature && !g_world_changed && !loaded && !spawned) return;
+  if (load_epoch != g_camera_load_epoch && !loaded) return;  // load still settling
+  g_camera_load_epoch = load_epoch;
+  g_camera_spawn_epoch = spawn_epoch;
+  REXSYS_INFO("[coop] camera: own_camera={} follow_partner={} leash={}m/{}m ({})", own_camera,
+              follow_partner, outdoor, indoor,
+              signature != g_camera_signature ? "settings"
+              : g_world_changed               ? "world"
+              : loaded                        ? "level load"
+                                              : "spawn");
   fable2::luaconsole::RunChunk(camera_chunk(own_camera, follow_partner, outdoor, indoor));
   g_camera_signature = any ? signature : std::string();
 }
@@ -413,6 +432,11 @@ inline void OnFrame() {
   g_next_check_ms = now + kCheckEveryMs;
   const lobby::LobbyStatus status = lobby::GetLobbyStatus();
   if (!status.networking_enabled) return;
+  const uint64_t world_key = status.joined_host_ip != 0 ? status.joined_host_ip
+                             : status.in_world          ? 1ull
+                                                        : 0ull;
+  g_world_changed = world_key != g_world_key;
+  g_world_key = world_key;
   joiner_story(status);
   camera_tick(status, now);
   if (!REXCVAR_GET(coop_own_hero)) return;
