@@ -227,17 +227,35 @@ inline void OnStoryLine(std::string_view line) {
 
 // --- per frame (game thread) ---------------------------------------------------
 
-inline void auto_capture(int64_t now) {
+inline uint32_t g_capture_load_epoch = 0;
+
+// Captures this PC's own hero (and publishes it through the COOPHERO line
+// handler). Only in your own world: in someone else's world GetPlayerHero() is
+// the host's hero, and a visiting game runs no gameplay Lua anyway. Runs 20 s
+// after the game is ready, after each settled level load and on returning to
+// your own world, plus once immediately when a join starts (the own world is
+// still loaded for a moment), so the host has a fresh profile.
+inline void auto_capture(const lobby::LobbyStatus& status, int64_t now) {
   if (!fable2::f5lua::ready()) {
     g_ready_since_ms = 0;
     return;
   }
-  // Capture once after the game finished loading, and again on each world
-  // change (joining someone, back to your own world). No periodic re-runs.
+  const bool joined = status.joined_host_ip != 0;
+  if (joined) {
+    if (g_world_changed) {
+      REXSYS_INFO("[coop] joining: capturing your hero before the host's world loads");
+      fable2::luaconsole::RunFile("coop_capture.lua");
+    }
+    g_next_capture_ms = 0;
+    return;
+  }
+  const uint32_t load_epoch = fable2::f5lua::g_load_epoch.load();
   if (g_ready_since_ms == 0) {
     g_ready_since_ms = now;
+    g_capture_load_epoch = load_epoch;
     g_next_capture_ms = now + kFirstCaptureDelayMs;
-  } else if (g_world_changed) {
+  } else if (g_world_changed || load_epoch != g_capture_load_epoch) {
+    g_capture_load_epoch = load_epoch;
     g_next_capture_ms = now + kFirstCaptureDelayMs;
   }
   if (g_next_capture_ms == 0 || now < g_next_capture_ms) return;
@@ -440,7 +458,7 @@ inline void OnFrame() {
   joiner_story(status);
   camera_tick(status, now);
   if (!REXCVAR_GET(coop_own_hero)) return;
-  auto_capture(now);
+  auto_capture(status, now);
   host_apply(status, now);
 }
 

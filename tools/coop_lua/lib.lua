@@ -36,8 +36,18 @@ local XP_TYPES = {
   EExperienceType.EXPERIENCE_WILL
 }
 
+-- GetID can return a userdata (not a plain number) in this build; only plain
+-- numbers fit the profile line, so anything else is skipped (noted once).
+local noted_id_type = false
 local function record_id(item)
-  return try("GetRecord", function() return item:GetRecord():GetID() end)
+  local id = try("GetRecord", function() return item:GetRecord():GetID() end)
+  if type(id) == "number" then return id end
+  local n = tonumber(tostring(id))
+  if n then return n end
+  if id ~= nil and not noted_id_type then
+    noted_id_type = true
+    print("[coop] note: item record id is a " .. type(id) .. " (" .. tostring(id) .. "), skipped")
+  end
 end
 
 function CoopHero.Capture(entity)

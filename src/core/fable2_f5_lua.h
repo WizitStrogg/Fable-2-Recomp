@@ -597,8 +597,14 @@ inline ThreadCount& my_thread_count() {
   return *tc;
 }
 
+// Entries into the game VM's luaD_call (any thread / outermost on the VM
+// thread / on the VM thread). Counted at entry only, so longjmp-safe.
+inline std::atomic<uint32_t> g_dcall_hits{0}, g_dcall_vm{0}, g_dcall_outer{0};
+
 std::string vm_report() {
-  std::string out;
+  std::string out = "luaD_call " + std::to_string(g_dcall_hits.exchange(0)) + " (VM thread " +
+                    std::to_string(g_dcall_vm.exchange(0)) + ", outermost " +
+                    std::to_string(g_dcall_outer.exchange(0)) + "), ";
   for (auto& vm : g_vm_entries) {
     for (auto& e : vm) {
       out += std::string(e.via) + " " + std::to_string(e.hits.exchange(0)) + " (VM thread " +
@@ -644,4 +650,29 @@ extern "C" void sub_821931E8(PPCContext& ctx, uint8_t* base) {  // other VM lua_
 }
 extern "C" void sub_822DDF38(PPCContext& ctx, uint8_t* base) {  // other VM lua_resume
   fable2::f5lua::vm_entry<1, 1>(ctx, base, __imp__sub_822DDF38);
+}
+
+// Game VM luaD_call (0x82228C70; L->nCcalls is the u16 at L+52, "C stack
+// overflow" at 200). Every C->Lua call goes through it, including the
+// engine's own unprotected lua_call. At ENTRY with nCcalls == 0 on the VM
+// thread, outside any lua_pcall/lua_resume and LuaBind dispatch, no Lua is
+// running: the engine is about to start an outermost call, so drain there,
+// before it. Nothing is counted on the way out, so a longjmp cannot unbalance
+// anything.
+extern "C" void ProcessAndIncrementAndProcess3_82228C70(PPCContext& ctx, uint8_t* base) {
+  using namespace fable2::f5lua;
+  g_dcall_hits.fetch_add(1, std::memory_order_relaxed);
+  if (current_thread_id() == g_lua_thread.load(std::memory_order_relaxed)) {
+    g_dcall_vm.fetch_add(1, std::memory_order_relaxed);
+    const uint32_t L = ctx.r3.u32;
+    if (L != 0 && ta::rdable2(base, L + 52, 2)) {
+      const uint8_t* p = reinterpret_cast<const uint8_t*>(ta::host_addr(base, L + 52));
+      const uint16_t n_ccalls = static_cast<uint16_t>((p[0] << 8) | p[1]);
+      if (n_ccalls == 0) {
+        g_dcall_outer.fetch_add(1, std::memory_order_relaxed);
+        if (g_vm_depth == 0 && g_dispatch_depth == 0) run_pending(ctx, base, "luaD_call entry");
+      }
+    }
+  }
+  __imp__ProcessAndIncrementAndProcess3_82228C70(ctx, base);
 }
