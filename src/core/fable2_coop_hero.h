@@ -65,6 +65,18 @@ REXCVAR_DEFINE_STRING(coop_story_sync, "ask", "Network",
 REXCVAR_DEFINE_STRING(coop_story_pending, "", "Network",
                       "Read-only: the story waiting to be brought into this save "
                       "('<host> position <n>'), empty if none");
+REXCVAR_DEFINE_BOOL(coop_own_camera, false, "Network",
+                    "Each player's camera follows only their own hero in co-op, like the "
+                    "single-player camera (experimental)");
+REXCVAR_DEFINE_BOOL(coop_camera_follow_partner, false, "Network",
+                    "When in someone else's game, point this PC's camera at your own "
+                    "character (use only if the camera follows the host's hero)");
+REXCVAR_DEFINE_INT32(coop_leash_outdoor_m, 0, "Network",
+                     "Host only: how far apart co-op players may be outdoors, in metres "
+                     "(0 = game default, at most 50)");
+REXCVAR_DEFINE_INT32(coop_leash_indoor_m, 0, "Network",
+                     "Host only: how far apart co-op players may be indoors, in metres "
+                     "(0 = game default, at most 20)");
 
 namespace fable2::coophero {
 
@@ -326,6 +338,69 @@ inline void load_pending_label() {
   if (!host.empty()) set_pending_label(host + " position " + pos);
 }
 
+// --- camera and leash (research/04-camera.md) -------------------------------
+//
+// Applied through Lua on each PC while it is in a world (hosting, or in
+// someone else's game): re-run whenever the settings change and every
+// kCameraEveryMs (level loads can reload the camera scripts). The chunk is
+// idempotent: it keeps the game's original functions and wraps them.
+
+inline std::string g_camera_signature;  // settings last applied ("" = never / restored)
+inline int64_t g_next_camera_ms = 0;
+constexpr int64_t kCameraEveryMs = 15'000;
+
+inline std::string camera_chunk(bool own_camera, bool follow_partner, int outdoor, int indoor) {
+  std::string c;
+  c += "if type(CameraManager) ~= 'table' or type(SACCamera) ~= 'table' then\n";
+  c += "  print('[coop] camera scripts are not reachable from this Lua state') return\n";
+  c += "end\n";
+  c += "CameraManager.IgnoreMultiplayerCameras = " + std::string(own_camera ? "true" : "false") + "\n";
+  c += "SACCamera.__CoopOrigLeash = SACCamera.__CoopOrigLeash or SACCamera.SetMaxCoopDistance\n";
+  c += "local orig_leash = SACCamera.__CoopOrigLeash\n";
+  c += "local outdoor, indoor = " + std::to_string(outdoor) + ", " + std::to_string(indoor) + "\n";
+  c += "if outdoor > 0 or indoor > 0 then\n";
+  c += "  SACCamera.SetMaxCoopDistance = function(self)\n";
+  c += "    orig_leash(self)\n";
+  c += "    local d = self.IsInsideBuilding and indoor or outdoor\n";
+  c += "    if d > 0 then Debug.SetLimitCharacterDistance(d) end\n";
+  c += "  end\n";
+  c += "else SACCamera.SetMaxCoopDistance = orig_leash end\n";
+  c += "CameraManager.__CoopOrigFrameUpdate = CameraManager.__CoopOrigFrameUpdate or CameraManager.FrameUpdate\n";
+  c += "local orig_update = CameraManager.__CoopOrigFrameUpdate\n";
+  if (follow_partner) {
+    c += "CameraManager.FrameUpdate = function(self, player)\n";
+    c += "  local mine = GetPlayerHenchman()\n";
+    c += "  if mine and mine:IsAlive() then player = mine end\n";
+    c += "  return orig_update(self, player)\n";
+    c += "end\n";
+  } else {
+    c += "CameraManager.FrameUpdate = orig_update\n";
+  }
+  return c;
+}
+
+inline void camera_tick(const lobby::LobbyStatus& status, int64_t now) {
+  const bool in_world = status.in_world || status.joined_host_ip != 0;
+  const bool host = is_host(status);
+  const bool own_camera = REXCVAR_GET(coop_own_camera);
+  const bool follow_partner = REXCVAR_GET(coop_camera_follow_partner) && !host;
+  const int outdoor = host ? std::clamp(REXCVAR_GET(coop_leash_outdoor_m), 0, 50) : 0;
+  const int indoor = host ? std::clamp(REXCVAR_GET(coop_leash_indoor_m), 0, 20) : 0;
+  const bool any = own_camera || follow_partner || outdoor > 0 || indoor > 0;
+  if (!in_world || !fable2::f5lua::ready()) return;
+  if (!any && g_camera_signature.empty()) return;  // nothing to do, nothing to undo
+  const std::string signature = std::to_string(own_camera) + std::to_string(follow_partner) +
+                                "/" + std::to_string(outdoor) + "/" + std::to_string(indoor);
+  if (signature == g_camera_signature && now < g_next_camera_ms) return;
+  g_next_camera_ms = now + kCameraEveryMs;
+  if (signature != g_camera_signature) {
+    REXSYS_INFO("[coop] camera: own_camera={} follow_partner={} leash={}m/{}m", own_camera,
+                follow_partner, outdoor, indoor);
+  }
+  fable2::luaconsole::RunChunk(camera_chunk(own_camera, follow_partner, outdoor, indoor));
+  g_camera_signature = any ? signature : std::string();
+}
+
 inline bool g_pending_label_loaded = false;
 
 inline void OnFrame() {
@@ -339,6 +414,7 @@ inline void OnFrame() {
   const lobby::LobbyStatus status = lobby::GetLobbyStatus();
   if (!status.networking_enabled) return;
   joiner_story(status);
+  camera_tick(status, now);
   if (!REXCVAR_GET(coop_own_hero)) return;
   auto_capture(now);
   host_apply(status, now);
