@@ -29,6 +29,8 @@
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
+#include <deque>
+#include <filesystem>
 #include <mutex>
 #include <string>
 
@@ -98,6 +100,23 @@ inline std::atomic<uint32_t> g_run_count{0};
 
 // Latched by the per-frame F5 poll; consumed by poll_mainloop.
 inline std::atomic<bool> g_f5_pending{false};
+
+// Script paths queued by host code (the `lua` / `luafile` console commands),
+// run one per frame by poll_mainloop on the guest main thread.
+inline std::mutex g_queue_mtx;
+inline std::deque<std::string> g_queue;
+inline void request_run(std::string path) {
+  std::lock_guard<std::mutex> l(g_queue_mtx);
+  g_queue.push_back(std::move(path));
+}
+
+// Host directory that holds data/ (set from Fable2App::OnLoadXexImage), so
+// host code can write script files the game VFS reads.
+inline std::filesystem::path g_data_root;
+
+// True once the RunScript callable has been captured (the game finished
+// loading its own scripts), i.e. queued scripts can run.
+inline bool ready() { return g_this.load() != 0 && g_method.load() != 0; }
 inline bool g_f5_down_prev = false;
 
 inline std::mutex& log_mtx() { static std::mutex m; return m; }
@@ -142,14 +161,13 @@ inline void poll_f5() {
 
 // Run the external Lua file via the captured CScriptManager::RunScript.
 // Returns true if invoked. Must be called from the guest main thread.
-inline bool run_external(PPCContext& ctx, uint8_t* base) {
+inline bool run_external(PPCContext& ctx, uint8_t* base, const std::string& path) {
   const uint32_t this_ptr = g_this.load();
   const uint32_t method = g_method.load();
   if (this_ptr == 0 || method == 0) {
     logline("[f5] requested but RunScript callable not captured yet\n");
     return false;
   }
-  const std::string path = REXCVAR_GET(f5_lua_path);
   if (path.empty()) return false;
 
   // Safety: the captured method must resolve to a real recompiled guest
@@ -247,7 +265,15 @@ inline bool run_external(PPCContext& ctx, uint8_t* base) {
 // fps_meter.h). Runs the external file when F5 is latched. This makes F5
 // responsive (fires on the very next frame).
 inline void poll_mainloop(PPCContext& ctx, uint8_t* base) {
-  if (!g_f5_pending.exchange(false)) return;
+  std::string path;
+  if (g_f5_pending.exchange(false)) {
+    path = REXCVAR_GET(f5_lua_path);
+  } else {
+    std::lock_guard<std::mutex> l(g_queue_mtx);
+    if (g_queue.empty() || !ready()) return;
+    path = std::move(g_queue.front());
+    g_queue.pop_front();
+  }
   // run_external calls guest functions (ConstructRefCounted, the RunScript
   // method, DestructRefCounted) which clobber the PPC registers. Save the whole
   // context and restore it so the real MainRenderLoop sees the state it had
@@ -256,7 +282,7 @@ inline void poll_mainloop(PPCContext& ctx, uint8_t* base) {
           (uint32_t)ctx.r1.u64, (uint32_t)ctx.r2.u64, (uint32_t)ctx.r3.u64);
   const PPCContext saved = ctx;
   try {
-    run_external(ctx, base);
+    run_external(ctx, base, path);
   } catch (...) {
   }
   ctx = saved;

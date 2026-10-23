@@ -1,0 +1,156 @@
+-- CoopHero: capture a hero's look and stats into a table / one text line, and
+-- apply such a profile to another entity (the co-op partner's henchman).
+--
+-- Profile line format (printed by the capture step, parsed by the apply step):
+--   COOPHERO:v1|g=M|mor=..|pur=..|fat=..|str=..|skl=..|wil=..|ren=..
+--           |ab=<abilityvalue>:<level>,...|xp=<gen>,<str>,<skl>,<wil>
+--           |worn=<recordid>,...|weap=<recordid>,...
+-- Every engine call is wrapped in pcall: a missing binding or a dead entity
+-- prints a note instead of stopping the script.
+
+CoopHero = CoopHero or {}
+
+local function try(label, fn, ...)
+  local ok, res = pcall(fn, ...)
+  if not ok then
+    print("[coop] " .. label .. " failed: " .. tostring(res))
+    return nil
+  end
+  return res
+end
+CoopHero.Try = try
+
+local WEAPON_SLOTS = {
+  DummyObjects.HAND_RIGHT,
+  DummyObjects.HAND_LEFT,
+  DummyObjects.SHEATHE_BACK,
+  DummyObjects.SHEATHE_RANGED_BACK,
+  DummyObjects.SHEATHE_FRONT,
+  DummyObjects.SHEATHE_HIP
+}
+
+local XP_TYPES = {
+  EExperienceType.EXPERIENCE_GENERAL,
+  EExperienceType.EXPERIENCE_STRENGTH,
+  EExperienceType.EXPERIENCE_SKILL,
+  EExperienceType.EXPERIENCE_WILL
+}
+
+local function record_id(item)
+  return try("GetRecord", function() return item:GetRecord():GetID() end)
+end
+
+function CoopHero.Capture(entity)
+  local p = {}
+  p.male = try("Gender.Get", function() return Gender.Get(entity) == EGender.EG_MALE end)
+  p.mor = try("GetMorality", Stats.GetMorality, entity)
+  p.pur = try("GetPurity", Stats.GetPurity, entity)
+  p.fat = try("GetFat", Stats.GetFat, entity)
+  p.str = try("GetStrength", Stats.GetStrength, entity)
+  p.skl = try("GetSkill", Stats.GetSkill, entity)
+  p.wil = try("GetWill", Stats.GetWill, entity)
+  p.ren = try("GetRenown", Stats.GetRenown, entity)
+  p.ab = {}
+  for name, value in pairs(EHeroAbilityType) do
+    if type(value) == "number" then
+      local level = try("GetHeroAbilityLevel " .. name, Stats.GetHeroAbilityLevel, entity, value)
+      if level and level > 0 then
+        p.ab[#p.ab + 1] = {value, level}
+      end
+    end
+  end
+  p.xp = {}
+  for i, t in ipairs(XP_TYPES) do
+    p.xp[i] = try("Experience.Get", Experience.Get, entity, t) or 0
+  end
+  p.worn = {}
+  for _, item in ipairs(try("GetAllWornItems", AppearanceModifierManager.GetAllWornItems, entity) or {}) do
+    local id = record_id(item)
+    if id then p.worn[#p.worn + 1] = id end
+  end
+  p.weap = {}
+  for _, slot in ipairs(WEAPON_SLOTS) do
+    local w = try("GetEntityInSlot", Carrying.GetEntityInSlot, entity, slot)
+    if w and w:IsAlive() then
+      local id = record_id(w)
+      if id then p.weap[#p.weap + 1] = id end
+    end
+  end
+  return p
+end
+
+local function num(v)
+  return v and string.format("%.4f", v) or ""
+end
+
+function CoopHero.Serialize(p)
+  local ab = {}
+  for _, a in ipairs(p.ab) do ab[#ab + 1] = a[1] .. ":" .. a[2] end
+  local xp = {}
+  for i, v in ipairs(p.xp) do xp[i] = num(v) end
+  return "COOPHERO:v1|g=" .. (p.male and "M" or "F") .. "|mor=" .. num(p.mor) ..
+    "|pur=" .. num(p.pur) .. "|fat=" .. num(p.fat) .. "|str=" .. num(p.str) ..
+    "|skl=" .. num(p.skl) .. "|wil=" .. num(p.wil) .. "|ren=" .. tostring(p.ren or "") ..
+    "|ab=" .. table.concat(ab, ",") .. "|xp=" .. table.concat(xp, ",") ..
+    "|worn=" .. table.concat(p.worn, ",") .. "|weap=" .. table.concat(p.weap, ",")
+end
+
+function CoopHero.Parse(line)
+  local body = line:match("^COOPHERO:v1|(.*)$")
+  if not body then return nil end
+  local f = {}
+  for k, v in body:gmatch("(%w+)=([^|]*)") do f[k] = v end
+  local p = {male = f.g ~= "F", ab = {}, xp = {}, worn = {}, weap = {}}
+  for _, k in ipairs({"mor", "pur", "fat", "str", "skl", "wil", "ren"}) do p[k] = tonumber(f[k]) end
+  for a, l in (f.ab or ""):gmatch("(%-?%d+):(%-?%d+)") do p.ab[#p.ab + 1] = {tonumber(a), tonumber(l)} end
+  for v in (f.xp or ""):gmatch("[^,]+") do p.xp[#p.xp + 1] = tonumber(v) end
+  for v in (f.worn or ""):gmatch("[^,]+") do p.worn[#p.worn + 1] = tonumber(v) end
+  for v in (f.weap or ""):gmatch("[^,]+") do p.weap[#p.weap + 1] = tonumber(v) end
+  return p
+end
+
+-- Stats are applied as deltas (the engine exposes Modify*, not Set*).
+local function move_to(label, getter, modifier, entity, target)
+  if not target or not modifier then return end
+  local current = try(label .. " get", getter, entity)
+  if current then try(label .. " modify", modifier, entity, target - current) end
+end
+
+function CoopHero.Apply(entity, p, opts)
+  opts = opts or {}
+  if opts.body ~= false then
+    try("ChangePlayerEntityType", Player.ChangePlayerEntityType, entity,
+      p.male and "CreatureHero" or "CreatureHeroFemale")
+  end
+  move_to("Morality", Stats.GetMorality, Stats.ModifyMorality, entity, p.mor)
+  move_to("Purity", Stats.GetPurity, Stats.ModifyPurity, entity, p.pur)
+  move_to("Fat", Stats.GetFat, Stats.ModifyFat, entity, p.fat)
+  move_to("Strength", Stats.GetStrength, Stats.ModifyStrength, entity, p.str)
+  for _, a in ipairs(p.ab) do
+    try("SetHeroAbilityLevel", Stats.SetHeroAbilityLevel, entity, a[1], a[2])
+  end
+  if opts.clothes ~= false then
+    for _, id in ipairs(p.worn) do
+      try("AddAndReplaceItemOfRecordID " .. tostring(id),
+        AppearanceModifierManager.AddAndReplaceItemOfRecordID, entity, id)
+    end
+  end
+  if opts.weapons ~= false then
+    for _, id in ipairs(p.weap) do
+      try("AddItemOfType " .. tostring(id), Inventory.AddItemOfType, entity, id)
+    end
+  end
+end
+
+function CoopHero.Describe(label, entity)
+  if not entity then
+    print("[coop] " .. label .. ": none")
+    return
+  end
+  local alive = try("IsAlive", function() return entity:IsAlive() end)
+  local name = try("GetName", function() return entity:GetName() end)
+  print("[coop] " .. label .. ": name=" .. tostring(name) .. " alive=" .. tostring(alive))
+  if alive then
+    print("[coop]   " .. CoopHero.Serialize(CoopHero.Capture(entity)))
+  end
+end

@@ -1,0 +1,1 @@
+-- Slot for the `lua` console command (rewritten by the game exe).
