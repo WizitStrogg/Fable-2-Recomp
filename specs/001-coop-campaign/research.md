@@ -120,3 +120,26 @@ results are written back into this file.
 | P5 | Shared purse | One exact total after pickups and rewards by both | Mirror player 2's gold into the host purse every second |
 | P6 | Partner loss | Host saves and returns to lobby within 10 s | Host pauses with a "waiting" overlay instead |
 | P7 | Backup transfer | Hash-equal copy on the partner | Manual copy instructions |
+
+
+## Proof results (rig, 2026-10-23)
+
+Evidence root: `D:\Fable2-LAN\research\001-evidence\` (below: `E\`). Rig: mod-a host 127.0.0.1, mod-b partner
+127.0.0.2, rig build with the remote-control server (`FABLE2_RIG_REMOTE_CONTROL`).
+
+| Proof | Result | Evidence |
+| --- | --- | --- |
+| P1 | **Verified.** Hook: `FrontMenu_PressBitDispatch` (0x82188F20), r5 = pressed mask (Up 1, Down 2, Back 32, A 0x1000, B 0x2000), called on press and on release. The menu opens on New Game; Continue loads the newest save directly (no list). Intercept and resume work: A on New Game is swallowed and the chooser opens; Solo injects a fresh A that the stock New Game takes (boy/girl hero cards). | `E\T018\launch1_02_chooser_screen.png`, `launch1_03_solo_hero_cards_frame.png`, `E\launch2\t018_a_host_lobby_screen.png`, `E\proofs\P1\` |
+| P2 | **Not yet proven.** The run reached the pause menu instead of a fresh New Game (navigation error), so the skip ran on an adult save: `SetGameflowPosition(DebugQC060)` from position 13 restarted the gameflow, logged "Skipping QC085", "Skipping QC010", then "QC060_NewBeginning Starting", age 18.3. Shows the skip API works from the console; the fresh-New-Game comparison is still to do. | `E\launch2\launch2_results.txt`, `p2_after_skip_*` |
+| P3 | **Verified.** mod-b at the main menu (no save loaded) pressed F9 and joined mod-a's world; player 2 spawned. mod-b's own save stayed byte-identical. No lobby-save fallback needed. | `E\launch2\p3_b_joined_frame.png`, `p3_a_joined_frame.png`, `E\hashes\mod-b-after-launch2-*.txt` |
+| P4a | **Verified.** Loading opens the slot with root `Save`, `OPEN_EXISTING`; New Game creates the next free `HeroNNN` with `CREATE_ALWAYS` (flags 0x802) and writes a complete starting save within ~8 s, before the hero cards. | `E\proofs\RESULTS.md`, `mod-b\logs\fable_2_028.log` (13:44:18) |
+| P4b | **Verified for manual save.** A save opens root `Save` with `OPEN_ALWAYS` (folder kept, a test file survived), writes mainsave/herosave/chaptersave/texturemorphs, then `XamContentClose` (after the last write). Hook point: that close. `saveuid.bin` is not rewritten per save (slot id, not save id), so `coop_player2.txt` needs its own per-save stamp. Autosave not yet observed. | `E\proofs\P4\a_slot_times.txt`, `a_0*.png` |
+| P5 | **Partly.** Host Lua `Money.Modify(player2, 100)`: host +50 and player 2 +50 (the henchman gold share splits gold 50/50), player 2 has its own purse (`Money.Get` works on it). Pickups and quest rewards by player 2 not yet tested. | `E\launch2\launch2_results.txt` (P5 lines), `p5_*` |
+| P6 | **Partly.** Killing mod-b: lobby "went quiet" ~3 s, game scripts notice ("Henchman was alive but is no longer"), host calls `XSessionLeaveRemote` ~3.5 s after the loss; host stays in its world, no crash. Hook point: `XSessionLeaveRemote` in the SDK. Saving and returning to the lobby on it not yet proven. | `E\launch2\p6_a_log_after_kill.txt`, `p6_trace_diff.txt`, `p6_a_after_partner_loss_frame.png` |
+| P7 | **Verified on loopback** (127.0.0.1 -> 127.0.0.2): slot 850 KB -> zip 767 KB, all 7 hashes verified, tampered copy rejected, source unchanged. ZeroTier unverified (needs two PCs). | `E\proofs\P7\p7_run1.txt` |
+
+Rig findings that change the plan:
+- The remote pad needed XInput keystrokes: New Game's step after the storage selector reads keystrokes, not pad state (fixed in `src/input/remote_gamepad_driver.h`).
+- The title prompt ("Press A to start") uses the same dispatch with the same registers while the state probe already says MainMenu, so the front end lets the first A of each front-end visit through.
+- Game-side ImGui dialogs cannot link (ImGui is inside rexruntime.dll); the SDK draws a generic lobby panel from a text view (`rex_ui_set_lobby_view`).
+- `saveuid` stamp in data-model.md: replace with a per-save stamp (decided when T030 is built).
