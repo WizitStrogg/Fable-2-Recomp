@@ -32,6 +32,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <sstream>
 #include <functional>
 #include <mutex>
 #include <string>
@@ -175,6 +176,20 @@ inline bool RunChunk(const std::string& chunk) {
   return true;
 }
 
+// Queues a script file from data/scripts/recomp. Its text runs through the
+// same loadstring + pcall wrapper as the `lua` command, so an error inside it
+// is printed instead of unwinding into the game's own Lua.
+inline bool RunFile(const std::string& name) {
+  std::ifstream in(recomp_dir() / name, std::ios::binary);
+  if (!in) {
+    REXSYS_ERROR("luafile: cannot read {}", (recomp_dir() / name).string());
+    return false;
+  }
+  std::ostringstream text;
+  text << in.rdbuf();
+  return RunChunk(text.str());
+}
+
 inline void CmdLua(std::string_view args) {
   const std::string chunk = trim(args);
   if (chunk.empty()) {
@@ -201,8 +216,7 @@ inline void CmdLuaFile(std::string_view args) {
     REXSYS_ERROR("luafile: {} not found in {}", name, recomp_dir().string());
     return;
   }
-  not_ready_warning();
-  fable2::f5lua::request_run("scripts/recomp/" + name);
+  RunFile(name);
 }
 
 }  // namespace fable2::luaconsole

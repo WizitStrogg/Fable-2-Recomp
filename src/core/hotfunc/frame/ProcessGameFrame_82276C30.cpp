@@ -114,8 +114,6 @@ extern "C" void RegisterFrameCallback_821DCF10(PPCContext& ctx, uint8_t* base);
 extern "C" void Release_RefCounted_821C67D8(PPCContext& ctx, uint8_t* base);
 extern "C" void ResolveSubsystemReference_821F8760(PPCContext& ctx, uint8_t* base);
 extern "C" void Yield_82CBD098(PPCContext& ctx, uint8_t* base);
-// src/core/fable2_f5_lua.h: runs queued Lua at a frame boundary (game thread).
-void fable2_run_pending_lua(PPCContext& ctx, uint8_t* base);
 extern "C" void __imp__RtlEnterCriticalSection(PPCContext& ctx, uint8_t* base);
 extern "C" void __imp__RtlLeaveCriticalSection(PPCContext& ctx, uint8_t* base);
 extern "C" void __restfpr_21(PPCContext& ctx, uint8_t* base);
@@ -1084,9 +1082,6 @@ extern "C" void ProcessGameFrame_82276C30(PPCContext& __restrict ctx, uint8_t* b
 	ctx.lr = 0x8227720C;
 	Yield_82CBD098(ctx, base);
 	}
-	// Frame boundary on the game thread: run Lua queued by host code (the
-	// `lua` console, co-op features). Saves and restores ctx.
-	fable2_run_pending_lua(ctx, base);
 	check_loop_backedge(ctx, base);
 	} while (!ctx.cr6.eq);
 	}

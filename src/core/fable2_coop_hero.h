@@ -242,7 +242,7 @@ inline void auto_capture(int64_t now) {
   }
   if (g_next_capture_ms == 0 || now < g_next_capture_ms) return;
   g_next_capture_ms = 0;
-  fable2::f5lua::request_run("scripts/recomp/coop_capture.lua");
+  fable2::luaconsole::RunFile("coop_capture.lua");
 }
 
 inline void host_apply(const lobby::LobbyStatus& status, int64_t now) {

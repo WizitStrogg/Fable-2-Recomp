@@ -8,9 +8,10 @@
 // How it works (all hooks are recompiled-function probes so they have ctx+base):
 //   A) poll_f5() is called per frame from the host input poll; it edge-detects
 //      F5 and latches a flag (g_f5_pending).
-//   B) run_pending() is called once per frame at a frame boundary of the game
-//      main loop (ProcessGameFrame_82276C30, on the game thread); when the flag
-//      is latched or a script is queued it calls run_external().
+//   B) run_pending() is called from the dispatcher probe (D) right after the
+//      game's own Lua->C++ call returns, at the outermost dispatch depth, on
+//      the script VM's thread; when the flag is latched or a script is queued
+//      it calls run_external().
 //   C) run_external() builds a game (refcounted) string for the path in guest
 //      memory and calls the captured CScriptManager::RunScript method.
 //   D) The dispatcher probe (LuaBind_RunScript_82806168) captures the
@@ -19,10 +20,10 @@
 //      (this, method) whose string argument ends in ".lua".
 //
 // The Lua VM is single-threaded: it must only be entered from the thread that
-// runs the game's own Lua (GameThread). MainRenderLoop runs on the "3D Engine"
-// render thread, so it must NOT run scripts (doing so corrupted the VM and
-// crashed GameThread). The dispatcher probe records the Lua thread, and
-// run_pending() refuses to run anywhere else (logs once, keeps the queue).
+// runs the game's own Lua. MainRenderLoop runs on the "3D Engine" render
+// thread, so it must NOT run scripts (doing so corrupted the VM and crashed
+// GameThread). The probe records the thread of the game's boot-time RunScript
+// call, and run_pending() refuses to run on any other thread.
 
 #pragma once
 
@@ -63,6 +64,11 @@ inline uint32_t guest_alloc(PPCContext& ctx, uint8_t* base, size_t size);
 // External Lua file to run on F5. Path is resolved by CScriptManager::RunScript
 // relative to the VFS root (data/). Default lands at
 // <gamedataroot>/data/scripts/recomp/F5.lua.
+REXCVAR_DEFINE_BOOL(coop_lua_runner, true, "Network",
+                    "Run co-op and console Lua scripts in the game (camera, own hero, "
+                    "story capture, the lua console). Untick if the game misbehaves; "
+                    "plain co-op keeps working without it.");
+
 REXCVAR_DEFINE_STRING(
     f5_lua_path,
     "scripts/recomp/F5.lua",
@@ -99,8 +105,8 @@ inline std::atomic<uint32_t> g_method{0}; // member fn (CScriptManager::RunScrip
 // pointer.
 inline std::atomic<uint32_t> g_expected_head{0};
 
-// Host thread id of the game's Lua thread, recorded by the dispatcher probe
-// whenever the canonical RunScript method is dispatched (0 = not seen yet).
+// Host thread id of the script VM, recorded by the dispatcher probe at the
+// game's boot-time RunScript call (the first capture; 0 = not seen yet).
 inline std::atomic<uint32_t> g_lua_thread{0};
 // Bumped each time the game itself runs a script file through RunScript (boot,
 // level loads); host code uses it as a level-load event. now-ms of the last.
@@ -125,9 +131,12 @@ inline std::atomic<bool> g_f5_pending{false};
 // run one per frame by run_pending on the game's Lua thread.
 inline std::mutex g_queue_mtx;
 inline std::deque<std::string> g_queue;
+// g_queue.size(), readable without the lock (the drain is polled per dispatch).
+inline std::atomic<size_t> g_queued{0};
 inline void request_run(std::string path) {
   std::lock_guard<std::mutex> l(g_queue_mtx);
   g_queue.push_back(std::move(path));
+  g_queued.store(g_queue.size());
 }
 
 // Host directory that holds data/ (set from Fable2App::OnLoadXexImage), so
@@ -281,41 +290,49 @@ inline bool run_external(PPCContext& ctx, uint8_t* base, const std::string& path
   return true;
 }
 
-// Optional per-frame callback, e.g. the co-op module deciding to queue a
-// script. Runs on the render thread: must not call guest code itself.
-inline void (*g_frame_hook)() = nullptr;
+// Set while a script is being started: the script's own Lua->C++ calls come
+// back through the dispatcher probe and must not start another one.
+inline std::atomic<bool> g_running{false};
+// Dispatcher nesting depth on this thread (the probe is re-entered when a
+// bound C++ method calls back into Lua and Lua calls another bound method).
+inline thread_local int g_dispatch_depth = 0;
+inline int64_t g_last_run_ms = 0;
+inline std::atomic<bool> g_runner_off_logged{false};
+// At most one script per frame, so a burst never runs back to back.
+constexpr int64_t kMinRunGapMs = 16;
 
-// Per-frame render-thread entry point. Called from the MainRenderLoop_82B9CD68
-// hook (in fps_meter.h). Only runs the host-side frame hook; scripts run from
-// run_pending() on the game thread.
-inline void poll_mainloop(PPCContext& /*ctx*/, uint8_t* /*base*/) {
-  if (g_frame_hook) g_frame_hook();
+inline int64_t steady_ms() {
+  return std::chrono::duration_cast<std::chrono::milliseconds>(
+             std::chrono::steady_clock::now().time_since_epoch())
+      .count();
 }
 
-// Set while a script is being started, so a re-entrant call (RunScript ending
-// up back at the frame boundary) does nothing.
-inline bool g_running = false;
-inline std::atomic<bool> g_wrong_thread_logged{false};
+inline size_t queued_count() {
+  std::lock_guard<std::mutex> l(g_queue_mtx);
+  return g_queue.size() + (g_f5_pending.load() ? 1 : 0);
+}
 
-// Frame-boundary entry point on the game thread (ProcessGameFrame_82276C30).
-// Runs the F5 file when latched, otherwise one queued script.
+// Called by the dispatcher probe after the game's own call returned, at
+// dispatch depth 0. Runs the F5 file when latched, otherwise one queued script.
 inline void run_pending(PPCContext& ctx, uint8_t* base) {
-  if (g_running) return;
-  const bool f5 = g_f5_pending.load();
-  {
+  if (g_running.load() || (g_queued.load() == 0 && !g_f5_pending.load())) return;
+  if (!REXCVAR_GET(coop_lua_runner)) {
     std::lock_guard<std::mutex> l(g_queue_mtx);
-    if (!f5 && g_queue.empty()) return;
-  }
-  if (!ready()) return;
-  const uint32_t lua_thread = g_lua_thread.load();
-  if (lua_thread == 0 || lua_thread != current_thread_id()) {
-    // Not provably the Lua thread: never enter the VM. Keep the request queued.
-    if (!g_wrong_thread_logged.exchange(true)) {
-      REXSYS_WARN("[lua] not on the Lua thread (lua={} here={}); scripts stay queued",
-                  lua_thread, current_thread_id());
+    if (!g_runner_off_logged.exchange(true)) {
+      REXSYS_INFO("[lua] coop_lua_runner is off: dropping {} queued script(s)",
+                  g_queue.size());
     }
+    g_queue.clear();
+    g_queued.store(0);
+    g_f5_pending.store(false);
     return;
   }
+  g_runner_off_logged.store(false);
+  if (!ready()) return;
+  const uint32_t lua_thread = g_lua_thread.load();
+  if (lua_thread == 0 || lua_thread != current_thread_id()) return;
+  const int64_t now = steady_ms();
+  if (now - g_last_run_ms < kMinRunGapMs) return;
   std::string path;
   if (g_f5_pending.exchange(false)) {
     path = REXCVAR_GET(f5_lua_path);
@@ -324,18 +341,45 @@ inline void run_pending(PPCContext& ctx, uint8_t* base) {
     if (g_queue.empty()) return;
     path = std::move(g_queue.front());
     g_queue.pop_front();
+    g_queued.store(g_queue.size());
   }
   // run_external calls guest functions (ConstructRefCounted, the RunScript
-  // method) which clobber the PPC registers. Save the whole context and
-  // restore it so the game loop continues with the state it had.
+  // method) which clobber the PPC registers, including the game call's return
+  // values. Save the whole context and restore it afterwards.
   g_running = true;
+  g_last_run_ms = now;
   const PPCContext saved = ctx;
+  bool ran = false;
   try {
-    run_external(ctx, base, path);
+    ran = run_external(ctx, base, path);
   } catch (...) {
   }
   ctx = saved;
   g_running = false;
+  if (ran) {
+    REXSYS_INFO("[lua] ran {}", path);
+  } else {
+    REXSYS_WARN("[lua] could not run {}", path);
+  }
+}
+
+// Optional per-frame callback, e.g. the co-op module deciding to queue a
+// script. Runs on the render thread: must not call guest code itself.
+inline void (*g_frame_hook)() = nullptr;
+inline int64_t g_next_waiting_log_ms = 0;
+
+// Per-frame render-thread entry point. Called from the MainRenderLoop_82B9CD68
+// hook (in fps_meter.h). Runs the host-side frame hook and reports scripts
+// left waiting; the scripts themselves run from run_pending().
+inline void poll_mainloop(PPCContext& /*ctx*/, uint8_t* /*base*/) {
+  if (g_frame_hook) g_frame_hook();
+  const int64_t now = steady_ms();
+  if (now < g_next_waiting_log_ms) return;
+  g_next_waiting_log_ms = now + 60000;
+  if (const size_t n = queued_count(); n != 0) {
+    REXSYS_INFO("[lua] {} script(s) waiting (ready={} lua_thread={} runner={})", n, ready(),
+                g_lua_thread.load(), REXCVAR_GET(coop_lua_runner));
+  }
 }
 
 }  // namespace fable2::f5lua
@@ -398,14 +442,15 @@ extern "C" void LuaBind_RunScript_82806168(PPCContext& ctx, uint8_t* base) {
       // instance can move over a session); all other methods are ignored.
       const uint32_t prev_this = g_this.load(std::memory_order_relaxed);
       const uint32_t prev_method = g_method.load(std::memory_order_relaxed);
-      if (is_lua && (prev_this == 0 || method == prev_method)) {
-        // The game's own Lua is calling RunScript: this is the Lua thread.
+      if (is_lua && prev_this == 0) {
+        // The game's boot-time RunScript: this is the script VM's thread.
         g_lua_thread.store(current_thread_id(), std::memory_order_relaxed);
+        REXSYS_INFO("[lua] script VM thread recorded: {} (first RunScript '{}')",
+                    current_thread_id(), pathbuf);
+      }
+      if (is_lua && (prev_this == 0 || method == prev_method)) {
         g_load_epoch.fetch_add(1, std::memory_order_relaxed);
-        g_load_at_ms.store(std::chrono::duration_cast<std::chrono::milliseconds>(
-                               std::chrono::steady_clock::now().time_since_epoch())
-                               .count(),
-                           std::memory_order_relaxed);
+        g_load_at_ms.store(steady_ms(), std::memory_order_relaxed);
       }
       if (is_lua && (prev_this == 0 || (method == prev_method && this_ptr != prev_this))) {
         g_method.store(method, std::memory_order_relaxed);
@@ -419,11 +464,18 @@ extern "C" void LuaBind_RunScript_82806168(PPCContext& ctx, uint8_t* base) {
       }
     }
   }
+  ++g_dispatch_depth;
   __imp__LuaBind_RunScript_82806168(ctx, base);
+  --g_dispatch_depth;
+  // The game's own call has finished; run queued Lua only from the outermost
+  // dispatch (never while native->Lua->native calls are nested).
+  if (g_dispatch_depth == 0) {
+    static std::atomic<bool> s_logged{false};
+    if (!s_logged.exchange(true)) {
+      REXSYS_INFO("[lua] dispatcher first reached depth 0 on thread {} (script VM thread {})",
+                  current_thread_id(), g_lua_thread.load());
+    }
+    run_pending(ctx, base);
+  }
 }
 
-// Called from the ProcessGameFrame_82276C30 main loop (frame boundary, game
-// thread). Non-inline: this header is included only by main.cpp.
-void fable2_run_pending_lua(PPCContext& ctx, uint8_t* base) {
-  fable2::f5lua::run_pending(ctx, base);
-}
