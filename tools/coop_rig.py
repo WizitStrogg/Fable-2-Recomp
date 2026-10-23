@@ -152,16 +152,44 @@ class Instance:
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
         return self.cmd({"cmd": "screenshot", "path": os.path.abspath(path)}, timeout=30)
 
+    def luma(self) -> int:
+        """Average brightness of the current frame (title screen ~11, main menu ~56)."""
+        tmp = os.path.join(self.dir, "logs", "_rig_probe.png")
+        return int(self.shot(tmp).get("avg_luma", 0))
+
     def to_main_menu(self, timeout: float = 180.0) -> bool:
-        """Press A on the title prompt until the state probe reports MainMenu."""
+        """Press A on the title prompt until the main menu is drawn. The state
+        probe reports MainMenu while the dark "Press A" title is still up, so
+        the frame brightness decides (menu frame >= 35)."""
         deadline = time.time() + timeout
         while time.time() < deadline:
             st = self.state()
-            if st == "MainMenu":
-                return True
-            if st == "PressAScreen":
+            if st in ("MainMenu", "PressAScreen", "MainMenuMovie"):
+                if self.luma() >= 35:
+                    return True
+                # The menu fades in from black: only a frame that stays dark
+                # is the title prompt (an extra A would activate New Game).
+                time.sleep(1.5)
+                if self.luma() >= 35:
+                    return True
                 self.press("A")
-            time.sleep(2)
+            time.sleep(3)
+        return False
+
+    SUPPORTS_RE = re.compile(r"\[coop\] menu press: element \w+ supports ([0-9A-F]{4})")
+
+    def ensure_menu_list(self, tries: int = 5) -> bool:
+        """With coop_campaign on: after to_main_menu, make sure the menu list
+        (not the bright "Press A" title) has the input. Up is harmless on both;
+        the front-end hook logs which element answered (Up/Down = the list)."""
+        for _ in range(tries):
+            self.press("Up", 200)
+            time.sleep(1.2)
+            found = self.SUPPORTS_RE.findall(read_shared(self.log))
+            if found and int(found[-1], 16) & 0x3:
+                return True
+            self.press("A", 200)
+            time.sleep(4)
         return False
 
     def wait_log(self, pattern: str, timeout: float) -> bool:

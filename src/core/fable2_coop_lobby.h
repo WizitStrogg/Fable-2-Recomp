@@ -43,11 +43,13 @@ namespace fable2::cooplobby {
 
 namespace lobby = rex::kernel::xam::lobby;
 
-enum class Role { kClosed, kHost, kPartner };
+enum class Role { kClosed, kChoose, kHost, kPartner };  // kChoose: New Game -> Solo / Co-op
 
 // Called on the render thread; must not call guest code directly (queue Lua
 // or set flags instead).
 struct Callbacks {
+  std::function<void()> solo;                // chooser: Solo picked
+  std::function<void()> coop;                // chooser: Co-op picked
   std::function<void()> host_start;          // host pressed Start: run the original New Game / load
   std::function<void(uint32_t)> partner_go;  // coop_go arrived: join the host at this ip
   std::function<void()> back;                // lobby closed with Back / Leave
@@ -104,6 +106,18 @@ inline void OpenPartner(Callbacks cb) {
   lb.cb = std::move(cb);
   g_open.store(true);
   REXSYS_INFO("[lobby] open partner as {}", lb.partner.my_name);
+}
+
+// New Game -> "Solo or Co-op?" (T018). Publishes nothing.
+inline void OpenChooser(Callbacks cb) {
+  std::lock_guard<std::mutex> l(L().m);
+  auto& lb = L();
+  lb.role = Role::kChoose;
+  lb.cursor = 0;
+  lb.notice = "Play this new game alone, or start a co-op campaign with a partner.";
+  lb.cb = std::move(cb);
+  g_open.store(true);
+  REXSYS_INFO("[lobby] open chooser");
 }
 
 // Clears this PC's published keys (contract rule 5) and hides the window.
@@ -187,7 +201,7 @@ inline void Tick() {
 
 // --- menu rows -------------------------------------------------------------------
 
-enum class Row { kChildhood, kReady, kStart, kBack, kGame, kGender, kLeave };
+enum class Row { kChildhood, kReady, kStart, kBack, kGame, kGender, kLeave, kSolo, kCoop };
 
 struct RowItem {
   Row row;
@@ -200,7 +214,11 @@ struct RowItem {
 inline std::vector<RowItem> rows_locked() {
   auto& lb = L();
   std::vector<RowItem> r;
-  if (lb.role == Role::kHost) {
+  if (lb.role == Role::kChoose) {
+    r.push_back({Row::kSolo, "Solo"});
+    r.push_back({Row::kCoop, "Co-op"});
+    r.push_back({Row::kBack, "Back"});
+  } else if (lb.role == Role::kHost) {
     const auto& rec = lb.host.rec;
     if (rec.kind == Kind::kNew) r.push_back({Row::kChildhood, "Childhood: Skip to adulthood"});
     r.push_back({Row::kReady, std::string("Ready: ") + (rec.hready ? "Yes" : "No")});
@@ -246,6 +264,7 @@ inline std::function<void()> act_locked(int dy, int dx, bool a, bool b, bool x) 
     close_locked(false);
     return lb.cb.back;
   }
+  if (x && lb.role == Role::kChoose) return {};
   if (x) {
     if (lb.role == Role::kHost) lb.host.rec.hready = !lb.host.rec.hready;
     else if (lb.partner.state != PartnerState::kBrowsing) lb.partner.SetReady(!lb.partner.seat.ready);
@@ -254,6 +273,19 @@ inline std::function<void()> act_locked(int dy, int dx, bool a, bool b, bool x) 
   if (!a && !dx) return {};
   if (!it.enabled) return {};
   switch (it.row) {
+    case Row::kSolo:
+      if (a) {
+        close_locked(false);
+        return lb.cb.solo;
+      }
+      break;
+    case Row::kCoop:
+      if (a) {
+        lb.role = Role::kClosed;  // the coop callback opens the host lobby
+        g_open.store(false);
+        return lb.cb.coop;
+      }
+      break;
     case Row::kChildhood:
       break;  // one option for now (Sparrow and Rose is feature 005)
     case Row::kReady:
@@ -302,6 +334,17 @@ constexpr uint16_t kUp = 0x0001, kDown = 0x0002, kLeft = 0x0004, kRight = 0x0008
 
 inline uint16_t g_prev_buttons = 0;
 
+// Button injection for the stock menu (Solo resumes the original New Game
+// with a fresh A press). Window in steady-clock ms; 0 = none.
+inline std::atomic<int64_t> g_inject_from_ms{0}, g_inject_until_ms{0};
+inline std::atomic<uint16_t> g_inject_buttons{0};
+inline void InjectPress(uint16_t buttons, int64_t delay_ms, int64_t hold_ms) {
+  const int64_t now = fable2::f5lua::steady_ms();
+  g_inject_buttons.store(buttons);
+  g_inject_from_ms.store(now + delay_ms);
+  g_inject_until_ms.store(now + delay_ms + hold_ms);
+}
+
 // Registered with the SDK input filter in place of the camera's, which it
 // calls first. While the lobby is open, presses drive the lobby and the game
 // sees an idle pad.
@@ -311,6 +354,9 @@ inline void input_filter(uint32_t user_index, rex::input::X_INPUT_STATE* state) 
   const uint16_t now = state->gamepad.buttons;
   if (!g_open.load()) {
     g_prev_buttons = now;
+    const int64_t t = fable2::f5lua::steady_ms();
+    if (t >= g_inject_from_ms.load() && t < g_inject_until_ms.load())
+      state->gamepad.buttons.set(static_cast<uint16_t>(now | g_inject_buttons.load()));
     return;
   }
   const uint16_t pressed = now & ~g_prev_buttons;
@@ -336,7 +382,9 @@ inline void input_filter(uint32_t user_index, rex::input::X_INPUT_STATE* state) 
 inline std::string view_locked() {
   auto& lb = L();
   if (lb.role == Role::kClosed) return {};
-  std::string v = lb.role == Role::kHost ? "TCo-op campaign - your lobby\n" : "TCo-op campaign - join\n";
+  std::string v = lb.role == Role::kChoose ? "TNew Game\n"
+                  : lb.role == Role::kHost  ? "TCo-op campaign - your lobby\n"
+                                            : "TCo-op campaign - join\n";
   v += "N" + lb.notice + "\n";
   auto ready = [](bool r) { return r ? "Ready" : "Not ready"; };
   if (lb.role == Role::kHost) {
@@ -355,12 +403,13 @@ inline std::string view_locked() {
     v += "L" + lb.partner.my_name + " (you)  " + ready(lb.partner.seat.ready) + "\n";
   }
   const bool browsing = lb.role == Role::kPartner && lb.partner.state == PartnerState::kBrowsing;
-  v += browsing ? "SGames\n" : "SOptions\n";
+  if (lb.role != Role::kChoose) v += browsing ? "SGames\n" : "SOptions\n";
   const auto r = rows_locked();
   lb.cursor = std::clamp(lb.cursor, 0, std::max(0, static_cast<int>(r.size()) - 1));
   for (int i = 0; i < static_cast<int>(r.size()); ++i)
     v += std::string("R") + (r[i].enabled ? "1" : "0") + (i == lb.cursor ? "1" : "0") + r[i].label + "\n";
-  v += "FUp/Down move   A select   Left/Right change   X ready   B back\n";
+  v += lb.role == Role::kChoose ? "FUp/Down move   A select   B back\n"
+                                 : "FUp/Down move   A select   Left/Right change   X ready   B back\n";
   return v;
 }
 
@@ -374,6 +423,11 @@ inline void show_view() {
   if (v == g_shown_view) return;
   g_shown_view = v;
   rex_ui_set_lobby_view(v.c_str());
+  // One log line per change (rig evidence of what the panel shows).
+  std::string flat = v;
+  for (char& c : flat)
+    if (c == '\n') c = '|';
+  REXSYS_INFO("[lobby] view: {}", flat.empty() ? std::string("(hidden)") : flat);
 }
 
 }  // namespace fable2::cooplobby

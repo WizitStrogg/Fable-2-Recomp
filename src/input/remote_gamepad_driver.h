@@ -107,11 +107,33 @@ class GamepadDriver final : public rex::input::InputDriver {
     return id == kDeviceId ? X_ERROR_SUCCESS : X_ERROR_DEVICE_NOT_CONNECTED;
   }
 
+  // Button edges as XInput pad keystrokes (VK_PAD_*). Some screens read
+  // keystrokes instead of the pad state: Fable II's New Game, after the
+  // storage step, waits for a keystroke and ignores a state-only press.
+  // Edges are taken against the buttons seen at the previous keystroke poll,
+  // so nothing piles up while the game is not asking for keystrokes.
   X_RESULT GetDeviceKeystroke(DeviceId id, uint32_t flags,
                               X_INPUT_KEYSTROKE* out_keystroke) override {
     (void)flags;
-    (void)out_keystroke;
-    return X_ERROR_EMPTY;  // never has queued keystrokes
+    if (id != kDeviceId) return X_ERROR_DEVICE_NOT_CONNECTED;
+    uint16_t now = 0;
+    if (enabled_ && enabled_->load(std::memory_order_relaxed))
+      now = state_->Snapshot().buttons;
+    const uint16_t changed = now ^ ks_buttons_;
+    for (const auto& m : kPadKeys) {
+      if (changed & m.bit) ks_queue_.push_back({m.vk, (now & m.bit) != 0});
+    }
+    ks_buttons_ = now;
+    if (ks_queue_.empty()) return X_ERROR_EMPTY;
+    const KeyEdge e = ks_queue_.front();
+    ks_queue_.erase(ks_queue_.begin());
+    if (out_keystroke) {
+      *out_keystroke = X_INPUT_KEYSTROKE{};
+      out_keystroke->virtual_key.set(e.vk);
+      out_keystroke->flags.set(e.down ? rex::input::X_INPUT_KEYSTROKE_KEYDOWN
+                                      : rex::input::X_INPUT_KEYSTROKE_KEYUP);
+    }
+    return X_ERROR_SUCCESS;
   }
 
  private:
@@ -127,6 +149,23 @@ class GamepadDriver final : public rex::input::InputDriver {
   // src/input/keyboard_gamepad.h): InputSystem::DriverForDevice() resolves an id by
   // first match.
   static constexpr DeviceId kDeviceId{1ull << 61};
+
+  // XINPUT_GAMEPAD button bit -> VK_PAD_* (triggers and sticks send none).
+  struct PadKey {
+    uint16_t bit, vk;
+  };
+  static constexpr PadKey kPadKeys[] = {
+      {0x1000, 0x5800}, {0x2000, 0x5801}, {0x4000, 0x5802}, {0x8000, 0x5803},  // A B X Y
+      {0x0200, 0x5804}, {0x0100, 0x5805},                                      // RB LB
+      {0x0001, 0x5810}, {0x0002, 0x5811}, {0x0004, 0x5812}, {0x0008, 0x5813},  // D-pad
+      {0x0010, 0x5814}, {0x0020, 0x5815}, {0x0040, 0x5816}, {0x0080, 0x5817},  // Start Back L3 R3
+  };
+  struct KeyEdge {
+    uint16_t vk;
+    bool down;
+  };
+  uint16_t ks_buttons_ = 0;
+  std::vector<KeyEdge> ks_queue_;
 
   InputStateStore* state_;
   std::atomic<bool>* enabled_;

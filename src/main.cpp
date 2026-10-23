@@ -13,6 +13,8 @@
 #include "fable2_coop_campaign.h"
 // Co-op campaign lobby overlay (feature 001, T019).
 #include "fable2_coop_lobby.h"
+// Co-op campaign front end: New Game -> Solo / Co-op (feature 001, T018).
+#include "fable2_coop_frontend.h"
 
 #include "fable_2_app.h"
 #include "fps_meter.h"
