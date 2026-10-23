@@ -8,10 +8,15 @@
 // How it works (all hooks are recompiled-function probes so they have ctx+base):
 //   A) poll_f5() is called per frame from the host input poll; it edge-detects
 //      F5 and latches a flag (g_f5_pending).
-//   B) run_pending() is called from the dispatcher probe (D) right after the
-//      game's own Lua->C++ call returns, at the outermost dispatch depth, on
-//      the script VM's thread; when the flag is latched or a script is queued
-//      it calls run_external().
+//   B) run_pending() runs on the script VM thread only, from three points:
+//      once per frame from the FrameLimiterWait_82242628 hot function
+//      when no Lua->C++ call is active, and from the dispatcher probe (D)
+//      right after the game's own Lua->C++ call returns at the outermost
+//      dispatch depth. If neither depth-0 point has been reached for 3 s (the
+//      game's Lua can run entirely inside one long-lived dispatch), it also
+//      drains at the shallowest dispatch depth seen in the last second
+//      ("baseline"), after that call returns. When the flag is latched or a
+//      script is queued it calls run_external().
 //   C) run_external() builds a game (refcounted) string for the path in guest
 //      memory and calls the captured CScriptManager::RunScript method.
 //   D) The dispatcher probe (LuaBind_RunScript_82806168) captures the
@@ -297,6 +302,18 @@ inline std::atomic<bool> g_running{false};
 // bound C++ method calls back into Lua and Lua calls another bound method).
 inline thread_local int g_dispatch_depth = 0;
 inline int64_t g_last_run_ms = 0;
+// Diagnostics, logged once a minute by poll_mainloop and then reset.
+inline std::atomic<uint32_t> g_probe_hits{0}, g_probe_depth0{0}, g_probe_vm{0};
+inline std::atomic<uint32_t> g_frame_hits{0}, g_frame_vm{0};
+inline std::atomic<int> g_max_depth{0};
+// Baseline tracking (script VM thread only): the shallowest dispatch depth
+// seen in the current/last ~1 s window, and when a depth-0 point was last
+// reached on the VM thread.
+inline int g_window_min_depth = 1 << 30;
+inline int g_baseline_depth = 0;  // 0 = not known yet
+inline int64_t g_window_start_ms = 0;
+inline std::atomic<int64_t> g_last_depth0_ms{0};
+constexpr int64_t kBaselineAfterMs = 3000;
 inline std::atomic<bool> g_runner_off_logged{false};
 // At most one script per frame, so a burst never runs back to back.
 constexpr int64_t kMinRunGapMs = 16;
@@ -314,7 +331,7 @@ inline size_t queued_count() {
 
 // Called by the dispatcher probe after the game's own call returned, at
 // dispatch depth 0. Runs the F5 file when latched, otherwise one queued script.
-inline void run_pending(PPCContext& ctx, uint8_t* base) {
+inline void run_pending(PPCContext& ctx, uint8_t* base, const std::string& via) {
   if (g_running.load() || (g_queued.load() == 0 && !g_f5_pending.load())) return;
   if (!REXCVAR_GET(coop_lua_runner)) {
     std::lock_guard<std::mutex> l(g_queue_mtx);
@@ -357,9 +374,9 @@ inline void run_pending(PPCContext& ctx, uint8_t* base) {
   ctx = saved;
   g_running = false;
   if (ran) {
-    REXSYS_INFO("[lua] ran {}", path);
+    REXSYS_INFO("[lua] ran {} via {}", path, via);
   } else {
-    REXSYS_WARN("[lua] could not run {}", path);
+    REXSYS_WARN("[lua] could not run {} (via {})", path, via);
   }
 }
 
@@ -375,11 +392,29 @@ inline void poll_mainloop(PPCContext& /*ctx*/, uint8_t* /*base*/) {
   if (g_frame_hook) g_frame_hook();
   const int64_t now = steady_ms();
   if (now < g_next_waiting_log_ms) return;
+  const bool first = g_next_waiting_log_ms == 0;
   g_next_waiting_log_ms = now + 60000;
+  if (first) return;
   if (const size_t n = queued_count(); n != 0) {
     REXSYS_INFO("[lua] {} script(s) waiting (ready={} lua_thread={} runner={})", n, ready(),
                 g_lua_thread.load(), REXCVAR_GET(coop_lua_runner));
   }
+  REXSYS_INFO("[lua] last minute: probe hits {}, at depth 0 {}, on VM thread {}, max depth {}; "
+              "frame hook hits {}, on VM thread {}",
+              g_probe_hits.exchange(0), g_probe_depth0.exchange(0), g_probe_vm.exchange(0),
+              g_max_depth.exchange(0), g_frame_hits.exchange(0), g_frame_vm.exchange(0));
+}
+
+// Per-frame game-loop entry point (FrameLimiterWait_82242628). Runs queued
+// Lua only on the script VM thread and only when no Lua->C++ call is active
+// on it, i.e. with no Lua on the stack, like the engine's own C++ code.
+inline void frame_drain(PPCContext& ctx, uint8_t* base) {
+  g_frame_hits.fetch_add(1, std::memory_order_relaxed);
+  if (current_thread_id() != g_lua_thread.load()) return;
+  g_frame_vm.fetch_add(1, std::memory_order_relaxed);
+  if (g_dispatch_depth != 0) return;
+  g_last_depth0_ms.store(steady_ms(), std::memory_order_relaxed);
+  run_pending(ctx, base, "frame");
 }
 
 }  // namespace fable2::f5lua
@@ -464,18 +499,48 @@ extern "C" void LuaBind_RunScript_82806168(PPCContext& ctx, uint8_t* base) {
       }
     }
   }
-  ++g_dispatch_depth;
+  const int depth = ++g_dispatch_depth;
+  if (depth > g_max_depth.load(std::memory_order_relaxed)) {
+    g_max_depth.store(depth, std::memory_order_relaxed);
+  }
   __imp__LuaBind_RunScript_82806168(ctx, base);
   --g_dispatch_depth;
+  g_probe_hits.fetch_add(1, std::memory_order_relaxed);
+  const bool on_vm = current_thread_id() == g_lua_thread.load(std::memory_order_relaxed);
+  if (on_vm) {
+    g_probe_vm.fetch_add(1, std::memory_order_relaxed);
+    // Baseline: shallowest depth seen per ~1 s window.
+    const int64_t now = steady_ms();
+    if (depth < g_window_min_depth) g_window_min_depth = depth;
+    if (now - g_window_start_ms >= 1000) {
+      g_baseline_depth = g_window_min_depth;
+      g_window_min_depth = 1 << 30;
+      g_window_start_ms = now;
+    }
+  }
   // The game's own call has finished; run queued Lua only from the outermost
   // dispatch (never while native->Lua->native calls are nested).
   if (g_dispatch_depth == 0) {
+    g_probe_depth0.fetch_add(1, std::memory_order_relaxed);
+    if (on_vm) g_last_depth0_ms.store(steady_ms(), std::memory_order_relaxed);
     static std::atomic<bool> s_logged{false};
     if (!s_logged.exchange(true)) {
       REXSYS_INFO("[lua] dispatcher first reached depth 0 on thread {} (script VM thread {})",
                   current_thread_id(), g_lua_thread.load());
     }
-    run_pending(ctx, base);
+    run_pending(ctx, base, "probe0");
+  } else if (on_vm && depth == g_baseline_depth &&
+             steady_ms() - g_last_depth0_ms.load(std::memory_order_relaxed) >= kBaselineAfterMs) {
+    // No depth-0 point for a while: the game's Lua runs inside a long-lived
+    // dispatch. Drain at the shallowest depth its calls reach every frame,
+    // after this call returned (a C function re-entering the VM on the same
+    // thread, as the game's own Lua RunScript binding does).
+    run_pending(ctx, base, "baseline(depth " + std::to_string(depth) + ")");
   }
 }
 
+// Called from FrameLimiterWait_82242628 (src/core/hotfunc/vblank). Non-inline:
+// this header is included only by main.cpp.
+void fable2_frame_drain_lua(PPCContext& ctx, uint8_t* base) {
+  fable2::f5lua::frame_drain(ctx, base);
+}

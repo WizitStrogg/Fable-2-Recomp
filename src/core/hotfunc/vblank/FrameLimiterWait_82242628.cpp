@@ -53,6 +53,9 @@ extern "C" void GpuProgressCheck_82B9BF90(PPCContext& ctx, uint8_t* base);
 extern "C" void __restgprlr_29(PPCContext& ctx, uint8_t* base);
 extern "C" void __savegprlr_29(PPCContext& ctx, uint8_t* base);
 extern "C" void sub_82B9BEC8(PPCContext& ctx, uint8_t* base);
+// src/core/fable2_f5_lua.h: runs queued Lua once per frame on the script VM
+// thread when no Lua->C++ call is active. Saves and restores ctx.
+void fable2_frame_drain_lua(PPCContext& ctx, uint8_t* base);
 
 namespace {
 
@@ -182,6 +185,7 @@ void Epilogue(PPCContext& ctx, uint8_t* base) {
 
 extern "C" void FrameLimiterWait_82242628(PPCContext& __restrict ctx, uint8_t* base) {
   REX_FUNC_PROLOGUE();
+  fable2_frame_drain_lua(ctx, base);
 
   // mflr r12; bl __savegprlr_29; stwu r1,-144(r1)
   ctx.r12.u64 = ctx.lr;
