@@ -254,6 +254,10 @@ inline void session_tick() {
       if (lobby::GetLobbyStatus().joined_host_ip) {
         REXSYS_INFO("[coop] partner: in the host's world");
         s.s = Session::kNone;
+        g_armed = false;  // in the host's world: pause-menu presses are not New Game
+      } else if (now - s.since_ms > 120000) {
+        REXSYS_INFO("[coop] partner: join did not complete in 2 min, back to the menu");
+        s.s = Session::kNone;
       }
       break;
     case Session::kNone:
@@ -280,6 +284,12 @@ inline bool OnPress(PPCContext& ctx, uint8_t* /*base*/) {
   // While the chooser or lobby is open the panel owns the pad; the stock
   // menu sees nothing (its state is idle, this catches stragglers).
   if (fable2::cooplobby::g_open.load()) return true;
+  {
+    // Partner joining the host: the game's own join prompts need the pad
+    // (launch 6: an A meant for the prompt opened the chooser instead).
+    std::lock_guard<std::mutex> l(S().m);
+    if (S().s == Session::kPartnerJoining) return false;
+  }
   if (!in_main_menu()) {
     g_past_title = false;  // left the front end: the next visit starts at the title
     return false;
