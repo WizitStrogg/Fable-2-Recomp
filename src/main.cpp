@@ -11,6 +11,8 @@
 #include "fable2_coop_hero.h"
 // Co-op campaign (feature 001): coop_campaign switch, "proto" announcement.
 #include "fable2_coop_campaign.h"
+// Co-op campaign lobby overlay (feature 001, T019).
+#include "fable2_coop_lobby.h"
 
 #include "fable_2_app.h"
 #include "fps_meter.h"
