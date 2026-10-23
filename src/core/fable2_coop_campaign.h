@@ -14,6 +14,11 @@
 
 #include <atomic>
 #include <cstdint>
+#include <filesystem>
+#include <fstream>
+#include <map>
+#include <optional>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -84,6 +89,119 @@ inline void proto_tick() {
     g_published_proto = want;
     REXSYS_INFO("[coop] proto: '{}'", want);
   }
+}
+
+// --- campaign marker (coop_campaign.toml, data-model.md) ----------------------
+
+struct Marker {
+  int format = 1;
+  std::string campaign_id, name, created;
+  std::string host_name, host_xuid, partner_name, partner_xuid;
+  std::string p2_gender = "M";  // M / F
+  std::string childhood = "skip";
+  std::string xp_rule = "earner_style_partner_general_v1";
+  std::string mod_version;
+};
+
+inline std::string toml_quote(const std::string& s) {
+  std::string out = "\"";
+  for (char c : s) {
+    if (c == '"' || c == '\\') out.push_back('\\');
+    if (c == '\n' || c == '\r') continue;
+    out.push_back(c);
+  }
+  return out + "\"";
+}
+
+inline std::string FormatMarker(const Marker& m) {
+  std::string s = "# Fable II co-op campaign marker (feature 001). Written by the game; do not edit.\n";
+  s += "format = " + std::to_string(m.format) + "\n";
+  auto kv = [&](const char* k, const std::string& v) { s += std::string(k) + " = " + toml_quote(v) + "\n"; };
+  kv("campaign_id", m.campaign_id);
+  kv("name", m.name);
+  kv("created", m.created);
+  kv("host_name", m.host_name);
+  kv("host_xuid", m.host_xuid);
+  kv("partner_name", m.partner_name);
+  kv("partner_xuid", m.partner_xuid);
+  kv("p2_gender", m.p2_gender);
+  kv("childhood", m.childhood);
+  kv("xp_rule", m.xp_rule);
+  kv("mod_version", m.mod_version);
+  return s;
+}
+
+// Reads the flat key = "value" lines FormatMarker writes. Returns nothing
+// unless format and campaign_id are present (contract: a slot is a campaign
+// if and only if it has a valid marker).
+inline std::optional<Marker> ParseMarker(std::string_view text) {
+  std::map<std::string, std::string> kv;
+  while (!text.empty()) {
+    const size_t nl = text.find('\n');
+    std::string_view line = text.substr(0, nl);
+    text = nl == std::string_view::npos ? std::string_view{} : text.substr(nl + 1);
+    while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.remove_suffix(1);
+    if (line.empty() || line.front() == '#') continue;
+    const size_t eq = line.find(" = ");
+    if (eq == std::string_view::npos) continue;
+    std::string key(line.substr(0, eq));
+    std::string_view v = line.substr(eq + 3);
+    std::string val;
+    if (v.size() >= 2 && v.front() == '"' && v.back() == '"') {
+      v = v.substr(1, v.size() - 2);
+      for (size_t i = 0; i < v.size(); ++i) {
+        if (v[i] == '\\' && i + 1 < v.size()) ++i;
+        val.push_back(v[i]);
+      }
+    } else {
+      val = std::string(v);
+    }
+    kv[key] = val;
+  }
+  if (kv["format"] != "1" || kv["campaign_id"].empty()) return std::nullopt;
+  Marker m;
+  m.campaign_id = kv["campaign_id"];
+  m.name = kv["name"];
+  m.created = kv["created"];
+  m.host_name = kv["host_name"];
+  m.host_xuid = kv["host_xuid"];
+  m.partner_name = kv["partner_name"];
+  m.partner_xuid = kv["partner_xuid"];
+  m.p2_gender = kv["p2_gender"] == "F" ? "F" : "M";
+  m.childhood = kv["childhood"];
+  m.xp_rule = kv["xp_rule"];
+  m.mod_version = kv["mod_version"];
+  return m;
+}
+
+// Writes <dir>/<name> through a temp file and a rename, so a crash leaves
+// either the old file or the new one, never half of one (contract rule 3).
+inline bool WriteFileAtomic(const std::filesystem::path& dir, const std::string& name,
+                            const std::string& text) {
+  std::error_code ec;
+  const auto tmp = dir / (name + ".tmp");
+  {
+    std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+    if (!out) return false;
+    out << text;
+    out.flush();
+    if (!out) return false;
+  }
+  std::filesystem::rename(tmp, dir / name, ec);  // replaces an existing file on Windows
+  if (ec) {
+    REXSYS_ERROR("[coop] could not write {}: {}", (dir / name).string(), ec.message());
+    std::filesystem::remove(tmp, ec);
+    return false;
+  }
+  return true;
+}
+
+inline std::optional<Marker> ReadMarker(const std::filesystem::path& dir) {
+  std::ifstream in(dir / "coop_campaign.toml", std::ios::binary);
+  if (!in) return std::nullopt;
+  std::ostringstream text;
+  text << in.rdbuf();
+  return ParseMarker(text.str());
 }
 
 inline int64_t g_next_tick_ms = 0;
