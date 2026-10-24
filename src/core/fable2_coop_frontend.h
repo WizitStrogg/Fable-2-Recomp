@@ -181,19 +181,21 @@ constexpr int64_t kGoRetryMs = 15000, kPartnerJoinMs = 120000;
 // partner at the host's go. It comes down kCoverAfterSpawnMs after player 2
 // spawns (the screens close at the spawn; both PCs see the spawn), or after
 // kCoverMaxMs. While it is up the stock screens are answered underneath.
-constexpr int64_t kCoverAfterSpawnMs = 1500, kCoverMaxMs = 120000;
+// kCoverMaxMs: from the host's Start (both cards go up then) to player 2 in the world.
+constexpr int64_t kCoverAfterSpawnMs = 1500, kCoverMaxMs = 300000;
 inline std::atomic<int64_t> g_cover_since_ms{0};
 inline std::atomic<int64_t> g_cover_hide_at_ms{0};
 inline std::atomic<uint32_t> g_cover_epoch{0};
-inline void ShowCover(const std::string& text) {
+inline void ShowCover2(const std::string& title, const std::string& line) {
   g_cover_epoch.store(fable2::coophero::g_spawn_epoch.load());
   g_cover_hide_at_ms.store(0);
   g_cover_since_ms.store(fable2::f5lua::steady_ms());
   // Its own channel: the lobby closing underneath (the partner's go) must not
   // clear it (launch 26: the partner's cover was wiped by the lobby's "").
-  rex_ui_set_lobby_cover((text + "\nThe co-op campaign is starting").c_str());
-  REXSYS_INFO("[coop] join cover up: {}", text);
+  rex_ui_set_lobby_cover((title + "\n" + line).c_str());
+  REXSYS_INFO("[coop] join cover up: {} / {}", title, line);
 }
+inline void ShowCover(const std::string& text) { ShowCover2(text, "The co-op campaign is starting"); }
 // A message on the same card (title, then a second line), taken down after for_ms.
 inline void ShowCoverMessage(const std::string& title, const std::string& line, int64_t for_ms) {
   const int64_t now = fable2::f5lua::steady_ms();
@@ -392,6 +394,10 @@ inline void on_host_start() {
   fable2::coophero::SetCampaignPlayer2(
       restore ? *restore : seed_player2_chunk(rec.gender2 == fable2::cooplobby::Gender::kMale));
   fable2::cooplobby::HidePanel();
+  // Josh, 2026-10-24: both players go straight to the joining card at Start.
+  ShowCover2("Starting the co-op campaign",
+             "Loading the world. " + (rec.partner.empty() ? std::string("Your partner") : rec.partner) +
+                 " joins as soon as it is ready");
   if (S().from_template) {
     // The game's own Continue loads the campaign slot: while the save list
     // holds only that slot there is no save picker (with several saves the
@@ -433,7 +439,7 @@ inline void on_partner_go(uint32_t ip) {
     S().tries = 0;
   }
   fable2::cooplobby::Close();
-  ShowCover("Joining " + host_name + "'s campaign");
+  ShowCover2("Joining " + host_name + "'s campaign", "Joining...");
   REXSYS_INFO("[coop] partner: go from host {:08X} ({}), joining when its game is joinable", ip,
               fable2::cooplobby::XuidStr(host_xuid));
 }
@@ -532,6 +538,16 @@ inline void open_coop_hub() {
     open_host_lobby(fable2::cooplobby::Kind::kNew, "", "");
   };
   cb.host_saves = [] { open_save_list(); };
+  // The host pressed Start: the joining card goes up at once, the lobby stays
+  // open under it (it still follows the host's lobby and go; the pad is idle).
+  cb.partner_wait = [](std::string host) {
+    ShowCover2(host + " started the campaign", "Waiting for " + host + "'s world to load...");
+  };
+  cb.partner_wait_failed = [](std::string host, std::string why) {
+    ShowCoverMessage(why == "left" ? host + " left the lobby" : "No answer from " + host,
+                     why == "left" ? "Back to the Co-op menu" : "Their world did not load. Back to the Co-op menu",
+                     8000);
+  };
   cb.back = [] {
     REXSYS_INFO("[coop] hub closed, back to the main menu");
     swallow_closing_a();
@@ -856,6 +872,7 @@ end
         if (!loaded && now - s.since_ms > 180000) {
           // Never leave the player's save list narrowed to one slot.
           REXSYS_INFO("[coop] host start: the campaign world did not load in 3 min, giving up");
+          HideCover("the campaign world did not load");
           fable2::coophero::SetCampaignPlayer2("");
           p2_watch_stop();
           rex_content_set_save_filter("");

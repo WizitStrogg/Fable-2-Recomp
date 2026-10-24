@@ -58,6 +58,11 @@ struct Callbacks {
   std::function<void()> host_new;            // hub: "Host: new co-op campaign"
   std::function<void()> host_saves;          // hub: "Host: continue a co-op save"
   std::function<void(size_t)> pick_save;     // save list: the chosen campaign save
+  // Partner: the host pressed Start (its lobby says Starting): the joining card
+  // goes up at once (Josh, 2026-10-24). Failed: the host left or never got its
+  // world up (host name, "left" / "timeout").
+  std::function<void(std::string)> partner_wait;
+  std::function<void(std::string, std::string)> partner_wait_failed;
 };
 
 struct Lobby {
@@ -216,6 +221,8 @@ inline std::vector<PartnerLobby::Listing> JoinableNow() {
 }
 
 inline int64_t g_next_tick_ms = 0;
+inline int64_t g_wait_since_ms = 0;  // partner: when the host's Start was seen
+constexpr int64_t kHostWorldWaitMs = 180000;
 
 // One lobby step under the lock. Returns a callback to run after unlocking:
 // callbacks may open or close the lobby, which takes the same lock (launch 5:
@@ -263,14 +270,33 @@ inline std::function<void()> tick_locked() {
     }
     const auto rec = lb.partner.FromHost(heard("coop_lobby"));
     const auto go = lb.partner.FromHost(heard("coop_go"));
+    const PartnerState was = lb.partner.state;
+    const std::string host_name = lb.partner.seat.host;
     const bool start_join = lb.partner.OnHost(rec, go);
+    const int64_t now = fable2::f5lua::steady_ms();
+    if (was == PartnerState::kWaitingForHostWorld && lb.partner.state == PartnerState::kWaitingForHostWorld &&
+        now - g_wait_since_ms > kHostWorldWaitMs) {
+      REXSYS_INFO("[lobby] partner: {}'s world did not come up in {} s", host_name, kHostWorldWaitMs / 1000);
+      lb.partner.Leave();
+      lb.notice = "No answer from " + host_name;
+      lb.cursor = 0;
+      if (lb.cb.partner_wait_failed) return [cb = lb.cb.partner_wait_failed, host_name] { cb(host_name, "timeout"); };
+      return {};
+    }
     if (lb.partner.state == PartnerState::kBrowsing) {
       lb.notice = "The host left the lobby";
       REXSYS_INFO("[lobby] partner: the host left the lobby");
       lb.cursor = 0;
+      if (was == PartnerState::kWaitingForHostWorld && lb.cb.partner_wait_failed)
+        return [cb = lb.cb.partner_wait_failed, host_name] { cb(host_name, "left"); };
       return {};
     }
     lobby::PublishData("coop_seat", Format(lb.partner.seat));
+    if (lb.partner.state == PartnerState::kWaitingForHostWorld && was != PartnerState::kWaitingForHostWorld) {
+      g_wait_since_ms = now;
+      REXSYS_INFO("[lobby] partner: {} started the campaign, waiting for the host's world", host_name);
+      if (lb.cb.partner_wait) return [cb = lb.cb.partner_wait, host_name] { cb(host_name); };
+    }
     if (start_join) {
       const uint32_t ip = lb.partner.host_ip;
       lobby::PublishData("coop_ack", Format(AckRecord{lb.partner.seat.hxuid, lb.partner.last_go_seq,
@@ -522,7 +548,14 @@ inline void input_filter(uint32_t user_index, rex::input::X_INPUT_STATE* state) 
   }
   const uint16_t pressed = now & ~g_prev_buttons;
   g_prev_buttons = now;
-  if (pressed) {
+  // Under the joining card (the host has started): the pad does nothing.
+  bool covered = false;
+  {
+    std::lock_guard<std::mutex> l(L().m);
+    covered = L().role == Role::kPartner && (L().partner.state == PartnerState::kWaitingForHostWorld ||
+                                             L().partner.state == PartnerState::kJoining);
+  }
+  if (pressed && !covered) {
     std::function<void()> after;
     {
       std::lock_guard<std::mutex> l(L().m);

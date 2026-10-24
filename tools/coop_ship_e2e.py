@@ -346,7 +346,10 @@ def setup_tomls():
     if "--fps" in sys.argv:  # the graphics thread's stencil-copy build (rexglue-sdk ec757ef)
         src += ["readback_memexport = false", "shared_memory_preserve_gpu_writes = true"]
     make("mod-a", "127.0.0.1", "127.0.0.2,127.0.0.5", "TestA", set())
-    make("mod-b", "127.0.0.2", "127.0.0.1,127.0.0.4", None, {"profile_gamertag", "coop_campaign"})
+    # Calvin's case: no gamertag, no coop_campaign, and no camera lines (the
+    # defaults decide: coop_own_camera is on by default since 2026-10-24).
+    make("mod-b", "127.0.0.2", "127.0.0.1,127.0.0.4", None,
+         {"profile_gamertag", "coop_campaign", "coop_own_camera", "coop_camera_follow_partner"})
     note("INFO", "tomls: host = Josh's (+ loopback, 2 networks); partner = no gamertag, no coop_campaign")
 
 
@@ -918,10 +921,54 @@ def run_last():
         relay.kill()
 
 
+def run_start():
+    """Josh, 2026-10-24: at the host's Start both PCs go straight to the joining
+    card; the partner's camera follows its own hero with no setting changed."""
+    setup_tomls()
+    relay_log = open(os.path.join(OUT, "relay_start.log"), "w")
+    relay = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                           "coop_relay.py")], stdout=relay_log, stderr=relay_log)
+    a, b = Game("mod-a", "host"), Game("mod-b", "partner")
+    a.start()
+    b.start()
+    try:
+        for g in (a, b):
+            g.n_menu = g.count(r"main menu: Co-op entry added")
+            g.past_title()
+        menu_then_coop(a, "start", a.n_menu)
+        host_new_campaign(a, "start")
+        menu_then_coop(b, "start", b.n_menu)
+        wait_row(b, "Join TestA", "start: the host's lobby is listed")
+        partner_joins(b, "Join TestA", "start")
+        wait_row(a, "Start", "start: host lobby shows the partner")
+        nb = b.count(r"started the campaign, waiting")
+        if not both_ready_and_start(a, b, "start"):
+            return
+        t0 = time.time()
+        b.wait("start: partner sees the host's Start", r"started the campaign, waiting", nb, 5)
+        note("INFO", f"start: partner card {time.time() - t0:.1f} s after the host's Start was seen")
+        b.shot("start_partner_card_at_start.png")
+        a.shot("start_host_card_at_start.png")
+        time.sleep(8)
+        b.shot("start_partner_card_waiting.png")
+        a.wait("start: host loads through the game's own Load Game", r"main menu: Load Game", 0, 20)
+        join_phase(a, b, "start")
+        cam = [l for l in b.lines() if "camera: own_camera=" in l]
+        note("PASS" if cam and "own_camera=true" in cam[-1] else "FAIL",
+             f"start: partner camera follows its own hero by default ({cam[-1].split('[coop] ')[-1] if cam else 'no camera line'})")
+        time.sleep(3)
+        a.shot("start_host_world_camera.png")
+        b.shot("start_partner_world_camera.png")
+    finally:
+        for g in (a, b):
+            g.stop()
+        relay.kill()
+
+
 def main():
     os.makedirs(OUT, exist_ok=True)
     mode = sys.argv[1] if len(sys.argv) > 1 else "coop"
-    {"coop": run_coop, "solo": run_solo, "multi": run_multi, "menu": run_menu, "menu2": run_menu2, "err": run_err, "final": run_final, "last": run_last}[mode]()
+    {"coop": run_coop, "solo": run_solo, "multi": run_multi, "menu": run_menu, "menu2": run_menu2, "err": run_err, "final": run_final, "last": run_last, "start": run_start}[mode]()
     with open(os.path.join(OUT, f"results_{mode}.txt"), "w", encoding="utf-8") as f:
         f.write("\n".join(results) + "\n")
     return 0 if not any(r.startswith("FAIL") for r in results) else 1

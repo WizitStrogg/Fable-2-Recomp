@@ -70,7 +70,9 @@ REXCVAR_DEFINE_STRING(coop_story_sync, "ask", "Network",
 REXCVAR_DEFINE_STRING(coop_story_pending, "", "Network",
                       "Read-only: the story waiting to be brought into this save "
                       "('<host> position <n>'), empty if none");
-REXCVAR_DEFINE_BOOL(coop_own_camera, false, "Network",
+// On by default (Josh, 2026-10-24: "should be ON by default. I had to turn it on
+// for Calvin"); F6 still turns it off per PC.
+REXCVAR_DEFINE_BOOL(coop_own_camera, true, "Network",
                     "Each player's camera follows only their own hero in co-op, like the "
                     "single-player camera (experimental)");
 REXCVAR_DEFINE_BOOL(coop_camera_follow_partner, false, "Network",
