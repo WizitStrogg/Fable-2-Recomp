@@ -75,3 +75,23 @@ player 2.
 | A1 | Native ability costs | Hard-code the costs from the game data |
 | A2 | Player 2 ability levels are real | Find player 2's ability table |
 | C1 | Native use-item works for player 2 | Scripted effects |
+
+## Updates 2026-10-24 (after 001; Josh: patch the game's code directly)
+
+- **D3 XP routing**: route at the game's own XP credit function with a campaign-only strong
+  override (the 001 join-gate pattern), not with Lua after the fact. X1 finds it by a
+  function-trace diff while each player collects strength and will orbs (001's tracer and
+  `coop_rig.snap/diff_summaries`). The override sees the receiving entity, the XP type and the
+  amount; it credits the earner in that type and the partner the same amount as general XP, and
+  splits general/quest XP 50/50, writing a `COOPXP:v1` line per award.
+- **D4/D5 consumables and abilities**: drive the native paths for player 2 instead of imitating
+  them: the inventory screen's use-item action (C1) and the abilities screen's learn action with
+  its own cost and max-level checks (A1), called on the host's game thread for player 2's entity.
+  `Stats.SetHeroAbilityLevel` is the fallback only.
+- **Queued actions** (001 T021a): `Player.ChangePlayerEntityType` returned true but did nothing
+  while the hero was busy; it took within 12 s on a free hero. Equip, use and learn may behave the
+  same: every command is confirmed by reading the state back (p2state) and retried until it reads
+  right or times out, never by a return value.
+- **Busy**: commands wait while `fable2_coop_busy.h` says busy (save, load, movie, cutscene, fade).
+- **Persistence** is already proven: `coop_player2.txt` (profile v2 incl. items, XP pools,
+  abilities) is written at every campaign save and restored on continue (001 T030/T031).

@@ -16,7 +16,7 @@ Background documents (read these before planning a new feature):
 | # | Feature | Tier | Status | Depends on | Size (estimate) |
 | --- | --- | --- | --- | --- | --- |
 | 001 | [Co-op campaign and lobby](001-coop-campaign/spec.md) | 1 | Implemented on `coop/001-coop-campaign` (both repos), proven on the rig (launches 16-19, evidence in `research\001-evidence\`); v14 waits for Gate 2 (install, friend zip, merge) and a two-PC test | v13 | done in 1 week of sessions |
-| 002 | [Player 2's full kit and XP split](002-player2-kit/spec.md) | 1 | Spec and research ready; plan and tasks after 001 ships | 001 | 4 to 6 weeks |
+| 002 | [Player 2's full kit and XP split](002-player2-kit/spec.md) | 1 | Spec, research, plan and tasks ready for Josh's review (Gate 1, 2026-10-24) | 001 | 4 to 6 weeks |
 | 003 | [Co-op server: find, relay, backups](003-coop-server/spec.md) | 2 | Spec draft | none (can run beside 001) | 2 to 4 weeks |
 | 004 | [Split authority: your PC runs your hero](004-split-authority/spec.md) | 2 | Spec draft; plan after its proofs | 001, 002, 003 | 3 to 5 months |
 | 005 | [Two heroes, one story](005-two-heroes-one-story/spec.md) | 3 | Spec draft | 002, 004 | 3 to 6 months |

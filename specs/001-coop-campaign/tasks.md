@@ -181,7 +181,8 @@ switches to its fallback; only a failed fallback is raised to Josh.
   - Result: Done: 120.1 min with both players moving, no crash, partner never lost; memory flat after 60 min (host 1525->1530 MB, partner 1303->1304 MB); 4 saves each wrote player 2 and a verified backup. Solo slots of the partner were not loaded. Evidence: research/001-evidence/stability/T044-T040-NOTES.txt, stability/memory.tsv, stability/stability_results.txt
   - Pre-run 2026-10-24 03:53Z stopped after 4 min for a gfx-test launch (no failure; research/001-evidence/stability-prerun/). Full run pending.
 - [ ] T045 [JOSH] Merge `coop/001-coop-campaign` into `systemlink` in both repos after approval
-- [ ] T046 Update `specs/README.md`; run `/speckit-plan` and `/speckit-tasks` for 002 and post them for Gate 1
+- [x] T046 Update `specs/README.md`; run `/speckit-plan` and `/speckit-tasks` for 002 and post them for Gate 1
+  - Result: specs/002-player2-kit/plan.md and tasks.md written (direct patching: XP credit override, native use-item and learn paths; builds on 001's proven pieces); research.md updated; status ready for Josh's review (Gate 1). specs/README.md updated.
 
 ---
 
