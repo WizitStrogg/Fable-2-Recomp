@@ -5466,3 +5466,101 @@ _Functions with real code but no resolved import or strong signature (many are m
 
 - **Calls:** `sub_831DF3D0`
 
+
+
+## K. Co-op Campaign (feature 001): hooked and called game functions
+
+_Not renamed in `fable_2_manifest.toml`: these keep their `sub_` names and are hooked with strong overrides of the weak generated symbol (`extern "C" void sub_X(...)` calling `__imp__sub_X`). Found while making co-op campaigns work inside "A New Beginning" (specs/001-coop-campaign/research.md, launches 14-19)._
+
+**12 functions, 4 data addresses, Lua natives below.**
+
+### `ProcessJoinSession` (`sub_822EE2D8`)
+
+- **Address:** `0x822EE2D8` · **Category:** body · **Region:** game · **Confidence:** high (its own debug strings, `XboxLive.cpp`)
+
+- **Role:** the host's handler for a join request (session message type 12). Answers with a type 1 reply whose result is `0 JOINRESPONSE_APPROVED`, `1 SESSIONFULL`, `2 DIFFERENTVERSION`, `3 NOTHOSTING` or `4 DIFFERENTVERSIONORDLCS`.
+
+- **Does:** NOTHOSTING unless: the Live object `[0x83496920]` is set and byte `0x834968C5` is set; when the host's options are friends-only (profile `+412 == 1`) and the request is public, `XamUserAreUsersFriends` says the joiner is a friend; session manager `+456` is in 4096..4101; manager `+236` is set; byte `[0x834971D0]+243` is set. SESSIONFULL unless the open slots cover the request and `[0x834971D0]+245` is set (cleared by the handler itself on approval). Then version/DLC checks (`sub_82338878`). Prints `ProcessJoinSession()`, `SLOTS_*`, `JOINRESPONSE_*` through `sub_82172EE8`.
+
+- **Trigger:** a partner's join request (F9 / the co-op lobby's join).
+
+- **Hooked by:** `src/core/fable2_coop_joingate.h`: logs the gates (`coop_join_gate_log`), can force them (`coop_join_gate_force`, rig only), holds a join off while the host is busy (T028a, `fable2_coop_busy.h`) and refuses anyone but the campaign's partner (T028) by clearing `+245` for that call; detects approval (`+245` cleared) for the join-screen auto-accept.
+
+### `XamUserAreUsersFriends` thunk (`sub_82CBC158`)
+
+- **Address:** `0x82CBC158` · **Category:** trampoline · **Region:** SDK · **Confidence:** high
+
+- **Role:** `b` to the `XamUserAreUsersFriends` import (user index, xuid array, count, &result, overlapped).
+
+- **Does:** the SDK answers "no friends" for everyone, which made every join into a friends-only save (Josh's childhood save) NOTHOSTING.
+
+- **Hooked by:** `fable2_coop_joingate.h`: inside `ProcessJoinSession` during a co-op campaign the partner counts as a friend (that call only).
+
+### Debug print (`ProcessAndProcessAndProcess2254_82172EE8`)
+
+- **Address:** `0x82172EE8` · **Category:** body · **Region:** game · **Confidence:** high
+
+- **Role:** the game's printf-style debug print (format in r3, args r4..); silent in retail.
+
+- **Hooked by:** `fable2_coop_joingate.h` logs its prints made inside `ProcessJoinSession` when `coop_join_gate_log` is on.
+
+### Send session message (`sub_822EB8E0`)
+
+- **Address:** `0x822EB8E0` · **Category:** body · **Region:** game · **Confidence:** medium
+
+- **Role:** sends a session message (r4 = message; type byte at `+2`, size from `SwitchDispatch_822EAA98`).
+
+- **Hooked by:** `fable2_coop_joingate.h` logs the join reply's result (`+3`, u32) inside `ProcessJoinSession`.
+
+### `SwitchDispatch_822EAA98` (session message size)
+
+- **Address:** `0x822EAA98` · **Category:** switch · **Region:** game · **Confidence:** high
+
+- **Role:** payload size per session message type (byte `+2`, 0..12): 0 = 134, 1 = 402 (join reply), 2 = 158, 3 and 7 = 17, 8 = 21, 11 = 9, 12 = 302 (join request), others 1. The wire size is the payload plus 2.
+
+### In-session message handler (`sub_8230DFF0`)
+
+- **Address:** `0x8230DFF0` · **Category:** body · **Region:** game · **Confidence:** medium
+
+- **Role:** the multiplayer manager's handler for session messages 275..289 once a partner is in (gates: byte `0x834968C5`, manager `+52`, `+53`, `+54`, `+226`). Not called for a refused join.
+
+- **Hooked by:** `fable2_coop_joingate.h` (log / force, rig only).
+
+### Peer communication handler (`sub_822EF758`)
+
+- **Address:** `0x822EF758` · **Category:** body · **Region:** game · **Confidence:** medium
+
+- **Role:** per joining machine, per local user: decides mute/talk for each remote user (`sub_822F8648`, `sub_82304740`), then calls the session object's vtable `+80`. Runs once per join request; not the join decision.
+
+### Communications privilege checks (`sub_82304740`, `sub_82304800`)
+
+- **Address:** `0x82304740`, `0x82304800` · **Category:** body · **Region:** game · **Confidence:** medium
+
+- **Role:** signed-in user bitmask `[0x834968E0]`, active user `[0x83496934]`; privilege checks through `sub_82CBC160` with ids 252 (communications) and 251 (friends-only communications).
+
+### `FrontMenu_PressBitDispatch` (`sub_82188F20`)
+
+- **Address:** `0x82188F20` · **Category:** body · **Region:** game · **Confidence:** high
+
+- **Role:** front-end menu press dispatch, called on press and release; r5 = button mask (Up 1, Down 2, Back 32, A 0x1000, B 0x2000). The title's "Press A" and the in-game pause menu use it too.
+
+- **Hooked by:** `src/diagnostics/fable2_modmenu.h` override calls `fronthooks::g_press_hook` → `fable2_coop_frontend.h` (New Game → Solo / Co-op, Continue on a campaign save → its lobby; stays out while a world is up).
+
+### `AllowHenchman` native (`sub_82321628`)
+
+- **Address:** `0x82321628` · **Category:** body · **Region:** game · **Confidence:** high
+
+- **Role:** Lua `AllowHenchman(bool)`: writes the multiplayer manager's byte `+226`. The gameflow calls it at QC070; it is not what refused joins in QC060.
+
+### Data
+
+| Address | What |
+|---|---|
+| `0x834968C5` | byte: the session can take joins (ProcessJoinSession gate) |
+| `0x83496920` | the Live / session object (`+12` → `+140` → `+184` = the host's profile; `+412` = 1 for friends-only) |
+| `0x834971D0` | session flags object: `+243` joinable, `+245` a slot is open |
+| session manager `+456` | session state; 4096..4101 = hosting |
+
+### Lua natives used by the campaign code
+
+`Player.ChangePlayerEntityType` (host gender, does not change the visible body: tasks.md T021a), `GetPlayerHero` / `GetPlayerHenchman`, `Money.Get` / `Money.Set` / `Money.Modify` (shared purse; `Money.Modify` on player 2 is split 50/50 by the game's gold share, `Money.Set` is not), `AutoSaveGame(true, true)` (partner-loss save), `Debug.QuitToFrontEnd`, `GUI.IsMoviePlaying` / `GUI.IsFullCutscenePlaying` / `GUI.IsScreenFullyFadedIn` (busy detector; the first two are bound but no game script calls them), plus the `CoopHero` capture/apply set (`tools/coop_lua/lib.lua`).
