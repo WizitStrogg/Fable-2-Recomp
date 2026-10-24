@@ -87,11 +87,13 @@ struct SeatRecord {  // published by the partner
   bool ready = false;
   std::string hxuid;  // the host this seat is for
   std::string name;   // the partner's display name
+  std::string pxuid;  // the partner itself (sender)
 };
 
 struct AckRecord {  // published by the partner when a coop_go arrives
   std::string hxuid;
   uint32_t seq = 0;
+  std::string pxuid;  // sender
 };
 
 inline std::string XuidStr(uint64_t x) {
@@ -105,6 +107,7 @@ inline std::string XuidStr(uint64_t x) {
 struct GoRecord {  // published by the host when its world is ready
   std::string cid;
   uint32_t seq = 0;
+  std::string hxuid;  // sender
 };
 
 inline char GenderChar(Gender g) { return g == Gender::kFemale ? 'F' : 'M'; }
@@ -145,6 +148,7 @@ inline std::string Format(const SeatRecord& r) {
                   GenderChar(r.gender) + "|ready=" + (r.ready ? "1" : "0");
   if (!r.hxuid.empty()) s += "|hxuid=" + Clean(r.hxuid);
   if (!r.name.empty()) s += "|name=" + Clean(r.name);
+  if (!r.pxuid.empty()) s += "|pxuid=" + Clean(r.pxuid);
   return s;
 }
 inline std::optional<SeatRecord> ParseSeat(std::string_view line) {
@@ -157,12 +161,15 @@ inline std::optional<SeatRecord> ParseSeat(std::string_view line) {
   r.ready = (*f)["ready"] == "1";
   r.hxuid = (*f)["hxuid"];
   r.name = (*f)["name"];
+  r.pxuid = (*f)["pxuid"];
   if (r.host.empty() && r.hxuid.empty()) return std::nullopt;
   return r;
 }
 
 inline std::string Format(const AckRecord& r) {
-  return "COOPACK:v1|hxuid=" + Clean(r.hxuid) + "|seq=" + std::to_string(r.seq);
+  std::string s = "COOPACK:v1|hxuid=" + Clean(r.hxuid) + "|seq=" + std::to_string(r.seq);
+  if (!r.pxuid.empty()) s += "|pxuid=" + Clean(r.pxuid);
+  return s;
 }
 inline std::optional<AckRecord> ParseAck(std::string_view line) {
   auto f = ParseRecord(line, "COOPACK");
@@ -174,13 +181,15 @@ inline std::optional<AckRecord> ParseAck(std::string_view line) {
 }
 
 inline std::string Format(const GoRecord& r) {
-  return "COOPGO:v1|cid=" + Clean(r.cid) + "|seq=" + std::to_string(r.seq);
+  return "COOPGO:v1|cid=" + Clean(r.cid) + "|seq=" + std::to_string(r.seq) +
+         (r.hxuid.empty() ? "" : "|hxuid=" + Clean(r.hxuid));
 }
 inline std::optional<GoRecord> ParseGo(std::string_view line) {
   auto f = ParseRecord(line, "COOPGO");
   if (!f) return std::nullopt;
   GoRecord r;
   r.cid = (*f)["cid"];
+  r.hxuid = (*f)["hxuid"];
   r.seq = static_cast<uint32_t>(std::strtoul((*f)["seq"].c_str(), nullptr, 10));
   return r;
 }
@@ -197,6 +206,17 @@ struct Heard {
 };
 
 constexpr int kStaleSeconds = 10;  // contract rule 5
+
+// The sender's XUID as written in its own record (lobby/go: hxuid; seat/ack:
+// pxuid). The proof run of 2026-10-24 showed the LAN lobby's per-address XUID
+// can be 0 on one of two addresses, so identity comes from the record itself.
+inline uint64_t SenderXuid(std::string_view v) {
+  const bool host_rec = v.substr(0, 9) == "COOPLOBBY" || v.substr(0, 6) == "COOPGO";
+  const std::string key = host_rec ? "|hxuid=" : "|pxuid=";
+  const size_t at = v.find(key);
+  if (at == std::string_view::npos) return 0;
+  return std::strtoull(std::string(v.substr(at + key.size(), 16)).c_str(), nullptr, 16);
+}
 
 // One record per player (by XUID; by address when the XUID is not known yet):
 // the freshest of the copies heard over each shared network.
@@ -304,7 +324,7 @@ struct HostLobby {
   GoRecord Go(const std::string& cid) {
     state = HostState::kInWorld;
     rec.state = Name(state);
-    return GoRecord{cid, ++go_seq};
+    return GoRecord{cid, ++go_seq, rec.hxuid};
   }
 };
 
@@ -372,6 +392,7 @@ struct PartnerLobby {
     seat.host = l.rec.host;
     seat.hxuid = l.rec.hxuid;
     seat.name = my_name;
+    seat.pxuid = XuidStr(my_xuid);
     seat.cid = l.rec.kind == Kind::kContinue ? l.rec.cid : "new";
     seat.ready = false;
     state = PartnerState::kJoined;

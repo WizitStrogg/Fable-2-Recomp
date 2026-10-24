@@ -139,6 +139,15 @@ int main() {
                    Heard{0xC0A8C088, "Wizit", Format(go), 0, kJosh}));
     CHECK(c.state == PartnerState::kJoining && c.last_go_seq == 1);
     CHECK(ParseAck(Format(AckRecord{XuidStr(kJosh), 1}))->seq == 1);
+    // Proof run, 2026-10-24: the LAN lobby gave XUID 0 for one of the two
+    // addresses. The sender's XUID is read from the record itself.
+    CHECK(SenderXuid(lob) == kJosh && SenderXuid(seat) == kCalvin);
+    CHECK(SenderXuid(Format(go)) == kJosh);
+    CHECK(SenderXuid(Format(AckRecord{XuidStr(kJosh), 1, XuidStr(kCalvin)})) == kCalvin);
+    std::vector<Heard> two = {{0x7F000001, "Wizit", lob, 1, 0}, {0x7F000004, "Wizit", lob, 0, kJosh}};
+    for (auto& h : two)
+      if (const uint64_t own = SenderXuid(h.value)) h.xuid = own;  // as heard() does
+    CHECK(OnePerPlayer(two).size() == 1);
     // The host's own lobby is never offered to itself, even under another address.
     PartnerLobby self;
     self.my_name = "Wizit";

@@ -182,7 +182,11 @@ class Game:
         focus(self.hwnd)
         time.sleep(0.3)
         p = os.path.join(OUT, name)
-        ImageGrab.grab(bbox=rect(self.hwnd), all_screens=True).save(p)
+        try:
+            ImageGrab.grab(bbox=rect(self.hwnd), all_screens=True).save(p)
+        except Exception as e:  # noqa: BLE001  (launch of 2026-10-24: a PIL encode error ended the run)
+            note("INFO", f"{self.who}: screenshot {name} failed: {e}")
+            Image.new("RGB", (4, 4)).save(p)
         note("INFO", f"{self.who}: screenshot {p}")
         return p
 
@@ -339,6 +343,8 @@ def setup_tomls():
         with open(os.path.join(ROOT, folder, "fable_2.toml"), "w", encoding="utf-8", newline="\n") as f:
             f.write("\n".join(out) + "\n")
 
+    if "--fps" in sys.argv:  # the graphics thread's stencil-copy build (rexglue-sdk ec757ef)
+        src += ["readback_memexport = false", "shared_memory_preserve_gpu_writes = true"]
     make("mod-a", "127.0.0.1", "127.0.0.2,127.0.0.5", "TestA", set())
     make("mod-b", "127.0.0.2", "127.0.0.1,127.0.0.4", None, {"profile_gamertag", "coop_campaign"})
     note("INFO", "tomls: host = Josh's (+ loopback, 2 networks); partner = no gamertag, no coop_campaign")
@@ -509,10 +515,153 @@ def run_multi():
         relay.kill()
 
 
+def open_coop_entry(g, tag):
+    """Main menu (cursor on New Game): Down twice to the native Co-op entry
+    (New Game, Continue, Co-op, ...), screenshot its highlight, A -> the hub."""
+    g.press("Down")
+    time.sleep(0.6)
+    g.shot(f"{tag}_{g.who}_menu_on_continue.png")
+    g.press("Down")
+    time.sleep(0.6)
+    g.shot(f"{tag}_{g.who}_menu_on_coop.png")
+    n = g.count(r"\[coop\] main menu: Co-op chosen")
+    g.press("E")
+    ok = g.wait(f"{tag}: Co-op entry opens the hub", r"\[coop\] main menu: Co-op chosen", n, 10)
+    time.sleep(2)
+    g.shot(f"{tag}_{g.who}_hub.png")
+    return ok
+
+
+def host_new_campaign(a, tag):
+    a.select("Host: new co-op campaign")
+    n = a.count(r"\[lobby\] open host kind=new")
+    a.press("E")
+    return a.wait(f"{tag}: Host: new co-op campaign opens the host lobby", r"\[lobby\] open host kind=new", n, 10)
+
+
+def partner_joins(b, prefix, tag):
+    time.sleep(4)
+    rows = [r for r in b.rows() if r[0].startswith(prefix)]
+    note("PASS" if len(rows) == 1 else "FAIL", f"{tag}: '{prefix}' listed once on two networks ({len(rows)} row(s))")
+    b.shot(f"{tag}_partner_hub_list.png")
+    n = b.count(r"joining TestA's lobby as partner")
+    b.select(prefix)
+    b.press("E")
+    return b.wait(f"{tag}: partner joins TestA's lobby", r"joining TestA's lobby as partner", n, 10)
+
+
+def run_menu():
+    setup_tomls()
+    relay_log = open(os.path.join(OUT, "relay_menu.log"), "w")
+    relay = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                           "coop_relay.py")], stdout=relay_log, stderr=relay_log)
+    a, b = Game("mod-a", "host"), Game("mod-b", "partner")
+    a.start()
+    b.start()
+    try:
+        a.past_title()
+        b.past_title()
+        note("PASS" if a.count(r"main menu: Co-op entry added") else "FAIL", "host: native Co-op entry added")
+        a.shot("m_host_main_menu.png")
+        # B from the hub returns to the main menu with Co-op still focused: A again reopens the hub.
+        open_coop_entry(a, "m0")
+        n = a.count(r"hub closed, back to the main menu")
+        a.press("B")
+        a.wait("m0: B from the hub returns to the main menu", r"hub closed, back to the main menu", n, 10)
+        time.sleep(1.5)
+        a.shot("m0_host_back_on_coop.png")
+        n = a.count(r"main menu: Co-op chosen")
+        a.press("E")
+        a.wait("m0: focus stayed on Co-op (A reopens the hub)", r"main menu: Co-op chosen", n, 10)
+        time.sleep(1.5)
+        # --- m1: host a new campaign, partner joins from the hub ---------------
+        host_new_campaign(a, "m1")
+        time.sleep(4)
+        a.shot("m1_host_lobby.png")
+        a.select("Start")
+        n = a.count(r"host start:")
+        a.press("E")
+        time.sleep(2)
+        note("PASS" if a.count(r"host start:") == n else "FAIL", "m1: Start refused with no partner")
+        open_coop_entry(b, "m1")
+        partner_joins(b, "Join TestA", "m1")
+        time.sleep(3)
+        a.select("Ready")
+        a.press("X")
+        time.sleep(2)
+        a.select("Start")
+        n = a.count(r"host start:")
+        a.press("E")
+        time.sleep(2)
+        note("PASS" if a.count(r"host start:") == n else "FAIL", "m1: Start refused while the partner is not ready")
+        if both_ready_and_start(a, b, "m1"):
+            a.wait("m1: host loads through the game's own Load Game", r"main menu: Load Game", 0, 20)
+            join_phase(a, b, "m1")
+        # --- m2: partner leaves; host continues the co-op save; partner rejoins --
+        b.stop()
+        n = a.count(r"host: back at the front end")
+        a.wait("m2: host saves, returns to the main menu", r"host: back at the front end", n, 240)
+        time.sleep(3)
+        a.shot("m2_host_message.png")
+        time.sleep(12)
+        open_coop_entry(a, "m2")
+        a.select("Host: continue a co-op save")
+        n = a.count(r"\[lobby\] open saves")
+        a.press("E")
+        a.wait("m2: the hub lists the co-op saves", r"\[lobby\] open saves", n, 10)
+        time.sleep(1.5)
+        a.shot("m2_host_saves.png")
+        n = a.count(r"\[lobby\] open host kind=continue")
+        a.press("E")
+        a.wait("m2: the save's lobby opens", r"\[lobby\] open host kind=continue", n, 10)
+        b = Game("mod-b", "partner")
+        b.start()
+        b.past_title()
+        open_coop_entry(b, "m2")
+        partner_joins(b, "Continue TestA", "m2")
+        if both_ready_and_start(a, b, "m2"):
+            join_phase(a, b, "m2")
+        # --- error path: the host leaves its lobby while the partner waits --------
+        b.stop()
+        n = a.count(r"host: back at the front end")
+        a.wait("err: host back at the main menu", r"host: back at the front end", n, 240)
+        time.sleep(15)
+        open_coop_entry(a, "err")
+        host_new_campaign(a, "err")
+        b = Game("mod-b", "partner")
+        b.start()
+        b.past_title()
+        open_coop_entry(b, "err")
+        partner_joins(b, "Join TestA", "err")
+        time.sleep(2)
+        n = b.count(r"partner: the host left the lobby")
+        a.select("Back")
+        a.press("E")
+        b.wait("err: partner is told the host left", r"partner: the host left the lobby", n, 30)
+        time.sleep(1)
+        b.shot("err_partner_host_left.png")
+        # --- stock New Game (no chooser) -------------------------------------------
+        b.press("B")
+        time.sleep(2)
+        b.stop()
+        b = Game("mod-b", "partner")
+        b.start()
+        b.past_title()
+        n = b.count(r"\[lobby\] open")
+        b.press("E")
+        time.sleep(25)
+        b.shot("stock_new_game.png")
+        note("PASS" if b.count(r"\[lobby\] open") == n else "FAIL", "New Game is the stock game's (no co-op panel)")
+    finally:
+        for g in (a, b):
+            g.stop()
+        relay.kill()
+
+
 def main():
     os.makedirs(OUT, exist_ok=True)
     mode = sys.argv[1] if len(sys.argv) > 1 else "coop"
-    {"coop": run_coop, "solo": run_solo, "multi": run_multi}[mode]()
+    {"coop": run_coop, "solo": run_solo, "multi": run_multi, "menu": run_menu}[mode]()
     with open(os.path.join(OUT, f"results_{mode}.txt"), "w", encoding="utf-8") as f:
         f.write("\n".join(results) + "\n")
     return 0 if not any(r.startswith("FAIL") for r in results) else 1

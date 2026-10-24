@@ -43,7 +43,9 @@ namespace fable2::cooplobby {
 
 namespace lobby = rex::kernel::xam::lobby;
 
-enum class Role { kClosed, kChoose, kHost, kPartner };  // kChoose: New Game -> Solo / Co-op
+// kChoose: (old) New Game -> Solo / Co-op; kPartner browsing = the Co-op hub;
+// kSaves: the hub's "Host: continue a co-op save" list.
+enum class Role { kClosed, kChoose, kHost, kPartner, kSaves };
 
 // Called on the render thread; must not call guest code directly (queue Lua
 // or set flags instead).
@@ -53,10 +55,13 @@ struct Callbacks {
   std::function<void()> host_start;          // host pressed Start: run the original New Game / load
   std::function<void(uint32_t)> partner_go;  // coop_go arrived: join the host at this ip
   std::function<void()> back;                // lobby closed with Back / Leave
-  std::function<void()> host_new;            // partner's list: "Host a new co-op campaign"
+  std::function<void()> host_new;            // hub: "Host: new co-op campaign"
+  std::function<void()> host_saves;          // hub: "Host: continue a co-op save"
+  std::function<void(size_t)> pick_save;     // save list: the chosen campaign save
 };
 
 struct Lobby {
+  std::vector<std::string> saves;  // kSaves: one label per campaign save
   std::mutex m;
   Role role = Role::kClosed;
   HostLobby host;
@@ -112,7 +117,8 @@ inline void OpenHost(Kind kind, const std::string& cid, const std::string& partn
 // The partner's list of lobbies. auto_join: join a campaign that is waiting
 // for this player as soon as it is heard (the partner's Continue).
 inline bool g_auto_join = false;
-inline void OpenPartner(Callbacks cb, bool auto_join = false) {
+inline bool g_hub_has_saves = false;  // the hub offers "Host: continue a co-op save"
+inline void OpenPartner(Callbacks cb, bool auto_join = false, bool has_saves = false) {
   std::lock_guard<std::mutex> l(L().m);
   auto& lb = L();
   lobby::PublishData("coop_lobby", "");
@@ -122,8 +128,9 @@ inline void OpenPartner(Callbacks cb, bool auto_join = false) {
   lb.partner.my_name = MyName();
   lb.partner.my_xuid = MyXuid();
   g_auto_join = auto_join;
+  g_hub_has_saves = has_saves;
   lb.cursor = 0;
-  lb.notice = auto_join ? "Looking for your co-op campaign" : "Co-op games on your network";
+  lb.notice = auto_join ? "Looking for your co-op campaign" : "Join a lobby on your network, or host one";
   lb.cb = std::move(cb);
   g_open.store(true);
   REXSYS_INFO("[lobby] open partner as {}", lb.partner.my_name);
@@ -139,6 +146,20 @@ inline void OpenChooser(Callbacks cb) {
   lb.cb = std::move(cb);
   g_open.store(true);
   REXSYS_INFO("[lobby] open chooser");
+}
+
+// The hub's "Host: continue a co-op save": one row per campaign save (labels
+// from the caller, newest first). Publishes nothing.
+inline void OpenSaves(std::vector<std::string> labels, Callbacks cb) {
+  std::lock_guard<std::mutex> l(L().m);
+  auto& lb = L();
+  lb.role = Role::kSaves;
+  lb.saves = std::move(labels);
+  lb.cursor = 0;
+  lb.notice = "Pick the campaign to host";
+  lb.cb = std::move(cb);
+  g_open.store(true);
+  REXSYS_INFO("[lobby] open saves ({})", lb.saves.size());
 }
 
 // Clears this PC's published keys (contract rule 5) and hides the window.
@@ -179,7 +200,10 @@ inline void HostWorldReady(const std::string& cid) {
 inline std::vector<Heard> heard(const char* key) {
   std::vector<Heard> out;
   for (const auto& d : lobby::GetPeerData(key))
-    if (!d.value.empty()) out.push_back({d.ip, d.gamertag, d.value, d.seconds_since_received, d.xuid});
+    if (!d.value.empty()) {
+      const uint64_t own = SenderXuid(d.value);  // the record says who sent it
+      out.push_back({d.ip, d.gamertag, d.value, d.seconds_since_received, own ? own : d.xuid});
+    }
   return out;
 }
 
@@ -249,7 +273,8 @@ inline std::function<void()> tick_locked() {
     lobby::PublishData("coop_seat", Format(lb.partner.seat));
     if (start_join) {
       const uint32_t ip = lb.partner.host_ip;
-      lobby::PublishData("coop_ack", Format(AckRecord{lb.partner.seat.hxuid, lb.partner.last_go_seq}));
+      lobby::PublishData("coop_ack", Format(AckRecord{lb.partner.seat.hxuid, lb.partner.last_go_seq,
+                                                      XuidStr(lb.partner.my_xuid)}));
       REXSYS_INFO("[lobby] coop_go received (seq {}), joining {:08X}", lb.partner.last_go_seq, ip);
       lb.notice = "Joining " + lb.partner.seat.host;
       if (lb.cb.partner_go) return [cb = lb.cb.partner_go, ip] { cb(ip); };
@@ -273,7 +298,8 @@ inline void Tick() {
 
 // --- menu rows -------------------------------------------------------------------
 
-enum class Row { kChildhood, kReady, kStart, kBack, kGame, kGender, kLeave, kSolo, kCoop, kJoinOther, kHostGender, kHostNew };
+enum class Row { kChildhood, kReady, kStart, kBack, kGame, kGender, kLeave, kSolo, kCoop, kJoinOther, kHostGender, kHostNew,
+                 kHostSaves, kSave };
 
 struct RowItem {
   Row row;
@@ -286,7 +312,10 @@ struct RowItem {
 inline std::vector<RowItem> rows_locked() {
   auto& lb = L();
   std::vector<RowItem> r;
-  if (lb.role == Role::kChoose) {
+  if (lb.role == Role::kSaves) {
+    for (size_t i = 0; i < lb.saves.size(); ++i) r.push_back({Row::kSave, lb.saves[i], true, i});
+    r.push_back({Row::kBack, "Back"});
+  } else if (lb.role == Role::kChoose) {
     r.push_back({Row::kSolo, "Solo"});
     r.push_back({Row::kCoop, "Co-op"});
     r.push_back({Row::kBack, "Back"});
@@ -311,7 +340,10 @@ inline std::vector<RowItem> rows_locked() {
         if (!g.joinable) label += " (not for you)";
         r.push_back({Row::kGame, label, g.joinable, i});
       }
-      if (!g_auto_join) r.push_back({Row::kHostNew, "Host a new co-op campaign"});
+      if (!g_auto_join) {
+        if (g_hub_has_saves) r.push_back({Row::kHostSaves, "Host: continue a co-op save"});
+        r.push_back({Row::kHostNew, "Host: new co-op campaign"});
+      }
       r.push_back({Row::kBack, "Back"});
     } else {
       const auto& s = lb.partner.seat;
@@ -410,6 +442,18 @@ inline std::function<void()> act_locked(int dy, int dx, bool a, bool b, bool x) 
         REXSYS_INFO("[lobby] joining {}'s lobby as partner", lb.partner.seat.host);
       }
       break;
+    case Row::kHostSaves:
+      if (a) {
+        close_locked(false);
+        return lb.cb.host_saves;
+      }
+      break;
+    case Row::kSave:
+      if (a) {
+        close_locked(false);
+        if (lb.cb.pick_save) return [cb = lb.cb.pick_save, i = it.index] { cb(i); };
+      }
+      break;
     case Row::kHostNew:
       if (a) {
         close_locked(false);
@@ -499,9 +543,12 @@ inline void input_filter(uint32_t user_index, rex::input::X_INPUT_STATE* state) 
 inline std::string view_locked() {
   auto& lb = L();
   if (lb.role == Role::kClosed) return {};
-  std::string v = lb.role == Role::kChoose ? "TNew Game\n"
+  const bool hub = lb.role == Role::kPartner && lb.partner.state == PartnerState::kBrowsing;
+  std::string v = lb.role == Role::kChoose  ? "TNew Game\n"
                   : lb.role == Role::kHost  ? "TCo-op campaign - your lobby\n"
-                                            : "TCo-op campaign - join\n";
+                  : lb.role == Role::kSaves ? "TContinue a co-op campaign\n"
+                  : hub                     ? "TCo-op\n"
+                                            : "TCo-op campaign - " + lb.partner.seat.host + "'s lobby\n";
   v += "N" + lb.notice + "\n";
   auto ready = [](bool r) { return r ? "Ready" : "Not ready"; };
   if (lb.role == Role::kHost) {
@@ -523,12 +570,12 @@ inline std::string view_locked() {
     v += "D(no co-op games found yet: the host picks New Game -> Co-op first)\n";
   }
   const bool browsing = lb.role == Role::kPartner && lb.partner.state == PartnerState::kBrowsing;
-  if (lb.role != Role::kChoose) v += browsing ? "SGames\n" : "SOptions\n";
+  if (lb.role != Role::kChoose && lb.role != Role::kSaves) v += browsing ? "SLobbies\n" : "SOptions\n";
   const auto r = rows_locked();
   lb.cursor = std::clamp(lb.cursor, 0, std::max(0, static_cast<int>(r.size()) - 1));
   for (int i = 0; i < static_cast<int>(r.size()); ++i)
     v += std::string("R") + (r[i].enabled ? "1" : "0") + (i == lb.cursor ? "1" : "0") + r[i].label + "\n";
-  v += lb.role == Role::kChoose ? "FUp/Down move   A select   B back\n"
+  v += lb.role == Role::kChoose || lb.role == Role::kSaves || hub ? "FUp/Down move   A select   B back\n"
                                  : "FUp/Down move   A select   Left/Right change   X ready   B back\n";
   return v;
 }

@@ -18,6 +18,8 @@
 // Co-op join gate probe / force (starter save inside QC060).
 #include "fable2_coop_joingate.h"
 #include "fable2_coop_joinscreen.h"
+// Native "Co-op" main-menu entry (the only way into co-op).
+#include "fable2_coop_mainmenu.h"
 
 #include "fable_2_app.h"
 #include "fps_meter.h"

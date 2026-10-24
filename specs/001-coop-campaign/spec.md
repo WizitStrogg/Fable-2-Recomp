@@ -15,6 +15,17 @@ options (Solo or Co-op). If coop is selected, it should prepare a lobby for each
 to and once connected to, it creates a save game that is only playable with both players from
 that point forward."
 
+**Revision (Josh, 2026-10-24, after the first two-PC session)**: "Below the Continue bar, please
+add another option labeled Co-op. It is critical that this option follows the same template as
+the 5 other options... After coop is selected, I would like a lobby menu system to appear. This
+will prompt the user to either create a new lobby and select a Co-op save game or create a new
+campaign (This should load the save skipping the childhood intro). Once a lobby is created, the
+partner should see and be able to join that lobby and everyone queue up to start. After everyone
+is queued, the host should be able to start the game at which time it should load on the host PC
+and then connect the partner afterwards. I am looking to have the co-op experience limited to the
+new co-op selection in the menu." New Game and Continue are the stock game's again; user stories
+1-2 and FR-001/002/006/007/008/014-016 below follow this revision.
+
 ## Context
 
 Today (v13) co-op means dropping into someone's solo world as the game's henchman. This feature
@@ -35,8 +46,9 @@ Decisions taken with Josh (2026-10-23), recorded in the constitution v1.1.0:
 
 ### User Story 1 - Start a co-op campaign together (Priority: P1)
 
-Josh chooses New Game, then Co-op. A lobby opens and waits. Calvin chooses New Game, then Co-op,
-sees Josh's lobby and joins it. Calvin picks his hero's gender; Josh picks the childhood option
+Josh chooses Co-op on the main menu (below Continue), then "Host: new co-op campaign". A lobby
+opens and waits. Calvin chooses Co-op, sees "Join Josh's co-op campaign" at the top of the list
+and joins it. Calvin picks his hero's gender; Josh picks the childhood option
 (skip to adulthood). Both press Ready, Josh presses Start, and both arrive in the world at the
 start of adulthood: Josh as player 1, Calvin as his own new hero.
 
@@ -49,10 +61,11 @@ saves are byte-identical to before.
 
 **Acceptance Scenarios**:
 
-1. **Given** both games are at the main menu, **When** Josh chooses New Game, **Then** he is
-   offered Solo or Co-op; Solo starts the normal game unchanged.
-2. **Given** Josh hosts a lobby, **When** Calvin chooses New Game then Co-op, **Then** Calvin sees
-   Josh's lobby by name within 10 seconds and can join it.
+1. **Given** both games are at the main menu, **Then** it shows New Game, Continue, Co-op,
+   Downloadable Content, Language, Subtitles, Co-op drawn and animated like the others; New Game
+   and Continue are the stock game's.
+2. **Given** Josh hosts a lobby, **When** Calvin chooses Co-op, **Then** Calvin sees Josh's lobby
+   by name, once (even over two shared networks), within 10 seconds and can join it.
 3. **Given** both are in the lobby, **When** Calvin picks Female and Josh picks "Skip to
    adulthood", **Then** both lobby screens show both choices and both Ready states.
 4. **Given** both are ready, **When** Josh presses Start, **Then** both arrive in the world at the
@@ -63,9 +76,10 @@ saves are byte-identical to before.
 
 ### User Story 2 - The campaign is only played together (Priority: P1)
 
-Josh's campaign save appears in his Continue list marked as co-op. Loading it opens the lobby
-and waits for Calvin; it never enters the world alone. Calvin rejoins it from Continue, then
-Co-op. If either player drops mid-session, the host saves and both return to the lobby.
+Josh continues the campaign from Co-op -> "Host: continue a co-op save"; its lobby waits for
+Calvin and never enters the world alone. Calvin rejoins from Co-op ("Continue Josh's campaign with
+you"). If either player drops mid-session, the host saves and returns to the main menu with a
+message.
 
 **Why this priority**: Josh's rule that the save is only playable with both players is what makes
 shared story and shared gold work without any syncing.
@@ -159,27 +173,36 @@ equal to A's.
 
 ### Functional Requirements
 
-- **FR-001**: New Game MUST offer Solo and Co-op; Solo MUST behave exactly as the unmodded game.
-- **FR-002**: Co-op MUST open a lobby that lists nearby and ZeroTier lobbies by player name, using
-  the existing no-IP discovery.
+- **FR-001**: The main menu MUST have a native "Co-op" entry directly below Continue, built by the
+  game's own entry code (same look, focus, highlight, animation, sound); the entries below move
+  down. New Game and Continue MUST behave exactly as the unmodded game.
+- **FR-002**: Co-op MUST open a hub that lists the lobbies on the network (one row per player,
+  even when heard over several networks) to join, then "Host: continue a co-op save" (when there
+  is one) and "Host: new co-op campaign", then Back (to the main menu, focus on Co-op).
 - **FR-003**: The lobby MUST let the partner choose gender, let the host choose the childhood
   option, show both players' choices and Ready states, and let only the host Start.
 - **FR-004**: Start MUST create a new save slot on the host that carries a co-op campaign marker
   (campaign id, host and partner identities, options), and bring both players into the world.
 - **FR-005**: "Skip to adulthood" MUST start the campaign at the beginning of adulthood using the
   game's own gameflow skip, with the adult starter state the story expects.
-- **FR-006**: Loading a save with a campaign marker MUST open the lobby and wait for the
-  campaign's partner; it MUST NOT enter the world without them.
-- **FR-007**: The partner MUST be able to rejoin from Continue, then Co-op.
-- **FR-008**: If either player leaves or disconnects during a session, the host MUST save and both
-  MUST return to the lobby.
+- **FR-006**: A co-op save MUST only be hosted from the hub; its lobby MUST wait for the
+  campaign's partner and MUST NOT enter the world without them. Start loads it through the
+  game's own Continue (the main menu's "Load Game").
+- **FR-007**: The partner MUST be able to rejoin from Co-op.
+- **FR-008**: If either player leaves or disconnects during a session, the host MUST save and
+  return to the main menu with a message; the campaign continues from the hub.
 - **FR-009**: Player 2's complete hero MUST be stored in the campaign slot and written in the same
   save event as the world save; it MUST be applied to player 2 when they enter the world.
 - **FR-010**: All gold earned by either hero MUST go to one shared purse shown on both screens.
 - **FR-011**: After each session the host MUST send a copy of the campaign slot to the partner.
 - **FR-012**: Solo saves and the game's normal drop-in co-op into solo saves MUST be unaffected.
 - **FR-013**: All of the above MUST sit behind a cvar (`coop_campaign`, default off until
-  verified), shown as an F6 box.
+  verified), shown as an F6 box; the friend's play-coop.cmd turns it on, so no F-keys are needed.
+- **FR-014**: Players MUST be identified by their online XUID, never by display name; a blank
+  gamertag shows the PC's name.
+- **FR-015**: Start MUST be enabled only with a seated, ready partner. The host's go MUST be
+  acknowledged by the partner and re-sent until then; either side MUST show a clear message and
+  return to the main menu if the join does not happen within 2 minutes or the other side leaves.
 
 ### Key Entities
 

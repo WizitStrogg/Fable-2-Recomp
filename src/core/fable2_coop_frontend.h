@@ -1,21 +1,21 @@
 // fable_2 - co-op campaign front end (specs/001-coop-campaign, T018).
 //
-// With coop_campaign on, A on the main menu's New Game opens a small
-// "Solo / Co-op" chooser (the lobby panel) instead of starting the game:
-//   Solo  -> the chooser closes and a fresh A press is injected; that press
-//            passes through to the stock New Game (the boy/girl hero cards).
-//   Co-op -> the host lobby opens (fable2_coop_lobby.h).
-//   Back  -> the main menu, unchanged.
+// With coop_campaign on, the main menu has a native "Co-op" entry below
+// Continue (fable2_coop_mainmenu.h, Josh 2026-10-24); New Game and Continue are
+// the stock game's. Co-op opens the hub (open_coop_hub): the lobbies heard on
+// the network to join, "Host: continue a co-op save", "Host: new co-op
+// campaign", Back. The host's Start loads the campaign save through the menu's
+// own "Load Game"; the partner joins once the host's world is up.
 // With coop_campaign off nothing is intercepted.
 //
-// Hook point: FrontMenu_PressBitDispatch (0x82188F20), the main menu's raw
-// press dispatch (proof P1; plans/main-menu-mod-item.md). r5 is the pressed
-// mask (Up 1, Down 2, Back 32, A 4096), and each physical press arrives about
-// twice within 400 ms. The stock menu opens with New Game selected and clamps
-// the cursor to rows 0..4, so a mirror of Up/Down presses gives the row.
+// Hook point for the panel's pad ownership and the host's load request:
+// FrontMenu_PressBitDispatch (0x82188F20), the main menu's raw press dispatch
+// (proof P1). r5 is the pressed mask (Up 1, Down 2, Back 32, A 4096), and each
+// physical press arrives about twice within 400 ms.
 
 #pragma once
 
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
@@ -73,6 +73,10 @@ constexpr int kNewGameRow = 0, kLastRow = 4;
 constexpr int64_t kDedupMs = 400;
 
 inline int g_row = 0;               // mirrored main-menu cursor
+// Host Start -> load the campaign save through the menu's own handler
+// (fable2::coopmainmenu::RequestLoadGame, set by fable2_coop_mainmenu.h).
+inline std::atomic<bool> g_load_pending{false};
+inline bool (*g_request_load)(PPCContext&, uint8_t*) = nullptr;
 inline bool g_armed = true;         // false once the stock New Game is running
 inline int g_pass_a = 0;            // injected A presses to let through
 inline int64_t g_last_press_ms = 0;
@@ -99,7 +103,6 @@ inline bool in_main_menu() {
          s == fable2::stateprobe::kPressAScreen;
 }
 
-inline void open_chooser();
 inline std::optional<std::string> restore_player2_chunk(const std::filesystem::path& slot);
 inline void p2_watch_start(const std::filesystem::path& slot, const std::string& cid, uint32_t partner_ip);
 inline void p2_watch_stop();
@@ -113,14 +116,6 @@ inline void pass_next_a_to_new_game() {
 }
 
 inline void swallow_closing_a() { g_swallow_a_until = fable2::f5lua::steady_ms() + kLeakWindowMs; }
-
-inline void on_solo() {
-  fable2::coophero::SetCampaignPlayer2("");  // a solo game has no campaign player 2
-  g_partner_xuid.store(0);
-  p2_watch_stop();
-  REXSYS_INFO("[coop] new game: Solo");
-  pass_next_a_to_new_game();
-}
 
 // --- the co-op session after Start (host) or go (partner) ---------------------------
 
@@ -404,7 +399,10 @@ inline void on_host_start() {
     // panel's closing A is swallowed, then the cursor goes to Continue and A.
     rex_content_set_save_filter(slot->name.c_str());
     swallow_closing_a();
-    inject_continue(700);
+    // Load it with the game's own Continue, on the game thread: an injected A
+    // reaches the press dispatch (OnPress), which calls the menu's handler.
+    g_load_pending.store(true);
+    fable2::cooplobby::InjectPress(static_cast<uint16_t>(fable2::cooplobby::kA), 700, 200);
   } else {
     pass_next_a_to_new_game();
   }
@@ -464,63 +462,89 @@ inline PeerView peer_view(uint64_t xuid, uint32_t ip) {
   return v;
 }
 
+inline void open_coop_hub();
+
 inline void open_host_lobby(fable2::cooplobby::Kind kind, const std::string& cid,
                             const std::string& partner, const std::string& partner_xuid = "") {
   fable2::cooplobby::Callbacks cb;
   cb.host_start = on_host_start;
   cb.partner_go = on_partner_go;
-  if (kind == fable2::cooplobby::Kind::kContinue) {
-    cb.back = [] {  // T025: Back from a campaign's lobby returns to the menu
-      REXSYS_INFO("[coop] campaign lobby closed, back to the menu");
-      swallow_closing_a();
-    };
-  } else {
-    cb.back = [] {
-      REXSYS_INFO("[coop] lobby closed, back to the chooser");
-      swallow_closing_a();
-      open_chooser();
-    };
-  }
+  cb.back = [] {  // Back from a lobby returns to the Co-op hub
+    REXSYS_INFO("[coop] lobby closed, back to the Co-op hub");
+    swallow_closing_a();
+    open_coop_hub();
+  };
   fable2::cooplobby::OpenHost(kind, cid, partner, cb, partner_xuid);
 }
 
-// The partner's list of co-op games (first rows), with "Host a new co-op
-// campaign" below them. auto_join: the partner's Continue, which joins the
-// campaign waiting for this player as soon as it is heard.
-inline void open_partner_list(bool auto_join) {
+// The host's campaign saves (slots with a coop_campaign.toml marker), newest first.
+struct CampaignSave {
+  std::string cid, partner, partner_xuid, label;
+  std::filesystem::file_time_type when;
+};
+inline std::vector<CampaignSave> campaign_saves() {
+  std::vector<CampaignSave> out;
+  for (const auto& s : fable2::cooptemplate::Slots()) {
+    const auto m = fable2::coopcampaign::ReadMarker(s.path);
+    if (!m || m->campaign_id.empty()) continue;
+    std::error_code ec;
+    CampaignSave c{m->campaign_id, m->partner_name, m->partner_xuid, "", {}};
+    c.when = std::filesystem::last_write_time(s.path / "mainsave.bin", ec);
+    c.label = "With " + (m->partner_name.empty() ? std::string("your partner") : m->partner_name) +
+              (m->created.size() >= 10 ? "  -  started " + m->created.substr(0, 10) : std::string());
+    out.push_back(std::move(c));
+  }
+  std::sort(out.begin(), out.end(), [](const CampaignSave& x, const CampaignSave& y) { return x.when > y.when; });
+  return out;
+}
+
+inline std::vector<CampaignSave> g_saves_shown;
+
+// Hub -> "Host: continue a co-op save": pick one, then its lobby (only its
+// partner can take the seat).
+inline void open_save_list() {
+  g_saves_shown = campaign_saves();
+  std::vector<std::string> labels;
+  for (const auto& c : g_saves_shown) labels.push_back(c.label);
+  fable2::cooplobby::Callbacks cb;
+  cb.pick_save = [](size_t i) {
+    if (i >= g_saves_shown.size()) return;
+    const auto c = g_saves_shown[i];
+    REXSYS_INFO("[coop] hub: hosting campaign {} with {}", c.cid, c.partner);
+    open_host_lobby(fable2::cooplobby::Kind::kContinue, c.cid, c.partner, c.partner_xuid);
+  };
+  cb.back = [] {
+    swallow_closing_a();
+    open_coop_hub();
+  };
+  fable2::cooplobby::OpenSaves(std::move(labels), cb);
+}
+
+// Main menu -> Co-op (Josh, 2026-10-24): the only way into co-op. The hub lists
+// the lobbies heard on the network (join), then "Host: continue a co-op save"
+// (when this PC has one) and "Host: new co-op campaign" (from the adult starter
+// save: no childhood), then Back to the main menu (focus stays on Co-op).
+inline void open_coop_hub() {
   fable2::cooplobby::Callbacks cb;
   cb.partner_go = on_partner_go;
   cb.host_new = [] {
-    REXSYS_INFO("[coop] co-op list: hosting a new campaign");
+    REXSYS_INFO("[coop] hub: hosting a new campaign");
     open_host_lobby(fable2::cooplobby::Kind::kNew, "", "");
   };
-  if (auto_join) {
-    cb.back = [] {
-      REXSYS_INFO("[coop] campaign list closed, back to the menu");
-      swallow_closing_a();
-    };
-  } else {
-    cb.back = [] {
-      REXSYS_INFO("[coop] co-op list closed, back to the chooser");
-      swallow_closing_a();
-      open_chooser();
-    };
-  }
-  fable2::cooplobby::OpenPartner(cb, auto_join);
+  cb.host_saves = [] { open_save_list(); };
+  cb.back = [] {
+    REXSYS_INFO("[coop] hub closed, back to the main menu");
+    swallow_closing_a();
+  };
+  fable2::cooplobby::OpenPartner(cb, false, !campaign_saves().empty());
 }
 
-// New Game -> Co-op: a player who can see a co-op game on the network gets the
-// list of games to join first (2026-10-24: the partner's Co-op made him a
-// second host). With none heard, this player hosts.
-inline void on_coop() {
-  const auto games = fable2::cooplobby::JoinableNow();
-  if (!games.empty()) {
-    REXSYS_INFO("[coop] new game: Co-op, {} co-op game(s) heard, showing the list", games.size());
-    open_partner_list(false);
-    return;
-  }
-  REXSYS_INFO("[coop] new game: Co-op, opening the host lobby");
-  open_host_lobby(fable2::cooplobby::Kind::kNew, "", "");
+// Called by the main menu's Co-op entry (fable2_coop_mainmenu.h), on the game thread.
+inline void OnCoopEntry() {
+  if (fable2::cooplobby::g_open.load()) return;
+  g_past_title = true;
+  REXSYS_INFO("[coop] Co-op: opening the hub");
+  open_coop_hub();
 }
 
 // One A for the game's join screens if one is due: the first kAcceptFirstMs after
@@ -767,7 +791,7 @@ inline void status_tick(const SessionState& s, int64_t now) {
                              : "Campaign world up: waiting for " + s.partner_name + " to join";
       break;
     case Session::kHostPartnerLost:
-      st = s.partner_name + " left: saving, then back to the campaign lobby";
+      st = s.partner_name + " left: saving, then back to the main menu";
       break;
     case Session::kPartnerJoining:
       st = "Joining the host's campaign...";
@@ -844,7 +868,7 @@ end
           s.since_ms = now;
           g_seen_spawn_epoch = fable2::coophero::g_spawn_epoch.load();
           s.accept_presses = 0;
-          const std::string go = fable2::cooplobby::Format(fable2::cooplobby::GoRecord{s.cid, ++s.go_seq});
+          const std::string go = fable2::cooplobby::Format(fable2::cooplobby::GoRecord{s.cid, ++s.go_seq, fable2::cooplobby::XuidStr(fable2::cooplobby::MyXuid())});
           lobby::PublishData("coop_go", go);
           s.go_ms = now;
           REXSYS_INFO("[coop] host world up (starter save {}): published {}", s.slot_name, go);
@@ -901,7 +925,7 @@ end
         s.since_ms = now;
         g_seen_spawn_epoch = fable2::coophero::g_spawn_epoch.load();
         s.accept_presses = 0;
-        const std::string go = fable2::cooplobby::Format(fable2::cooplobby::GoRecord{s.cid, ++s.go_seq});
+        const std::string go = fable2::cooplobby::Format(fable2::cooplobby::GoRecord{s.cid, ++s.go_seq, fable2::cooplobby::XuidStr(fable2::cooplobby::MyXuid())});
         lobby::PublishData("coop_go", go);
         s.go_ms = now;
         REXSYS_INFO("[coop] host world up: published {}", go);
@@ -924,8 +948,9 @@ end
         // gone, or no join in kPartnerJoinMs, sends the host back to the
         // campaign's lobby to wait (the partner-lost path, which saves first).
         for (const auto& d : lobby::GetPeerData("coop_ack")) {
-          if (s.partner_xuid ? d.xuid != s.partner_xuid : d.ip != s.partner_ip) continue;
           const auto ack = fable2::cooplobby::ParseAck(d.value);
+          const uint64_t from = ack && !ack->pxuid.empty() ? std::strtoull(ack->pxuid.c_str(), nullptr, 16) : d.xuid;
+          if (s.partner_xuid ? from != s.partner_xuid : d.ip != s.partner_ip) continue;
           if (ack && ack->seq > s.acked_seq && ack->seq <= s.go_seq) {
             s.acked_seq = ack->seq;
             REXSYS_INFO("[coop] host: {} acknowledged the go (seq {})", s.partner_name, ack->seq);
@@ -933,7 +958,7 @@ end
         }
         const PeerView pv = peer_view(s.partner_xuid, s.partner_ip);
         if (s.acked_seq < s.go_seq && s.go_ms && now - s.go_ms > kGoRetryMs && approved <= s.since_ms) {
-          const std::string go = fable2::cooplobby::Format(fable2::cooplobby::GoRecord{s.cid, ++s.go_seq});
+          const std::string go = fable2::cooplobby::Format(fable2::cooplobby::GoRecord{s.cid, ++s.go_seq, fable2::cooplobby::XuidStr(fable2::cooplobby::MyXuid())});
           lobby::PublishData("coop_go", go);
           s.go_ms = now;
           REXSYS_INFO("[coop] host: no answer to the go yet, published again: {}", go);
@@ -943,7 +968,7 @@ end
           REXSYS_INFO("[coop] host: {} did not join ({}), back to the campaign lobby", s.partner_name,
                       gone ? "partner gone" : "timed out");
           ShowCoverMessage(s.partner_name + " could not join",
-                           "Saving, then back to the campaign lobby to wait for " + s.partner_name, 10000);
+                           "Saving, then back to the main menu (Co-op to try again)", 10000);
           s.s = Session::kHostPartnerLost;
           s.since_ms = now;
           s.quit_sent = false;
@@ -976,13 +1001,18 @@ end
         fable2::luaconsole::RunChunk(
             "print('[coop] QuitToFrontEnd: ' .. tostring(pcall(Debug.QuitToFrontEnd)))");
       }
-      if (s.quit_sent && !lobby::GetLobbyStatus().in_world && in_main_menu() && now - s.since_ms > 13000) {
-        REXSYS_INFO("[coop] host: back at the front end, waiting for {} in the lobby", s.partner_name);
+      // Back at the front end: the main menu, not a lobby (the proof run of
+      // 2026-10-24 opened the lobby while the front end was still loading; the
+      // state probe stays "MainMenu" in the world, so wait well past the quit).
+      // The host continues later through Co-op -> Host: continue a co-op save.
+      if (s.quit_sent && !lobby::GetLobbyStatus().in_world && now - s.since_ms > 30000) {
+        REXSYS_INFO("[coop] host: back at the front end; {} can rejoin through Co-op", s.partner_name);
         fable2::coophero::SetCampaignPlayer2("");
         p2_watch_stop();
         s.s = Session::kNone;
-        after = [cid = s.cid, partner = s.partner_name, px = fable2::cooplobby::XuidStr(s.partner_xuid)] {
-          open_host_lobby(fable2::cooplobby::Kind::kContinue, cid, partner, px);
+        after = [partner = s.partner_name] {
+          ShowCoverMessage(partner + " left the campaign",
+                           "The game was saved. To play on: Co-op -> Host: continue a co-op save", 12000);
         };
       }
       break;
@@ -1031,17 +1061,6 @@ end
   }
   }
   if (after) after();
-}
-
-inline void open_chooser() {
-  fable2::cooplobby::Callbacks cb;
-  cb.solo = on_solo;
-  cb.coop = on_coop;
-  cb.back = [] {
-    REXSYS_INFO("[coop] new game chooser: Back");
-    swallow_closing_a();
-  };
-  fable2::cooplobby::OpenChooser(cb);
 }
 
 // The press hook. Returns true to swallow the press.
@@ -1104,6 +1123,16 @@ inline bool OnPress(PPCContext& ctx, uint8_t* base) {
   g_last_press_ms = now;
 
   if (mask & kA) {
+    // The host's Start: load the campaign save with the game's own Continue
+    // ("Load Game"), here on the game thread; the press that brought us here
+    // was injected for this and goes no further.
+    if (g_load_pending.exchange(false)) {
+      swallow_closing_a();
+      if (g_request_load && g_request_load(ctx, base)) return true;
+      REXSYS_WARN("[coop] host start: main menu not known, steering to Continue instead");
+      inject_continue(300);
+      return true;
+    }
     if (g_pass_a > 0) {
       // The closing (or injected) A, both of its dispatch calls, goes to the
       // stock menu: New Game starts.
@@ -1117,41 +1146,8 @@ inline bool OnPress(PPCContext& ctx, uint8_t* base) {
       return false;
     }
     if (now < g_swallow_a_until) return true;  // the A that closed a panel with Back
-    if (repeat)  // second call of a swallowed press
-      return g_armed && (g_row == kNewGameRow || (g_row == kContinueRow && g_continue_swallowed));
-    if (g_row == kNewGameRow && g_armed) {
-      REXSYS_INFO("[coop] new game: A on New Game, showing Solo / Co-op");
-      open_chooser();
-      return true;
-    }
-    if (g_row == kContinueRow && g_armed) {
-      // T025: Continue on a campaign save opens that campaign's lobby instead of
-      // loading it alone; any other save loads as usual. Start's own A on
-      // Continue (kHostStarting) passes.
-      {
-        std::lock_guard<std::mutex> l(S().m);
-        if (S().s == Session::kHostStarting) return false;
-      }
-      const auto newest = fable2::cooptemplate::NewestSlot();
-      const auto m = newest ? fable2::coopcampaign::ReadMarker(newest->path) : std::nullopt;
-      g_continue_swallowed = m.has_value();
-      if (m) {
-        REXSYS_INFO("[coop] continue: {} is campaign {} with {}, opening its lobby", newest->name,
-                    m->campaign_id, m->partner_name);
-        open_host_lobby(fable2::cooplobby::Kind::kContinue, m->campaign_id, m->partner_name, m->partner_xuid);
-        return true;
-      }
-      // The partner's Continue: a campaign host waiting for this player on the
-      // network is joined instead of loading a solo save.
-      for (const auto& g : fable2::cooplobby::JoinableNow()) {
-        if (g.rec.kind != fable2::cooplobby::Kind::kContinue) continue;
-        g_continue_swallowed = true;
-        REXSYS_INFO("[coop] continue: {}'s campaign {} is waiting for this player, joining it", g.rec.host,
-                    g.rec.cid);
-        open_partner_list(true);
-        return true;
-      }
-    }
+    // New Game and Continue are the stock game's again (Josh, 2026-10-24: co-op
+    // only behind the main menu's Co-op entry, fable2_coop_mainmenu.h).
     return false;
   }
   if (repeat) return false;

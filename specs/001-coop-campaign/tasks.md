@@ -201,3 +201,12 @@ switches to its fallback; only a failed fallback is raised to Josh.
 ## Parallel Opportunities
 
 - T002 to T005 together; proofs T008, T009, T010, T012, T013, T014 as separate rig runs.
+
+## Revision 2026-10-24 (Josh): Co-op entry on the main menu
+
+- [x] T050 Players matched by XUID (records carry hxuid / pxuid), one row per player over several networks, names never blank (src/core/fable2_coop_lobby_proto.h, fable2_coop_lobby.h; tools/coop_lobby_test.cpp ALL PASSED)
+- [x] T051 Go acknowledged by the partner (coop_ack), re-sent every 15 s; 2-minute limit with a message on both PCs (src/core/fable2_coop_frontend.h)
+- [x] T052 Native "Co-op" main-menu entry below Continue through the game's own AddEntry; its selection opens the hub (src/core/fable2_coop_mainmenu.h) - built, proof launch pending
+- [x] T053 Co-op hub: lobbies to join, "Host: continue a co-op save" (save list), "Host: new co-op campaign", Back; New Game and Continue stock again; the host loads through the menu's own "Load Game" - built, proof launch pending
+- [ ] T054 Ship-build proof (tools/coop_ship_e2e.py menu, two networks): menu screenshot, new campaign join, partner leaves, continue the co-op save, rejoin, host-left message, stock New Game
+- [ ] T055 Reinstall v14 into D:\Fable2-LAN\mod (backup) and rebuild the friend zip after T054 passes
