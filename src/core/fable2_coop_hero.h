@@ -302,11 +302,38 @@ inline void auto_capture(const lobby::LobbyStatus& status, int64_t now) {
   fable2::luaconsole::RunFile("coop_capture.lua");
 }
 
+// Co-op campaign (feature 001): player 2 is the campaign's own hero, not the
+// partner's solo hero. While a campaign runs, the front end sets the Lua that
+// makes player 2 (run with the library loaded, once per spawn) and host_apply
+// runs it instead of applying the partner's published hero (T031a).
+inline std::mutex g_campaign_mu;
+inline std::string g_campaign_p2_chunk;
+inline void SetCampaignPlayer2(std::string chunk) {
+  std::lock_guard<std::mutex> l(g_campaign_mu);
+  g_campaign_p2_chunk = std::move(chunk);
+}
+inline std::string campaign_player2() {
+  std::lock_guard<std::mutex> l(g_campaign_mu);
+  return g_campaign_p2_chunk;
+}
+
 inline void host_apply(const lobby::LobbyStatus& status, int64_t now) {
   if (!is_host(status)) return;
   const int64_t spawned = g_spawned_at_ms.load();
   if (spawned == 0 || now - spawned < REXCVAR_GET(coop_apply_delay_ms)) return;
   const uint32_t epoch = g_spawn_epoch.load();
+
+  const std::string campaign = campaign_player2();
+  if (!campaign.empty()) {
+    if (g_applied_epoch == epoch && g_applied_ip == 0 && g_applied_rev == 2) return;
+    g_applied_epoch = epoch;
+    g_applied_ip = 0;
+    g_applied_rev = 2;
+    const std::string lib = read_lib();
+    if (!lib.empty() && fable2::luaconsole::RunChunk(lib + "\n" + campaign))
+      REXSYS_INFO("[coop] campaign player 2 queued");
+    return;
+  }
 
   const std::string override_profile = REXCVAR_GET(coop_partner_profile);
   if (!override_profile.empty()) {

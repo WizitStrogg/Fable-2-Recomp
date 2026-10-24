@@ -80,6 +80,7 @@ inline void pass_next_a_to_new_game() {
 inline void swallow_closing_a() { g_swallow_a_until = fable2::f5lua::steady_ms() + kLeakWindowMs; }
 
 inline void on_solo() {
+  fable2::coophero::SetCampaignPlayer2("");  // a solo game has no campaign player 2
   REXSYS_INFO("[coop] new game: Solo");
   pass_next_a_to_new_game();
 }
@@ -179,6 +180,25 @@ inline void inject_continue(int64_t delay) {
   fable2::cooplobby::InjectPress(static_cast<uint16_t>(fable2::cooplobby::kA), delay, 200);
 }
 
+// T031a: player 2 in a new campaign is a fresh adult hero with the lobby's
+// gender and the host's starter kit (clothes, starter weapons, abilities, age,
+// height), without the host's own state (morality, purity, renown, title,
+// items). Taken from the host's hero when player 2 spawns. Until T031 reads
+// coop_player2.txt, a continued campaign seeds the same way.
+inline std::string seed_player2_chunk(bool male) {
+  std::string c;
+  c += "local hero, hench = GetPlayerHero(), GetPlayerHenchman()\n";
+  c += "if not hench or not hench:IsAlive() then print('[coop] seed: no live player 2') return end\n";
+  c += "local p = CoopHero.Capture(hero)\n";
+  c += std::string("p.male = ") + (male ? "true" : "false") + "\n";
+  c += "p.mor, p.pur, p.ren, p.title = 0, 0, 0, nil\n";
+  c += "p.items = {}\n";
+  c += "CoopHero.Apply(hench, p, {body = false})\n";
+  c += "print('[coop] player 2 seeded from the host starter profile')\n";
+  c += "print(CoopHero.SerializeV2(CoopHero.Capture(hench), 0))\n";
+  return c;
+}
+
 // Host pressed Start (spec D4). A new campaign copies the starter save into a
 // slot of its own and marks it; a continued one (Continue on a campaign slot,
 // T025) reloads its slot. Either way the game's own Continue loads the slot.
@@ -262,6 +282,8 @@ inline void on_host_start() {
                 resume ? "continuing " + S().slot_name
                 : from_template ? "starter save " + S().slot_name : std::string("gameflow skip"));
   }
+  fable2::coophero::SetCampaignPlayer2(
+      seed_player2_chunk(rec.gender2 == fable2::cooplobby::Gender::kMale));
   fable2::cooplobby::HidePanel();
   if (S().from_template) {
     // The game's own Continue loads the campaign slot: while the save list
@@ -364,6 +386,7 @@ inline void session_tick() {
         if (!loaded && now - s.since_ms > 180000) {
           // Never leave the player's save list narrowed to one slot.
           REXSYS_INFO("[coop] host start: the campaign world did not load in 3 min, giving up");
+          fable2::coophero::SetCampaignPlayer2("");
           rex_content_set_save_filter("");
           s.s = Session::kNone;
           fable2::coophero::g_capture_paused.store(false);
@@ -473,6 +496,7 @@ inline void session_tick() {
       }
       if (s.quit_sent && !lobby::GetLobbyStatus().in_world && in_main_menu() && now - s.since_ms > 13000) {
         REXSYS_INFO("[coop] host: back at the front end, waiting for {} in the lobby", s.partner_name);
+        fable2::coophero::SetCampaignPlayer2("");
         s.s = Session::kNone;
         after = [cid = s.cid, partner = s.partner_name] {
           open_host_lobby(fable2::cooplobby::Kind::kContinue, cid, partner);
