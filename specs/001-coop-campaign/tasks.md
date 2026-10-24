@@ -112,6 +112,8 @@ switches to its fallback; only a failed fallback is raised to Josh.
 - [ ] T033 [US4] Purse per P5: player 2's gold gains go to the host purse; player 2 gold held at 0; both HUDs show the total
 - [ ] T034 [US4] Rig verification: pickups by both, a quest reward, a purchase by A; totals exact on both screens and after reload
 - [ ] T035 [US1-4] F6 box "Co-op campaign"; `COOP-TESTS.txt` v14 steps; release summary with evidence paths
+- [ ] T035a [JOSH] Clean starter save past QC060 (needed before v14): the first template (Josh's childhood playthrough, mod-c Hero001, backup backups\20261023-192133-childhood-template) is inside QC060 "A New Beginning", where the game refuses co-op joins (gameflow only calls AllowHenchman(true) at QC070; launch 12, 16 refused joins; calling AllowHenchman(true) by hand did not help). Josh continues that save in mod-c until "A New Beginning" completes, saves, quits; then tools\make_coop_template.ps1. Rig tests until then use coop-template-TEST (rig copy of Josh's main hero, test-only, never shipped).
+- [ ] T035b Offline alternative to T035a: from the QC060 template, finish QC060 by script (Lua / gameflow: end the quest and move the gameflow to QC070 so AllowHenchman(true) runs) and save, so no playthrough is needed. Also replace tools\check_template.py's gossip markers (they are deactivated later in the story; a mid-game save shows 0 too) with a reliable "past QC060" check.
 - [ ] T036 [JOSH] Gate 2 for v14: Josh approves install into `D:\Fable2-LAN\mod` and friend zip `Fable2-LAN-friend-v14.zip`
 - [ ] T037 Install v14 (no game running), build friend zip, post release message
 - [ ] T038 [JOSH] Josh and Calvin create a campaign and play two sessions on two PCs; findings become new tasks here
