@@ -43,6 +43,8 @@
 // rexglue-sdk: narrow the game's save list to one slot ("" = all saves).
 extern "C" void rex_content_set_save_filter(const char* file_name);
 
+REXCVAR_DEFINE_STRING(coop_rig_save_filter, "", "Network",
+                      "Testing: list only this save slot (HeroNNN), so Continue loads it");
 REXCVAR_DEFINE_INT32(coop_partner_join_delay_ms, 0, "Network",
                      "Testing: the partner waits this long after coop_go before its first join "
                      "attempt (rig T028: lets a third player try the open slot first)");
@@ -929,6 +931,13 @@ inline bool OnPress(PPCContext& ctx, uint8_t* /*base*/) {
 inline void (*g_prev_frame_hook)() = nullptr;
 inline void OnFrame() {
   if (g_prev_frame_hook) g_prev_frame_hook();
+  // Rig only: narrow the save list to one slot so Continue loads it with no
+  // picker (launch 21: test a starter slot without a campaign lobby).
+  static std::string s_rig_filter;
+  if (const std::string f = REXCVAR_GET(coop_rig_save_filter); f != s_rig_filter) {
+    s_rig_filter = f;
+    rex_content_set_save_filter(f.c_str());
+  }
   if (!REXCVAR_GET(coop_campaign)) return;
   static const bool backup_shown = (fable2::coopbackup::LoadLast(), true);  // F6, once
   (void)backup_shown;
