@@ -140,6 +140,12 @@ struct SessionState {
   bool quit_sent = false;  // host after a partner loss: QuitToFrontEnd requested
   // Partner: the host to join, the last join attempt, and since when joined.
   uint32_t host_ip = 0;
+  uint64_t host_xuid = 0;  // the host is heard once per shared network: match by XUID
+  std::string host_name;
+  // Host: the partner's XUID, and the last coop_go the partner acknowledged.
+  uint64_t partner_xuid = 0;
+  uint32_t acked_seq = 0;
+  int64_t go_ms = 0;
   int64_t last_try_ms = 0, joined_since_ms = 0;
   int tries = 0;
   // Join screens: A presses made, and when the last one was.
@@ -169,6 +175,9 @@ inline std::atomic<bool> g_gender_ok{false};
 // campaign A is pressed for both, every kAcceptEveryMs, at most kAcceptPresses times.
 constexpr int64_t kAcceptFirstMs = 2000, kAcceptEveryMs = 2000;
 constexpr int kAcceptPresses = 7;
+// The go handshake: the host publishes coop_go again until the partner
+// acknowledges it; either side gives up (with a message) after kPartnerJoinMs.
+constexpr int64_t kGoRetryMs = 15000, kPartnerJoinMs = 120000;
 
 // The join cover (Josh, 2026-10-24: neither player may see the game's own co-op
 // join screens, not for one frame). A full-screen card in the menu style (lobby
@@ -189,6 +198,15 @@ inline void ShowCover(const std::string& text) {
   // clear it (launch 26: the partner's cover was wiped by the lobby's "").
   rex_ui_set_lobby_cover((text + "\nThe co-op campaign is starting").c_str());
   REXSYS_INFO("[coop] join cover up: {}", text);
+}
+// A message on the same card (title, then a second line), taken down after for_ms.
+inline void ShowCoverMessage(const std::string& title, const std::string& line, int64_t for_ms) {
+  const int64_t now = fable2::f5lua::steady_ms();
+  g_cover_epoch.store(fable2::coophero::g_spawn_epoch.load());
+  g_cover_since_ms.store(now);
+  g_cover_hide_at_ms.store(now + for_ms);
+  rex_ui_set_lobby_cover((title + "\n" + line).c_str());
+  REXSYS_INFO("[coop] message: {} / {}", title, line);
 }
 inline void HideCover(const char* why) {
   if (!g_cover_since_ms.exchange(0)) return;
@@ -308,7 +326,9 @@ inline void on_host_start() {
         m.name = rec.host + " and " + rec.partner;
         m.created = utc_now();
         m.host_name = rec.host;
+        m.host_xuid = rec.hxuid;
         m.partner_name = rec.partner;
+        m.partner_xuid = rec.pxuid;  // the partner is matched by this on Continue
         m.p2_gender = std::string(1, fable2::cooplobby::GenderChar(rec.gender2));
         m.mod_version = "001";
         if (!fable2::coopcampaign::WriteFileAtomic(slot->path, "coop_campaign.toml",
@@ -339,10 +359,13 @@ inline void on_host_start() {
     S().cid = cid;
     S().partner_name = lb.host.rec.partner;
     S().partner_ip = lb.host.partner_ip;
-    uint64_t pxuid = 0;
+    uint64_t pxuid = lb.host.partner_xuid;
     for (const auto& p : lobby::GetLanPeers())
-      if (p.ip == lb.host.partner_ip) pxuid = p.xuid;
+      if (!pxuid && p.ip == lb.host.partner_ip) pxuid = p.xuid;
     g_partner_xuid.store(pxuid);
+    S().partner_xuid = pxuid;
+    S().acked_seq = 0;
+    S().go_ms = 0;
     S().since_ms = fable2::f5lua::steady_ms();
     S().partner_spawned = false;
     S().host_female = lb.host.rec.gender1 == fable2::cooplobby::Gender::kFemale;
@@ -393,21 +416,56 @@ inline void on_host_start() {
 // 15 s if the host refuses (launch 7: the host was still in QC060's opening
 // and answered the join with a refusal).
 inline void on_partner_go(uint32_t ip) {
+  uint64_t host_xuid = 0;
+  std::string host_name;
+  {
+    auto& lb = fable2::cooplobby::L();
+    std::lock_guard<std::mutex> l(lb.m);
+    host_xuid = lb.partner.host_xuid;
+    host_name = lb.partner.seat.host;
+  }
   {
     std::lock_guard<std::mutex> l(S().m);
     S().s = Session::kPartnerJoining;
     S().since_ms = fable2::f5lua::steady_ms();
     S().host_ip = ip;
+    S().host_xuid = host_xuid;
+    S().host_name = host_name;
     S().last_try_ms = S().joined_since_ms = 0;
     S().tries = 0;
   }
   fable2::cooplobby::Close();
-  ShowCover("Joining your partner's campaign");
-  REXSYS_INFO("[coop] partner: go from host {:08X}, joining when its game is joinable", ip);
+  ShowCover("Joining " + host_name + "'s campaign");
+  REXSYS_INFO("[coop] partner: go from host {:08X} ({}), joining when its game is joinable", ip,
+              fable2::cooplobby::XuidStr(host_xuid));
+}
+
+// The host's peer entries: one per network it shares with us. Returns the
+// freshest (seconds since seen; -1 if none), its address, and whether its
+// game is joinable on any of them.
+struct PeerView {
+  int quiet = -1;
+  uint32_t ip = 0;
+  bool joinable = false;
+};
+inline PeerView peer_view(uint64_t xuid, uint32_t ip) {
+  PeerView v;
+  for (const auto& p : lobby::GetLanPeers()) {
+    if (xuid && p.xuid ? p.xuid != xuid : p.ip != ip) continue;
+    if (v.quiet < 0 || p.seconds_since_seen < v.quiet) {
+      v.quiet = p.seconds_since_seen;
+      v.ip = p.ip;
+    }
+    if (p.in_world && p.joinable) {
+      v.joinable = true;
+      v.ip = p.ip;
+    }
+  }
+  return v;
 }
 
 inline void open_host_lobby(fable2::cooplobby::Kind kind, const std::string& cid,
-                            const std::string& partner) {
+                            const std::string& partner, const std::string& partner_xuid = "") {
   fable2::cooplobby::Callbacks cb;
   cb.host_start = on_host_start;
   cb.partner_go = on_partner_go;
@@ -423,10 +481,44 @@ inline void open_host_lobby(fable2::cooplobby::Kind kind, const std::string& cid
       open_chooser();
     };
   }
-  fable2::cooplobby::OpenHost(kind, cid, partner, cb);
+  fable2::cooplobby::OpenHost(kind, cid, partner, cb, partner_xuid);
 }
 
+// The partner's list of co-op games (first rows), with "Host a new co-op
+// campaign" below them. auto_join: the partner's Continue, which joins the
+// campaign waiting for this player as soon as it is heard.
+inline void open_partner_list(bool auto_join) {
+  fable2::cooplobby::Callbacks cb;
+  cb.partner_go = on_partner_go;
+  cb.host_new = [] {
+    REXSYS_INFO("[coop] co-op list: hosting a new campaign");
+    open_host_lobby(fable2::cooplobby::Kind::kNew, "", "");
+  };
+  if (auto_join) {
+    cb.back = [] {
+      REXSYS_INFO("[coop] campaign list closed, back to the menu");
+      swallow_closing_a();
+    };
+  } else {
+    cb.back = [] {
+      REXSYS_INFO("[coop] co-op list closed, back to the chooser");
+      swallow_closing_a();
+      open_chooser();
+    };
+  }
+  fable2::cooplobby::OpenPartner(cb, auto_join);
+}
+
+// New Game -> Co-op: a player who can see a co-op game on the network gets the
+// list of games to join first (2026-10-24: the partner's Co-op made him a
+// second host). With none heard, this player hosts.
 inline void on_coop() {
+  const auto games = fable2::cooplobby::JoinableNow();
+  if (!games.empty()) {
+    REXSYS_INFO("[coop] new game: Co-op, {} co-op game(s) heard, showing the list", games.size());
+    open_partner_list(false);
+    return;
+  }
   REXSYS_INFO("[coop] new game: Co-op, opening the host lobby");
   open_host_lobby(fable2::cooplobby::Kind::kNew, "", "");
 }
@@ -754,6 +846,7 @@ end
           s.accept_presses = 0;
           const std::string go = fable2::cooplobby::Format(fable2::cooplobby::GoRecord{s.cid, ++s.go_seq});
           lobby::PublishData("coop_go", go);
+          s.go_ms = now;
           REXSYS_INFO("[coop] host world up (starter save {}): published {}", s.slot_name, go);
           if (!s.slot_path.empty()) p2_watch_start(s.slot_path, s.cid, s.partner_ip);
           rex_content_set_save_filter("");
@@ -810,6 +903,7 @@ end
         s.accept_presses = 0;
         const std::string go = fable2::cooplobby::Format(fable2::cooplobby::GoRecord{s.cid, ++s.go_seq});
         lobby::PublishData("coop_go", go);
+        s.go_ms = now;
         REXSYS_INFO("[coop] host world up: published {}", go);
         fable2::coophero::g_capture_paused.store(false);
       }
@@ -825,13 +919,42 @@ end
       if (!s.partner_spawned) {
         const int64_t approved = g_join_approved_ms.load();
         if (approved > s.since_ms) accept_tick(s, approved, now, "host");
+        // The partner acknowledges the go (coop_ack). Without that, the go is
+        // published again with a new seq every kGoRetryMs; a partner that is
+        // gone, or no join in kPartnerJoinMs, sends the host back to the
+        // campaign's lobby to wait (the partner-lost path, which saves first).
+        for (const auto& d : lobby::GetPeerData("coop_ack")) {
+          if (s.partner_xuid ? d.xuid != s.partner_xuid : d.ip != s.partner_ip) continue;
+          const auto ack = fable2::cooplobby::ParseAck(d.value);
+          if (ack && ack->seq > s.acked_seq && ack->seq <= s.go_seq) {
+            s.acked_seq = ack->seq;
+            REXSYS_INFO("[coop] host: {} acknowledged the go (seq {})", s.partner_name, ack->seq);
+          }
+        }
+        const PeerView pv = peer_view(s.partner_xuid, s.partner_ip);
+        if (s.acked_seq < s.go_seq && s.go_ms && now - s.go_ms > kGoRetryMs && approved <= s.since_ms) {
+          const std::string go = fable2::cooplobby::Format(fable2::cooplobby::GoRecord{s.cid, ++s.go_seq});
+          lobby::PublishData("coop_go", go);
+          s.go_ms = now;
+          REXSYS_INFO("[coop] host: no answer to the go yet, published again: {}", go);
+        }
+        const bool gone = pv.quiet < 0 || pv.quiet > 20;
+        if ((gone || now - s.since_ms > kPartnerJoinMs) && approved <= s.since_ms) {
+          REXSYS_INFO("[coop] host: {} did not join ({}), back to the campaign lobby", s.partner_name,
+                      gone ? "partner gone" : "timed out");
+          ShowCoverMessage(s.partner_name + " could not join",
+                           "Saving, then back to the campaign lobby to wait for " + s.partner_name, 10000);
+          s.s = Session::kHostPartnerLost;
+          s.since_ms = now;
+          s.quit_sent = false;
+          fable2::luaconsole::RunChunk(
+              "print('[coop] AutoSaveGame: ' .. tostring(pcall(AutoSaveGame, true, true)))");
+        }
         break;
       }
       p2_watch_tick(now, true);
       purse_tick(now);
-      int quiet = -1;
-      for (const auto& p : lobby::GetLanPeers())
-        if (p.ip == s.partner_ip) quiet = p.seconds_since_seen;
+      const int quiet = peer_view(s.partner_xuid, s.partner_ip).quiet;
       if (quiet < 0 || quiet > 6) {
         // Partner lost (proof P6): save with the game's own autosave call
         // (QC060 uses AutoSaveGame(true, true)), then, once it has had time
@@ -858,8 +981,8 @@ end
         fable2::coophero::SetCampaignPlayer2("");
         p2_watch_stop();
         s.s = Session::kNone;
-        after = [cid = s.cid, partner = s.partner_name] {
-          open_host_lobby(fable2::cooplobby::Kind::kContinue, cid, partner);
+        after = [cid = s.cid, partner = s.partner_name, px = fable2::cooplobby::XuidStr(s.partner_xuid)] {
+          open_host_lobby(fable2::cooplobby::Kind::kContinue, cid, partner, px);
         };
       }
       break;
@@ -880,19 +1003,23 @@ end
         break;
       }
       s.joined_since_ms = 0;
-      if (now - s.since_ms > 300000) {
-        REXSYS_INFO("[coop] partner: no join in 5 min ({} attempt(s)), giving up", s.tries);
+      const PeerView hv = peer_view(s.host_xuid, s.host_ip);
+      const bool host_gone = hv.quiet < 0 || hv.quiet > 20;
+      if (host_gone || now - s.since_ms > kPartnerJoinMs) {
+        REXSYS_INFO("[coop] partner: no join ({}, {} attempt(s)), giving up", host_gone ? "host gone" : "timed out",
+                    s.tries);
         s.s = Session::kNone;
-        HideCover("no join");
+        ShowCoverMessage("Could not join " + s.host_name + "'s game",
+                         host_gone ? "The host left. Back to the main menu."
+                                   : "No answer from the host. Back to the main menu: try New Game -> Co-op again.",
+                         10000);
         break;
       }
       if (now - s.since_ms < REXCVAR_GET(coop_partner_join_delay_ms)) break;  // rig only
-      bool joinable = false;
-      for (const auto& p : lobby::GetLanPeers())
-        if (p.ip == s.host_ip) joinable = p.in_world && p.joinable;
-      if (joinable && now - s.last_try_ms > 15000) {
+      if (hv.joinable && now - s.last_try_ms > 15000) {
         s.last_try_ms = now;
         ++s.tries;
+        s.host_ip = hv.ip;
         const bool ok = lobby::JoinLanPeer(s.host_ip);
         REXSYS_INFO("[coop] partner: join attempt {} to {:08X}: {}", s.tries, s.host_ip,
                     ok ? "started" : "no joinable game");
@@ -1011,7 +1138,17 @@ inline bool OnPress(PPCContext& ctx, uint8_t* base) {
       if (m) {
         REXSYS_INFO("[coop] continue: {} is campaign {} with {}, opening its lobby", newest->name,
                     m->campaign_id, m->partner_name);
-        open_host_lobby(fable2::cooplobby::Kind::kContinue, m->campaign_id, m->partner_name);
+        open_host_lobby(fable2::cooplobby::Kind::kContinue, m->campaign_id, m->partner_name, m->partner_xuid);
+        return true;
+      }
+      // The partner's Continue: a campaign host waiting for this player on the
+      // network is joined instead of loading a solo save.
+      for (const auto& g : fable2::cooplobby::JoinableNow()) {
+        if (g.rec.kind != fable2::cooplobby::Kind::kContinue) continue;
+        g_continue_swallowed = true;
+        REXSYS_INFO("[coop] continue: {}'s campaign {} is waiting for this player, joining it", g.rec.host,
+                    g.rec.cid);
+        open_partner_list(true);
         return true;
       }
     }

@@ -313,10 +313,206 @@ def run_solo():
         a.stop()
 
 
+def setup_tomls():
+    """Josh's fable_2.toml for the host; Calvin's case for the partner: no
+    gamertag line and no coop_campaign (the friend's play-coop.cmd turns it on).
+    Two networks each: loopback plus the relay's second address."""
+    src = open(os.path.join(ROOT, "mod", "fable_2.toml"), encoding="utf-8").read().splitlines()
+
+    def make(folder, me, peers, tag, drop):
+        over = {"network_interface": f"'{me}'", "lan_peers": f"'{peers}'", "network_isolate": "true",
+                "fullscreen": "false", "window_width": "1270", "window_height": "714", "resolution_scale": "1"}
+        if tag:
+            over["profile_gamertag"] = f"'{tag}'"
+        out, seen = [], set()
+        for line in src:
+            m = re.match(r"\s*([A-Za-z0-9_]+)\s*=", line)
+            k = m.group(1) if m else None
+            if k in drop:
+                continue
+            if k in over:
+                out.append(f"{k} = {over[k]}")
+                seen.add(k)
+            else:
+                out.append(line)
+        out += [f"{k} = {v}" for k, v in over.items() if k not in seen]
+        with open(os.path.join(ROOT, folder, "fable_2.toml"), "w", encoding="utf-8", newline="\n") as f:
+            f.write("\n".join(out) + "\n")
+
+    make("mod-a", "127.0.0.1", "127.0.0.2,127.0.0.5", "TestA", set())
+    make("mod-b", "127.0.0.2", "127.0.0.1,127.0.0.4", None, {"profile_gamertag", "coop_campaign"})
+    note("INFO", "tomls: host = Josh's (+ loopback, 2 networks); partner = no gamertag, no coop_campaign")
+
+
+def join_phase(a, b, tag):
+    """After the host's Start: world up, go acknowledged, cover, player 2 spawns."""
+    ok = a.wait(f"{tag}: host world up", r"host world up", a.n_world, 300)
+    ok &= b.wait(f"{tag}: partner got the go", r"coop_go received", b.n_go, 90)
+    ok &= a.wait(f"{tag}: host saw the partner's acknowledgement", r"acknowledged the go", a.n_ack, 60)
+    ok &= a.wait(f"{tag}: join approved", r"\[joingate\] join approved", a.n_appr, 120)
+    k, stock, t = 0, 0, time.time()
+    while a.count(r"henchman spawned") <= a.n_spawn and time.time() - t < 90:
+        for g in (a, b):
+            p = g.shot(f"{tag}_join_{k:02d}_{g.who}.png")
+            stock += cover_metrics(p)[0] > 0.05
+        k += 1
+        time.sleep(1.0)
+    note("PASS" if stock == 0 else "FAIL", f"{tag}: stock-screen frames {stock} of {2 * k}")
+    ok &= a.wait(f"{tag}: player 2 spawned", r"henchman spawned", a.n_spawn, 60)
+    time.sleep(4)
+    a.shot(f"{tag}_host_world.png")
+    b.shot(f"{tag}_partner_world.png")
+    note("PASS" if ok and stock == 0 else "FAIL", f"=== {tag}: partner joined the host's campaign")
+    return ok
+
+
+def mark(a, b):
+    a.n_world, a.n_ack = a.count(r"host world up"), a.count(r"acknowledged the go")
+    a.n_appr, a.n_spawn = a.count(r"\[joingate\] join approved"), a.count(r"henchman spawned")
+    b.n_go = b.count(r"coop_go received")
+
+
+def both_ready_and_start(a, b, tag):
+    b.press("X")
+    time.sleep(2)
+    a.select("Ready")
+    if a.rows() and not any(r[0] == "Ready: Yes" for r in a.rows()):
+        a.press("X")
+    time.sleep(3)
+    a.shot(f"{tag}_host_both_ready.png")
+    mark(a, b)
+    a.select("Start")
+    n = a.count(r"host start:")
+    a.press("E")
+    return a.wait(f"{tag}: Start starts the campaign", r"host start:", n, 10)
+
+
+def partner_leaves(a, b, tag):
+    b.stop()
+    a.wait(f"{tag}: host saves and waits in the campaign lobby", r"back at the front end, waiting", a.count(
+        r"back at the front end, waiting"), 240)
+    time.sleep(5)
+    a.shot(f"{tag}_host_waiting_lobby.png")
+
+
+def run_multi():
+    setup_tomls()
+    relay_log = open(os.path.join(OUT, "relay.log"), "w")
+    relay = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                           "coop_relay.py")], stdout=relay_log, stderr=relay_log)
+    a, b = Game("mod-a", "host"), Game("mod-b", "partner")
+    a.start()
+    b.start()
+    try:
+        a.past_title()
+        b.past_title()
+        # --- attempt 1: New Game -> Co-op on both -----------------------------
+        n = a.count(r"\[lobby\] open host")
+        a.press("E")
+        a.wait("a1: New Game opens Solo / Co-op", r"\[lobby\] open chooser", 0, 10)
+        time.sleep(1.5)
+        a.select("Co-op")
+        a.press("E")
+        a.wait("a1: host's Co-op opens its lobby (no game heard)", r"\[lobby\] open host", n, 10)
+        time.sleep(6)
+        a.shot("a1_host_lobby.png")
+        a.select("Start")
+        n = a.count(r"host start:")
+        a.press("E")
+        time.sleep(2)
+        note("PASS" if a.count(r"host start:") == n else "FAIL", "a1: Start refused with no partner")
+        b.press("E")
+        b.wait("a1: partner New Game opens Solo / Co-op", r"\[lobby\] open chooser", 0, 10)
+        time.sleep(1.5)
+        b.select("Co-op")
+        n = b.count(r"showing the list")
+        b.press("E")
+        b.wait("a1: partner's Co-op shows the games to join (not a host lobby)", r"showing the list", n, 10)
+        time.sleep(4)
+        joins = [r for r in b.rows() if r[0].startswith("Join TestA")]
+        note("PASS" if len(joins) == 1 else "FAIL", f"a1: TestA listed once on two networks ({len(joins)} row(s))")
+        b.shot("a1_partner_list.png")
+        n = b.count(r"joining TestA's lobby as partner")
+        b.select("Join TestA")
+        b.press("E")
+        b.wait("a1: partner joins TestA's lobby", r"joining TestA's lobby as partner", n, 10)
+        time.sleep(4)
+        a.select("Ready")
+        a.press("X")
+        time.sleep(2)
+        a.select("Start")
+        n = a.count(r"host start:")
+        a.press("E")
+        time.sleep(2)
+        note("PASS" if a.count(r"host start:") == n else "FAIL", "a1: Start refused while the partner is not ready")
+        a.shot("a1_host_partner_not_ready.png")
+        b.shot("a1_partner_in_lobby.png")
+        if both_ready_and_start(a, b, "a1"):
+            join_phase(a, b, "a1")
+        # --- attempt 2: the partner leaves; restarts; Continue ------------------
+        partner_leaves(a, b, "a2")
+        b = Game("mod-b", "partner")
+        b.start()
+        b.past_title()
+        b.press("Down")
+        time.sleep(1.2)
+        n = b.count(r"is waiting for this player")
+        b.press("E")
+        b.wait("a2: partner's Continue finds the campaign waiting for him", r"is waiting for this player", n, 10)
+        b.wait("a2: partner joins it", r"continue: joining TestA's campaign", 0, 15)
+        time.sleep(3)
+        b.shot("a2_partner_continue_joined.png")
+        if both_ready_and_start(a, b, "a2"):
+            join_phase(a, b, "a2")
+        # --- attempt 3: the partner leaves; restarts; New Game -> Co-op -> Continue row
+        partner_leaves(a, b, "a3")
+        b = Game("mod-b", "partner")
+        b.start()
+        b.past_title()
+        b.press("E")
+        b.wait("a3: partner New Game opens Solo / Co-op", r"\[lobby\] open chooser", 0, 10)
+        time.sleep(1.5)
+        b.select("Co-op")
+        n = b.count(r"showing the list")
+        b.press("E")
+        b.wait("a3: partner's Co-op shows the games", r"showing the list", n, 10)
+        time.sleep(4)
+        rows = [r for r in b.rows() if r[0].startswith("Continue TestA")]
+        note("PASS" if len(rows) == 1 else "FAIL", f"a3: TestA's campaign listed once ({len(rows)} row(s))")
+        b.shot("a3_partner_list.png")
+        n = b.count(r"joining TestA's lobby as partner")
+        b.select("Continue TestA")
+        b.press("E")
+        b.wait("a3: partner joins the campaign lobby", r"joining TestA's lobby as partner", n, 10)
+        time.sleep(3)
+        if both_ready_and_start(a, b, "a3"):
+            join_phase(a, b, "a3")
+        # --- error path: the host leaves while the partner waits ----------------
+        partner_leaves(a, b, "err")
+        b = Game("mod-b", "partner")
+        b.start()
+        b.past_title()
+        b.press("Down")
+        time.sleep(1.2)
+        b.press("E")
+        b.wait("err: partner joined the waiting campaign", r"continue: joining TestA's campaign", 0, 15)
+        time.sleep(3)
+        n = b.count(r"partner: the host left the lobby")
+        a.select("Back")
+        a.press("E")
+        b.wait("err: partner is told the host left", r"partner: the host left the lobby", n, 30)
+        time.sleep(1)
+        b.shot("err_partner_host_left.png")
+    finally:
+        for g in (a, b):
+            g.stop()
+        relay.kill()
+
+
 def main():
     os.makedirs(OUT, exist_ok=True)
     mode = sys.argv[1] if len(sys.argv) > 1 else "coop"
-    run_coop() if mode == "coop" else run_solo()
+    {"coop": run_coop, "solo": run_solo, "multi": run_multi}[mode]()
     with open(os.path.join(OUT, f"results_{mode}.txt"), "w", encoding="utf-8") as f:
         f.write("\n".join(results) + "\n")
     return 0 if not any(r.startswith("FAIL") for r in results) else 1

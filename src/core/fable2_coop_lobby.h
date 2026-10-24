@@ -53,6 +53,7 @@ struct Callbacks {
   std::function<void()> host_start;          // host pressed Start: run the original New Game / load
   std::function<void(uint32_t)> partner_go;  // coop_go arrived: join the host at this ip
   std::function<void()> back;                // lobby closed with Back / Leave
+  std::function<void()> host_new;            // partner's list: "Host a new co-op campaign"
 };
 
 struct Lobby {
@@ -74,19 +75,31 @@ inline Lobby& L() {
 }
 inline std::atomic<bool> g_open{false};
 
-inline std::string MyName() { return rex::cvar::GetFlagByName("profile_gamertag"); }
+// Display only (players are matched by XUID): the gamertag, or the PC's name
+// when it is blank (Calvin's was, 2026-10-24).
+inline std::string MyName() {
+  std::string n = rex::cvar::GetFlagByName("profile_gamertag");
+  if (n.empty())
+    if (const char* pc = std::getenv("COMPUTERNAME")) n = pc;
+  return n.empty() ? "Player" : n;
+}
+inline uint64_t MyXuid() { return lobby::GetLobbyStatus().online_xuid; }
 
 // --- open / close ------------------------------------------------------------
 
-inline void OpenHost(Kind kind, const std::string& cid, const std::string& partner, Callbacks cb) {
+inline void OpenHost(Kind kind, const std::string& cid, const std::string& partner, Callbacks cb,
+                     const std::string& partner_xuid = "") {
   std::lock_guard<std::mutex> l(L().m);
   auto& lb = L();
+  lobby::PublishData("coop_ack", "");
   lb.role = Role::kHost;
   lb.host = HostLobby{};
   lb.host.rec.kind = kind;
   lb.host.rec.cid = cid;
   lb.host.rec.partner = partner;
+  lb.host.rec.pxuid = kind == Kind::kContinue ? partner_xuid : "";
   lb.host.rec.host = MyName();
+  lb.host.rec.hxuid = XuidStr(MyXuid());
   lb.cursor = 0;
   lb.go.reset();
   lb.notice = kind == Kind::kNew ? "Waiting for a partner" : "Waiting for " + partner;
@@ -96,14 +109,21 @@ inline void OpenHost(Kind kind, const std::string& cid, const std::string& partn
               cid, partner);
 }
 
-inline void OpenPartner(Callbacks cb) {
+// The partner's list of lobbies. auto_join: join a campaign that is waiting
+// for this player as soon as it is heard (the partner's Continue).
+inline bool g_auto_join = false;
+inline void OpenPartner(Callbacks cb, bool auto_join = false) {
   std::lock_guard<std::mutex> l(L().m);
   auto& lb = L();
+  lobby::PublishData("coop_lobby", "");
+  lobby::PublishData("coop_ack", "");
   lb.role = Role::kPartner;
   lb.partner = PartnerLobby{};
   lb.partner.my_name = MyName();
+  lb.partner.my_xuid = MyXuid();
+  g_auto_join = auto_join;
   lb.cursor = 0;
-  lb.notice = "Looking for co-op games";
+  lb.notice = auto_join ? "Looking for your co-op campaign" : "Co-op games on your network";
   lb.cb = std::move(cb);
   g_open.store(true);
   REXSYS_INFO("[lobby] open partner as {}", lb.partner.my_name);
@@ -159,8 +179,16 @@ inline void HostWorldReady(const std::string& cid) {
 inline std::vector<Heard> heard(const char* key) {
   std::vector<Heard> out;
   for (const auto& d : lobby::GetPeerData(key))
-    if (!d.value.empty()) out.push_back({d.ip, d.gamertag, d.value, d.seconds_since_received});
+    if (!d.value.empty()) out.push_back({d.ip, d.gamertag, d.value, d.seconds_since_received, d.xuid});
   return out;
+}
+
+// Lobbies this player could join right now (New Game -> Co-op shows them first).
+inline std::vector<PartnerLobby::Listing> JoinableNow() {
+  PartnerLobby me;
+  me.my_name = MyName();
+  me.my_xuid = MyXuid();
+  return me.JoinableOthers(heard("coop_lobby"));
 }
 
 inline int64_t g_next_tick_ms = 0;
@@ -171,10 +199,12 @@ inline int64_t g_next_tick_ms = 0;
 inline std::function<void()> tick_locked() {
   auto& lb = L();
   if (lb.role == Role::kHost) {
+    if (lb.host.rec.hxuid.empty()) lb.host.rec.hxuid = XuidStr(MyXuid());
     lb.host.OnSeats(heard("coop_seat"));
     if (!lb.host.partner_ip) {
       PartnerLobby me;
       me.my_name = lb.host.rec.host;
+      me.my_xuid = MyXuid();
       lb.others = me.JoinableOthers(heard("coop_lobby"));
     } else {
       lb.others.clear();
@@ -184,29 +214,43 @@ inline std::function<void()> tick_locked() {
     if (lb.host.partner_ip && !lb.host.partner_proto_ok)
       lb.notice = lb.host.rec.partner + " needs the co-op campaign update (v14)";
     else if (lb.host.partner_ip)
-      lb.notice = lb.host.rec.partner + " joined";
+      lb.notice = lb.host.rec.partner + (lb.host.partner_ready ? " is ready" : " joined");
+    else if (!lb.host.left.empty()) {
+      lb.notice = lb.host.left + " left the lobby. Waiting for a partner";
+      REXSYS_INFO("[lobby] {} left the lobby", lb.host.left);
+      lb.host.left.clear();
+    }
     lobby::PublishData("coop_lobby", Format(lb.host.rec));
   } else if (lb.role == Role::kPartner) {
     if (lb.partner.state == PartnerState::kBrowsing) {
       lb.listing = lb.partner.List(heard("coop_lobby"));
       lobby::PublishData("coop_seat", "");
+      if (g_auto_join) {
+        for (const auto& g : lb.listing)
+          if (g.joinable && g.rec.kind == Kind::kContinue) {
+            lb.partner.Join(g);
+            lb.cursor = 0;
+            lb.notice = "Joined " + g.rec.host + "'s campaign";
+            REXSYS_INFO("[lobby] continue: joining {}'s campaign {}", g.rec.host, g.rec.cid);
+            break;
+          }
+      }
       return {};
     }
-    std::optional<Heard> rec, go;
-    for (auto& h : heard("coop_lobby"))
-      if (h.ip == lb.partner.host_ip) rec = h;
-    for (auto& h : heard("coop_go"))
-      if (h.ip == lb.partner.host_ip) go = h;
+    const auto rec = lb.partner.FromHost(heard("coop_lobby"));
+    const auto go = lb.partner.FromHost(heard("coop_go"));
     const bool start_join = lb.partner.OnHost(rec, go);
     if (lb.partner.state == PartnerState::kBrowsing) {
       lb.notice = "The host left the lobby";
+      REXSYS_INFO("[lobby] partner: the host left the lobby");
       lb.cursor = 0;
       return {};
     }
     lobby::PublishData("coop_seat", Format(lb.partner.seat));
     if (start_join) {
       const uint32_t ip = lb.partner.host_ip;
-      REXSYS_INFO("[lobby] coop_go received, joining {}", ip);
+      lobby::PublishData("coop_ack", Format(AckRecord{lb.partner.seat.hxuid, lb.partner.last_go_seq}));
+      REXSYS_INFO("[lobby] coop_go received (seq {}), joining {:08X}", lb.partner.last_go_seq, ip);
       lb.notice = "Joining " + lb.partner.seat.host;
       if (lb.cb.partner_go) return [cb = lb.cb.partner_go, ip] { cb(ip); };
     }
@@ -229,7 +273,7 @@ inline void Tick() {
 
 // --- menu rows -------------------------------------------------------------------
 
-enum class Row { kChildhood, kReady, kStart, kBack, kGame, kGender, kLeave, kSolo, kCoop, kJoinOther, kHostGender };
+enum class Row { kChildhood, kReady, kStart, kBack, kGame, kGender, kLeave, kSolo, kCoop, kJoinOther, kHostGender, kHostNew };
 
 struct RowItem {
   Row row;
@@ -262,11 +306,12 @@ inline std::vector<RowItem> rows_locked() {
     if (lb.partner.state == PartnerState::kBrowsing) {
       for (size_t i = 0; i < lb.listing.size(); ++i) {
         const auto& g = lb.listing[i];
-        std::string label = g.rec.host + (g.rec.kind == Kind::kNew ? " - new co-op campaign"
-                                                                    : " - your campaign");
+        std::string label = g.rec.kind == Kind::kNew ? "Join " + g.rec.host + "'s co-op campaign"
+                                                     : "Continue " + g.rec.host + "'s campaign with you";
         if (!g.joinable) label += " (not for you)";
         r.push_back({Row::kGame, label, g.joinable, i});
       }
+      if (!g_auto_join) r.push_back({Row::kHostNew, "Host a new co-op campaign"});
       r.push_back({Row::kBack, "Back"});
     } else {
       const auto& s = lb.partner.seat;
@@ -328,6 +373,7 @@ inline std::function<void()> act_locked(int dy, int dx, bool a, bool b, bool x) 
         lb.role = Role::kPartner;
         lb.partner = PartnerLobby{};
         lb.partner.my_name = lb.host.rec.host;
+        lb.partner.my_xuid = MyXuid();
         lb.partner.Join(target);
         lb.cursor = 0;
         lb.notice = "Joined " + target.rec.host + "'s lobby";
@@ -361,6 +407,13 @@ inline std::function<void()> act_locked(int dy, int dx, bool a, bool b, bool x) 
         lb.partner.Join(lb.listing[it.index]);
         lb.cursor = 0;
         lb.notice = "Joined " + lb.partner.seat.host + "'s lobby";
+        REXSYS_INFO("[lobby] joining {}'s lobby as partner", lb.partner.seat.host);
+      }
+      break;
+    case Row::kHostNew:
+      if (a) {
+        close_locked(false);
+        return lb.cb.host_new;
       }
       break;
     case Row::kLeave:
@@ -466,6 +519,8 @@ inline std::string view_locked() {
     v += "SPlayers\n";
     v += "L" + rec.host + " (host)  " + ready(rec.hready) + "\n";
     v += "L" + lb.partner.my_name + " (you)  " + ready(lb.partner.seat.ready) + "\n";
+  } else if (lb.role == Role::kPartner && lb.listing.empty()) {
+    v += "D(no co-op games found yet: the host picks New Game -> Co-op first)\n";
   }
   const bool browsing = lb.role == Role::kPartner && lb.partner.state == PartnerState::kBrowsing;
   if (lb.role != Role::kChoose) v += browsing ? "SGames\n" : "SOptions\n";

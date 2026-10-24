@@ -105,6 +105,54 @@ int main() {
        {4, "Dan", "COOPLOBBY:v1|kind=continue|cid=c|host=Dan|partner=Josh|gender2=M|childhood=skip|hready=0|state=Hosting", 1}});
   CHECK(others.size() == 2 && others[0].rec.host == "Calvin" && others[1].rec.host == "Dan");
 
+  // 2026-10-24, first two-PC session: Josh (host) and Calvin (blank gamertag,
+  // known on the network as "User"), both on the home LAN and ZeroTier, so every
+  // record arrives twice (from .1.x and .192.x). Matched by XUID now.
+  {
+    const uint64_t kJosh = 0x0009AAAA00000001ull, kCalvin = 0x0009BBBB00000002ull;
+    HostLobby h;
+    h.rec.host = "Wizit";
+    h.rec.hxuid = XuidStr(kJosh);
+    PartnerLobby c;
+    c.my_name = "CALVIN-PC";  // MyName(): the PC name when the gamertag is blank
+    c.my_xuid = kCalvin;
+    const std::string lob = Format(h.rec);
+    auto games = c.List({{0xC0A80102, "Wizit", lob, 1, kJosh}, {0xC0A8C088, "Wizit", lob, 0, kJosh}});
+    CHECK(games.size() == 1 && games[0].joinable && games[0].ip == 0xC0A8C088);  // one row, the fresher copy
+    c.Join(games[0]);
+    CHECK(c.seat.hxuid == XuidStr(kJosh) && c.seat.name == "CALVIN-PC");
+    c.SetReady(true);
+    const std::string seat = Format(c.seat);
+    h.OnSeats({{0xC0A80159, "User", seat, 1, kCalvin}, {0xC0A8C085, "User", seat, 2, kCalvin}});
+    CHECK(h.partner_xuid == kCalvin && h.rec.partner == "CALVIN-PC" && h.rec.pxuid == XuidStr(kCalvin));
+    h.OnSeats({{0xC0A80159, "User", seat, 3, kCalvin}, {0xC0A8C085, "User", seat, 0, kCalvin}});
+    CHECK(h.partner_xuid == kCalvin && h.partner_ip == 0xC0A8C085);  // same partner on the other network
+    h.rec.hready = true;
+    h.OnSeats({{0xC0A8C085, "User", seat, 0, kCalvin}});
+    h.partner_proto_ok = true;
+    CHECK(h.Start());
+    const std::string started = Format(h.rec);
+    CHECK(!c.OnHost(Heard{0xC0A80102, "Wizit", started, 1, kJosh}, std::nullopt));
+    CHECK(c.state == PartnerState::kWaitingForHostWorld);  // the partner sees itself seated
+    const GoRecord go = h.Go("cid-7");
+    CHECK(c.OnHost(Heard{0xC0A80102, "Wizit", Format(h.rec), 1, kJosh},
+                   Heard{0xC0A8C088, "Wizit", Format(go), 0, kJosh}));
+    CHECK(c.state == PartnerState::kJoining && c.last_go_seq == 1);
+    CHECK(ParseAck(Format(AckRecord{XuidStr(kJosh), 1}))->seq == 1);
+    // The host's own lobby is never offered to itself, even under another address.
+    PartnerLobby self;
+    self.my_name = "Wizit";
+    self.my_xuid = kJosh;
+    CHECK(self.JoinableOthers({{0x7F000001, "Wizit", lob, 0, kJosh}}).empty());
+    // A partner that leaves frees the seat and says who left.
+    HostLobby h4;
+    h4.rec.host = "Wizit";
+    h4.rec.hxuid = XuidStr(kJosh);
+    h4.OnSeats({{0xC0A8C085, "User", seat, 1, kCalvin}});
+    h4.OnSeats({});
+    CHECK(h4.partner_ip == 0 && h4.left == "CALVIN-PC" && h4.state == HostState::kHosting);
+  }
+
   std::printf("%s (%d failed)\n", g_fail ? "FAILED" : "ALL PASSED", g_fail);
   return g_fail ? 1 : 0;
 }
