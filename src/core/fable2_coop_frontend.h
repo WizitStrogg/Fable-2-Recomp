@@ -942,6 +942,10 @@ inline bool OnPress(PPCContext& ctx, uint8_t* /*base*/) {
     return false;
   }
   if (repeat) return false;
+  // The B that closed a panel reaches the menu right after it closes (launch 23:
+  // it reset the mirrored row to New Game while the menu's cursor stayed on
+  // Continue, so the next A on Continue opened the chooser): swallow it.
+  if ((mask & (kBack | kB)) && now < g_swallow_a_until) return true;
   if (mask & kDown) g_row = g_row < kLastRow ? g_row + 1 : kLastRow;
   if (mask & kUp) g_row = g_row > 0 ? g_row - 1 : 0;
   if (mask & (kBack | kB)) {
