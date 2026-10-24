@@ -108,7 +108,7 @@ def main() -> int:
     end = start + args.minutes * 60
     next_check = start
     next_shot = start
-    next_save = start + 30 * 60
+    next_save = start + 3 * 60  # an early save proves the backup path, then every 30 min
     step = 0
     failed = None
     mem = []
