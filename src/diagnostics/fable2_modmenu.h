@@ -49,6 +49,7 @@
 #endif
 
 #include "fable2_state_probe.h"  // CurrentState() / kMainMenu gating
+#include "../core/fable2_front_hooks.h"  // feature press hook
 
 namespace fable2::modmenu {
 
@@ -702,6 +703,8 @@ inline void scanner_thread() {
 extern "C" void __imp__FrontMenu_PressBitDispatch(PPCContext& ctx,
                                                   uint8_t* base);
 extern "C" void FrontMenu_PressBitDispatch(PPCContext& ctx, uint8_t* base) {
+  // A feature hook (co-op campaign front end) may swallow the press.
+  if (fable2::fronthooks::g_press_hook && fable2::fronthooks::g_press_hook(ctx, base)) return;
   fable2::modmenu::on_press(ctx, base);
   __imp__FrontMenu_PressBitDispatch(ctx, base);
 }

@@ -37,9 +37,6 @@
 // Re-enable to re-measure the frame pacing:
 // #include "fps_probe.h"
 #include "keyboard_gamepad.h"
-#ifdef FABLE2_REMOTE_CONTROL
-#include "remote_control_server.h"
-#include "remote_gamepad_driver.h"
 // 1-second game-state classifier (src/diagnostics/fable2_state_probe.h, single-TU inline).
 // Forward-declared here; the inline definitions live in the state probe header
 // (included once, in main.cpp), so the app can start/stop it alongside the
@@ -50,6 +47,9 @@ void stop();
 std::int64_t t_ms();
 void record_a_press(std::int64_t ms);
 }
+#ifdef FABLE2_REMOTE_CONTROL
+#include "remote_control_server.h"
+#include "remote_gamepad_driver.h"
 #endif  // FABLE2_REMOTE_CONTROL
 #include "xex_verify.h"
 #include "game_branding.h"
@@ -170,8 +170,8 @@ class Fable2App : public rex::ReXApp {
     // depth_bias_shader is a GPU-plugin cvar, so it is seeded here too.
     if (fable2::config::Get().dog_fur_depth_bias &&
         rex::cvar::GetFlagSource("depth_bias_shader") == rex::cvar::Source::kDefault) {
-      if (rex::cvar::SetFlagByName("depth_bias_shader", "014F8A02DB7B19CA") &&
-          rex::cvar::SetFlagByName("depth_bias_shader_units", "16")) {
+      if (rex::cvar::SetFlagByName("depth_bias_shader", "014F8A02DB7B19CA,03D91B35ACD56079") &&
+          rex::cvar::SetFlagByName("depth_bias_shader_units", "64")) {
         REXSYS_INFO("[fable2-config] seeded dog fur depth bias (dog_fur_depth_bias=true)");
       } else {
         REXSYS_WARN("[fable2-config] dog fur depth bias cvars missing "
@@ -370,21 +370,22 @@ class Fable2App : public rex::ReXApp {
       if ((s.buttons & 0x1000u) != 0)  // X_INPUT_GAMEPAD_A
         fable2::stateprobe::record_a_press(fable2::stateprobe::t_ms());
     });
-    // Start the 1-second game-state classifier (feeds the remote `state`
-    // command + the [state] in-game log). The state is always tracked in
-    // debug builds.
-    fable2::stateprobe::start();
 #endif  // FABLE2_REMOTE_CONTROL
+    // Start the 1-second game-state classifier (the [state] in-game log, the
+    // remote `state` command). Every build: the co-op front end
+    // (fable2_coop_frontend.h in_main_menu) needs it to know the main menu is
+    // open; v14 shipped without it and New Game went straight to solo.
+    fable2::stateprobe::start();
   }
 
-#ifdef FABLE2_REMOTE_CONTROL
   // Stop the state classifier thread, then the remote control server threads,
   // before anything else tears down.
   void OnShutdown() override {
     fable2::stateprobe::stop();
+#ifdef FABLE2_REMOTE_CONTROL
     remote_server_.Stop();
-  }
 #endif  // FABLE2_REMOTE_CONTROL
+  }
   // Apply the game patches (see src/core/fable2_patches.h) once the SDK has
   // decrypted default.xex into the guest arena, before the module launches.
   // Each patch is switched on by a [patches] key in fable2_config.toml

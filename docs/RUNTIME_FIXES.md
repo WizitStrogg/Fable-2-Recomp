@@ -121,6 +121,11 @@ general exact-24-bit mode (`depth_float24_convert_in_pixel_shader`) also
 addresses this but breaks other rendering in this game. The bias applies to
 the host render-target path only, not ROV.
 
+The fur is drawn with a second pixel shader as well (`03D91B35ACD56079`), which
+still Z-fought with only the first hash biased. `depth_bias_shader` takes a
+comma-separated list (rexglue-sdk PR #1), and the app now seeds both hashes
+with 64 units, the value Josh tested live on 2026-10-23.
+
 ## Validation and remaining limits
 
 Both unchanged USA/EU and German GOTY images started with the same native EXE.

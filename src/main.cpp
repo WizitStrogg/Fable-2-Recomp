@@ -9,6 +9,17 @@
 #include "fable2_lua_console.h"
 // Co-op: apply the partner's own hero to the henchman (coop_apply, spawn hook).
 #include "fable2_coop_hero.h"
+// Co-op campaign (feature 001): coop_campaign switch, "proto" announcement.
+#include "fable2_coop_campaign.h"
+// Co-op campaign lobby overlay (feature 001, T019).
+#include "fable2_coop_lobby.h"
+// Co-op campaign front end: New Game -> Solo / Co-op (feature 001, T018).
+#include "fable2_coop_frontend.h"
+// Co-op join gate probe / force (starter save inside QC060).
+#include "fable2_coop_joingate.h"
+#include "fable2_coop_joinscreen.h"
+// Native "Co-op" main-menu entry (the only way into co-op).
+#include "fable2_coop_mainmenu.h"
 
 #include "fable_2_app.h"
 #include "fps_meter.h"

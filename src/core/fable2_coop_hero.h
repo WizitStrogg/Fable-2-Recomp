@@ -51,6 +51,7 @@
 #include <rex/ppc/context.h>
 
 #include "fable2_f5_lua.h"
+#include "fable2_coop_busy.h"
 #include "fable2_coop_camera.h"
 #include "fable2_coop_camscan.h"
 #include "fable2_lua_console.h"
@@ -69,7 +70,9 @@ REXCVAR_DEFINE_STRING(coop_story_sync, "ask", "Network",
 REXCVAR_DEFINE_STRING(coop_story_pending, "", "Network",
                       "Read-only: the story waiting to be brought into this save "
                       "('<host> position <n>'), empty if none");
-REXCVAR_DEFINE_BOOL(coop_own_camera, false, "Network",
+// On by default (Josh, 2026-10-24: "should be ON by default. I had to turn it on
+// for Calvin"); F6 still turns it off per PC.
+REXCVAR_DEFINE_BOOL(coop_own_camera, true, "Network",
                     "Each player's camera follows only their own hero in co-op, like the "
                     "single-player camera (experimental)");
 REXCVAR_DEFINE_BOOL(coop_camera_follow_partner, false, "Network",
@@ -147,7 +150,7 @@ inline std::string read_lib() {
 // Queues CoopHero.Apply(<henchman>, <profile>). Returns false if nothing was
 // queued (no usable profile, no library).
 inline bool ApplyToHenchman(const std::string& profile, const std::string& why) {
-  if (profile.rfind("COOPHERO:v1|", 0) != 0) {
+  if (profile.rfind("COOPHERO:v1|", 0) != 0 && profile.rfind("COOPHERO:v2|", 0) != 0) {
     REXSYS_WARN("[coop] no usable hero profile to apply ({})", why);
     return false;
   }
@@ -265,7 +268,17 @@ inline uint32_t g_capture_load_epoch = 0;
 // after the game is ready, after each settled level load and on returning to
 // your own world, plus once immediately when a join starts (the own world is
 // still loaded for a moment), so the host has a fresh profile.
+// Set by the co-op campaign start (fable2_coop_frontend.h) from Start until
+// the adult world is ready: a capture during QC060's opening (autosave, movie)
+// crashed the host twice (rig launches 9 and 10).
+inline std::atomic<bool> g_capture_paused{false};
+inline int64_t g_capture_wait_logged = 0;
+
 inline void auto_capture(const lobby::LobbyStatus& status, int64_t now) {
+  if (g_capture_paused.load()) {
+    g_next_capture_ms = now + kFirstCaptureDelayMs;  // first capture again once resumed
+    return;
+  }
   if (!fable2::f5lua::ready()) {
     g_ready_since_ms = 0;
     return;
@@ -289,8 +302,33 @@ inline void auto_capture(const lobby::LobbyStatus& status, int64_t now) {
     g_next_capture_ms = now + kFirstCaptureDelayMs;
   }
   if (g_next_capture_ms == 0 || now < g_next_capture_ms) return;
+  // T028b: never during a movie, cutscene, load or save (launches 9, 10).
+  if (const std::string why = fable2::coopbusy::Busy(); !why.empty()) {
+    if (g_capture_wait_logged != g_next_capture_ms) {
+      g_capture_wait_logged = g_next_capture_ms;
+      REXSYS_INFO("[coop] hero capture waits: {}", why);
+    }
+    g_next_capture_ms = now + 2000;
+    g_capture_wait_logged = g_next_capture_ms;
+    return;
+  }
   g_next_capture_ms = 0;
   fable2::luaconsole::RunFile("coop_capture.lua");
+}
+
+// Co-op campaign (feature 001): player 2 is the campaign's own hero, not the
+// partner's solo hero. While a campaign runs, the front end sets the Lua that
+// makes player 2 (run with the library loaded, once per spawn) and host_apply
+// runs it instead of applying the partner's published hero (T031a).
+inline std::mutex g_campaign_mu;
+inline std::string g_campaign_p2_chunk;
+inline void SetCampaignPlayer2(std::string chunk) {
+  std::lock_guard<std::mutex> l(g_campaign_mu);
+  g_campaign_p2_chunk = std::move(chunk);
+}
+inline std::string campaign_player2() {
+  std::lock_guard<std::mutex> l(g_campaign_mu);
+  return g_campaign_p2_chunk;
 }
 
 inline void host_apply(const lobby::LobbyStatus& status, int64_t now) {
@@ -298,6 +336,18 @@ inline void host_apply(const lobby::LobbyStatus& status, int64_t now) {
   const int64_t spawned = g_spawned_at_ms.load();
   if (spawned == 0 || now - spawned < REXCVAR_GET(coop_apply_delay_ms)) return;
   const uint32_t epoch = g_spawn_epoch.load();
+
+  const std::string campaign = campaign_player2();
+  if (!campaign.empty()) {
+    if (g_applied_epoch == epoch && g_applied_ip == 0 && g_applied_rev == 2) return;
+    g_applied_epoch = epoch;
+    g_applied_ip = 0;
+    g_applied_rev = 2;
+    const std::string lib = read_lib();
+    if (!lib.empty() && fable2::luaconsole::RunChunk(lib + "\n" + campaign))
+      REXSYS_INFO("[coop] campaign player 2 queued");
+    return;
+  }
 
   const std::string override_profile = REXCVAR_GET(coop_partner_profile);
   if (!override_profile.empty()) {
@@ -594,6 +644,7 @@ inline void OnFrame() {
   g_world_changed = world_key != g_world_key;
   fable2::coopcam::g_joined.store(status.joined_host_ip != 0);
   g_world_key = world_key;
+  fable2::coopbusy::tick(status, now);
   joiner_story(status);
   camera_tick(status, now);
   update_partner_gender(status);

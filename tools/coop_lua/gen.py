@@ -55,6 +55,19 @@ end
 local hero = CoopHero.Try("GetPlayerHero", GetPlayerHero)
 if hero then print(CoopHero.Serialize(CoopHero.Capture(hero))) end
 '''),
+    "coop_capture2": ("Feature 001 rig check. Prints this hero and player 2 as profile v2 lines, then parses each back and prints it again (the two lines must match).", '''
+for _, who in ipairs({{"hero", GetPlayerHero}, {"player2", GetPlayerHenchman}}) do
+  local e = CoopHero.Try(who[1], who[2])
+  if e and e:IsAlive() then
+    local line = CoopHero.SerializeV2(CoopHero.Capture(e), 0)
+    print("[coop] capture2 " .. who[1])
+    print(line)
+    print("[coop] reparse " .. (CoopHero.SerializeV2(CoopHero.Parse(line), 0) == line and "same" or "DIFFERENT"))
+  else
+    print("[coop] capture2 " .. who[1] .. ": none")
+  end
+end
+'''),
 }
 
 def main():

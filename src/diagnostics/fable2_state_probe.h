@@ -725,9 +725,8 @@ inline void do_sample() {
 
 // Strong override of the element-list fetch. Runs on the render thread at
 // high frequency, so the tick is a single relaxed atomic increment (no I/O,
-// no allocation). Debug/remote builds only (FABLE2_REMOTE_CONTROL); release
-// builds use the original weak body untouched.
-#ifdef FABLE2_REMOTE_CONTROL
+// no allocation). Every build: the co-op front end reads the state (v14 shipped
+// these behind FABLE2_REMOTE_CONTROL and the ship build never saw the main menu).
 // sub_82B458C0 = prompt/manager element-list fetch/next (returns element, 0 =
 // done). Count the non-zero returns for lists in the 0x8333xxxx manager
 // region: the rate is high (~15-17/s) while the "Press A" prompt OR the main
@@ -749,4 +748,3 @@ extern "C" void ProcessAndProcessAndProcess1013_822B2D60(PPCContext& ctx, uint8_
   __imp__ProcessAndProcessAndProcess1013_822B2D60(ctx, base);
   fable2::stateprobe::observe_a_button(state_ptr);
 }
-#endif  // FABLE2_REMOTE_CONTROL
