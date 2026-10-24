@@ -139,9 +139,9 @@ def main() -> int:
             for name in sorted(n for n in os.listdir(folder) if n.endswith(f"_{who}.png")):
                 im = np.asarray(Image.open(os.path.join(folder, name)).convert("RGB")).astype(int)
                 body = im[40:-10, 10:-10]
-                r, g, b = body[..., 0], body[..., 1], body[..., 2]
-                dark = ((r < 70) & (g < 55) & (b < 40)).mean()
-                parch = ((r > 170) & (g > 150) & (b > 100) & (r - b < 110) & (r - b > 20)).mean()
+                rr, gg, bb = body[..., 0], body[..., 1], body[..., 2]
+                dark = ((rr < 70) & (gg < 55) & (bb < 40)).mean()
+                parch = ((rr > 170) & (gg > 150) & (bb > 100) & (rr - bb < 110) & (rr - bb > 20)).mean()
                 mean = body.mean()
                 # Thresholds from launch 26's first frames: the cover is ~99 % dark
                 # leather at mean ~27; load transitions are black (mean ~0); world
