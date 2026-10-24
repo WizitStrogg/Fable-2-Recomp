@@ -142,7 +142,12 @@ def main() -> int:
                 r, g, b = body[..., 0], body[..., 1], body[..., 2]
                 dark = ((r < 70) & (g < 55) & (b < 40)).mean()
                 parch = ((r > 170) & (g > 150) & (b > 100) & (r - b < 110) & (r - b > 20)).mean()
-                kind = "cover" if dark > 0.9 else ("STOCK?" if parch > 0.15 else "world/other")
+                mean = body.mean()
+                # Thresholds from launch 26's first frames: the cover is ~99 % dark
+                # leather at mean ~27; load transitions are black (mean ~0); world
+                # frames have <= 0.6 % parchment, every stock co-op frame >= 8 %.
+                kind = ("cover" if dark > 0.9 and 15 < mean < 40 else "black" if mean < 8
+                        else "STOCK?" if parch > 0.05 else "world/other")
                 seen_cover |= kind == "cover"
                 if seen_cover and kind == "STOCK?":
                     bad.append(name)
