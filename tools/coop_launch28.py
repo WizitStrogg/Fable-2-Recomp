@@ -88,13 +88,17 @@ def main() -> int:
             time.sleep(0.8)
         note("INFO" if not nolayout else ("PASS" if stock == 0 else "FAIL"),
              f"{tag}: game frames under the cover with stock-screen parchment: {stock} of {2 * k}")
-        ok = expect(a, f"{tag}: player 2 spawned (screens answered in code)", r"henchman spawned", 0, 30)
+        ok = expect(a, f"{tag}: player 2 spawned", r"henchman spawned", 0, 60)
         time.sleep(4)
         for r, who in ((a, "host"), (b, "partner")):
             skips = grep_log(r, r"\[joinscreen\] skip:", 50)
             pads = grep_log(r, r"A for the join screen", 50)
             note("PASS" if skips else "FAIL", f"{tag}: {who} screens answered in code ({len(skips)} accepts)")
-            note("PASS" if not pads else "FAIL", f"{tag}: {who} pressed no pad buttons for them ({len(pads)})")
+            fb = grep_log(r, r"\[joinscreen\] FALLBACK", 5)
+            note("PASS" if not pads else "INFO", f"{tag}: {who} pad answers {len(pads)}")
+            note("PASS" if not fb else "FAIL", f"{tag}: {who} no fallback to pad answers ({len(fb)})")
+            for l in fb + grep_log(r, r"\[joinscreen\] (sample|reader idle)", 34):
+                note("INFO", f"{tag}: {who} " + l[l.find("[joinscreen]"):][:160])
         appr = grep_log(a, r"\[joingate\] join approved", 1)
         spawn = grep_log(a, r"henchman spawned", 1)
         if appr and spawn and ts(appr[0]) is not None and ts(spawn[0]) is not None:
@@ -102,22 +106,32 @@ def main() -> int:
         for r, who in ((a, "a"), (b, "b")):
             with open(os.path.join(OUT, f"{tag}_joinscreen_{who}.txt"), "w", encoding="utf-8") as f:
                 f.write("\n".join(l[l.find("["):] for l in grep_log(r, r"\[joinscreen\]|join approved|join cover|henchman spawned|A for the join", 300)) + "\n")
-        return ok
+        in_code = all(grep_log(r, r"\[joinscreen\] skip:", 1) and not grep_log(r, r"FALLBACK", 1) for r in (a, b))
+        return ok, in_code
 
     a, b = start_pair()
-    ok1 = lobby_and_join(a, b, "join1")
+    ok1, code1 = lobby_and_join(a, b, "join1")
     # The partner leaves: the host saves and goes back to the campaign lobby (P6).
     b.stop()
     expect(a, "P6: host back at the front end", r"back at the front end", 0, 120)
     a.stop()
     a, b = start_pair()
-    ok2 = lobby_and_join(a, b, "join2")
+    ok2, code2 = lobby_and_join(a, b, "join2")
+    ok3 = True
+    if not (code1 and code2):
+        note("INFO", "join 3 (no layout) skipped: joins 1-2 did not both accept in code; samples above")
+        with open(os.path.join(OUT, "launch28_results.txt"), "w", encoding="utf-8") as f:
+            f.write("\n".join(L.results) + "\n")
+        a.stop()
+        b.stop()
+        note("INFO", "both closed; rig off")
+        return 0 if ok1 and ok2 else 1
     # Join 3 (experiment): the same, without building the screens' layout at all.
     b.stop()
     expect(a, "P6 (2): host back at the front end", r"back at the front end", 0, 120)
     a.stop()
     a, b = start_pair()
-    ok3 = lobby_and_join(a, b, "join3_nolayout", nolayout=True)
+    ok3, _ = lobby_and_join(a, b, "join3_nolayout", nolayout=True)
     for r, who in ((a, "host"), (b, "partner")):
         n = len(grep_log(r, r"layout build skipped", 10))
         note("INFO", f"join3_nolayout: {who} layout builds skipped: {n}")

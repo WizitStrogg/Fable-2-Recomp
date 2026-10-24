@@ -18,7 +18,9 @@
 
 #pragma once
 
+#include <algorithm>
 #include <atomic>
+#include <mutex>
 #include <cstdint>
 
 #include <rex/cvar.h>
@@ -67,7 +69,43 @@ inline std::atomic<int32_t> g_last_slot4_r4{-999}, g_last_slot4_r5{-999}, g_last
 constexpr int64_t kSkipEveryMs = 400;
 inline std::atomic<uint32_t> g_controller{0};  // set at open, cleared at close
 inline std::atomic<int64_t> g_last_skip_ms{0};
+inline std::atomic<int64_t> g_open_ms{0};
 inline std::atomic<int> g_skips{0};
+
+// Fallback (coordinator, launch 28 hung): with the skip on, if the screens get no
+// in-code accept within kNoAcceptMs, or are still open after kStuckMs, log the
+// reader's raw samples, turn the skip off at runtime, and let the pad answers
+// (fable2_coop_frontend.h accept_tick) finish the join.
+constexpr int64_t kNoAcceptMs = 15000, kStuckMs = 25000;
+struct Sample {
+  int32_t off, input, got;
+};
+inline std::mutex g_samples_mu;
+inline Sample g_samples[32];
+inline int g_sample_n = 0;
+inline void record(uint32_t reader, uint32_t ctrl, int32_t input, int32_t got) {
+  std::lock_guard<std::mutex> l(g_samples_mu);
+  g_samples[g_sample_n++ % 32] = {int32_t(reader - ctrl), input, got};
+}
+inline void check_fallback() {
+  const uint32_t ctrl = g_controller.load();
+  if (!ctrl || !REXCVAR_GET(coop_join_screen_skip) || !REXCVAR_GET(coop_campaign)) return;
+  const int64_t open = g_open_ms.load();
+  const int64_t now = fable2::f5lua::steady_ms();
+  const int skips = g_skips.load();
+  if (!open || !((skips == 0 && now - open > kNoAcceptMs) || now - open > kStuckMs)) return;
+  REXSYS_WARN("[joinscreen] FALLBACK after {} ms with {} in-code accept(s): skip off, pad answers take over",
+              now - open, skips);
+  {
+    std::lock_guard<std::mutex> l(g_samples_mu);
+    const int n = std::min(g_sample_n, 32);
+    for (int i = 0; i < n; ++i) {
+      const Sample& s = g_samples[(g_sample_n - n + i) % 32];
+      REXSYS_INFO("[joinscreen] sample reader=ctrl{:+} input={} returned={}", s.off, s.input, s.got);
+    }
+  }
+  rex::cvar::SetFlagByName("coop_join_screen_skip", "false");
+}
 
 }  // namespace fable2::coopjoinscreen
 
@@ -81,10 +119,13 @@ extern "C" void sub_82841730(PPCContext& ctx, uint8_t* base) {
   __imp__sub_82841730(ctx, base);
   const uint32_t ctrl = g_controller.load();
   if (!ctrl || !REXCVAR_GET(coop_join_screen_skip) || !REXCVAR_GET(coop_campaign)) return;
+  const int32_t got = int32_t(ctx.r3.u32);
+  if (reader - ctrl < 0x1000) record(reader, ctrl, input, got);  // the controller's readers
+  check_fallback();
+  if (!REXCVAR_GET(coop_join_screen_skip)) return;
   if (reader != ctrl + 308 && reader != ctrl + 348) return;
   // No action this frame: the reader hands its input code straight back (24 every
   // idle frame, launch 28; 0 in some branches). Real actions are 28..38.
-  const int32_t got = int32_t(ctx.r3.u32);
   if ((got != 0 && got != input) || (input >= 28 && input <= 38)) return;
   if (REXCVAR_GET(coop_join_screen_probe) && g_skips.load() == 0)
     REXSYS_INFO("[joinscreen] reader idle: input {} returned {}", input, got);
@@ -101,6 +142,7 @@ extern "C" void sub_82476600(PPCContext& ctx, uint8_t* base) {
   if (fable2::coopjoinscreen::on()) fable2::coopjoinscreen::log_state("open", ctx, base);
   fable2::coopjoinscreen::g_controller.store(ctx.r3.u32);
   fable2::coopjoinscreen::g_skips.store(0);
+  fable2::coopjoinscreen::g_open_ms.store(fable2::f5lua::steady_ms());
   // Experiment (rig, off by default): with the in-code answers on, do not build the
   // screens' layout at all. Whether the state machine still reaches the spawn without
   // it is what launch 28's third join tests.
@@ -132,6 +174,7 @@ extern "C" void sub_82479BF0(PPCContext& ctx, uint8_t* base) {
   using namespace fable2::coopjoinscreen;
   if (on() && g_last_slot6_r5.exchange(int32_t(ctx.r5.u32)) != int32_t(ctx.r5.u32))
     log_state("update6", ctx, base);
+  check_fallback();  // runs every frame the screens are open, even if no reader is
   __imp__sub_82479BF0(ctx, base);
 }
 
@@ -139,5 +182,6 @@ extern "C" void __imp__sub_82476FC8(PPCContext& ctx, uint8_t* base);
 extern "C" void sub_82476FC8(PPCContext& ctx, uint8_t* base) {
   if (fable2::coopjoinscreen::on()) fable2::coopjoinscreen::log_state("close", ctx, base);
   fable2::coopjoinscreen::g_controller.store(0);
+  fable2::coopjoinscreen::g_open_ms.store(0);
   __imp__sub_82476FC8(ctx, base);
 }
