@@ -46,6 +46,9 @@ REXCVAR_DEFINE_INT32(coop_partner_join_delay_ms, 0, "Network",
                      "Testing: the partner waits this long after coop_go before its first join "
                      "attempt (rig T028: lets a third player try the open slot first)");
 
+REXCVAR_DEFINE_STRING(coop_campaign_status, "", "Network",
+                      "Read only: what the co-op campaign is doing (shown in F6)");
+
 namespace fable2::coopfrontend {
 
 constexpr uint32_t kUp = 1, kDown = 2, kBack = 32, kA = 0x1000, kB = 0x2000;
@@ -572,6 +575,44 @@ CoopPurseLast = total
   fable2::luaconsole::RunChunk(c);
 }
 
+// F6 status line (T035): what the campaign is doing, kept in a cvar the
+// overlay shows. Called with the session lock held.
+inline int64_t g_next_status_ms = 0, g_next_template_check_ms = 0;
+inline bool g_has_template = false;
+inline std::string g_last_status;
+inline void status_tick(const SessionState& s, int64_t now) {
+  if (now < g_next_status_ms) return;
+  g_next_status_ms = now + 1000;
+  if (now >= g_next_template_check_ms) {
+    g_next_template_check_ms = now + 10000;
+    g_has_template = fable2::cooptemplate::ReadTemplate().has_value();
+  }
+  std::string st;
+  switch (s.s) {
+    case Session::kNone:
+      st = g_has_template ? "Ready. New Game -> Co-op to host, or join a partner's lobby."
+                          : "No starter save (coop_template): you can join a partner's campaign, not host one.";
+      break;
+    case Session::kHostStarting:
+      st = "Starting the campaign with " + s.partner_name + "...";
+      break;
+    case Session::kHostInWorld:
+      st = s.partner_spawned ? "Playing the campaign with " + s.partner_name + " (shared purse, " +
+                                   s.slot_name + ")"
+                             : "Campaign world up: waiting for " + s.partner_name + " to join";
+      break;
+    case Session::kHostPartnerLost:
+      st = s.partner_name + " left: saving, then back to the campaign lobby";
+      break;
+    case Session::kPartnerJoining:
+      st = "Joining the host's campaign...";
+      break;
+  }
+  if (st == g_last_status) return;
+  g_last_status = st;
+  rex::cvar::SetFlagByName("coop_campaign_status", st);
+}
+
 // Session watcher (render thread, ~2 Hz).
 inline int64_t g_next_session_ms = 0;
 inline uint32_t g_seen_spawn_epoch = 0;
@@ -583,6 +624,7 @@ inline void session_tick() {
   {
   std::lock_guard<std::mutex> l(S().m);
   auto& s = S();
+  status_tick(s, now);
   switch (s.s) {
     case Session::kHostStarting: {
       if (s.from_template) {
