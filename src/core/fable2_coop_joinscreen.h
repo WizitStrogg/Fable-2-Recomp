@@ -95,6 +95,14 @@ extern "C" void sub_82476600(PPCContext& ctx, uint8_t* base) {
   if (fable2::coopjoinscreen::on()) fable2::coopjoinscreen::log_state("open", ctx, base);
   fable2::coopjoinscreen::g_controller.store(ctx.r3.u32);
   fable2::coopjoinscreen::g_skips.store(0);
+  // Experiment (rig, off by default): with the in-code answers on, do not build the
+  // screens' layout at all. Whether the state machine still reaches the spawn without
+  // it is what launch 28's third join tests.
+  if (REXCVAR_GET(coop_join_screen_nolayout) && REXCVAR_GET(coop_join_screen_skip) &&
+      REXCVAR_GET(coop_campaign)) {
+    REXSYS_INFO("[joinscreen] layout build skipped (experiment)");
+    return;
+  }
   __imp__sub_82476600(ctx, base);
 }
 

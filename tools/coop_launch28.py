@@ -40,7 +40,7 @@ def main() -> int:
         L.past_title(b, "b")
         return a, b
 
-    def lobby_and_join(a, b, tag):
+    def lobby_and_join(a, b, tag, nolayout=False):
         a.press("Down", 250)
         time.sleep(1.5)
         a.press("A", 250)
@@ -58,6 +58,7 @@ def main() -> int:
         for r in (a, b):
             r.cmd({"cmd": "cvar", "name": "coop_join_screen_skip", "value": "true"})
             r.cmd({"cmd": "cvar", "name": "coop_join_screen_probe", "value": "true"})
+            r.cmd({"cmd": "cvar", "name": "coop_join_screen_nolayout", "value": "true" if nolayout else "false"})
         L.select_row(a, "a", "Start")
         a.press("A", 250)
         expect(a, f"{tag}: Start continues the campaign", r"host start: campaign .* continuing", 0, 10)
@@ -87,6 +88,16 @@ def main() -> int:
     a.stop()
     a, b = start_pair()
     ok2 = lobby_and_join(a, b, "join2")
+    # Join 3 (experiment): the same, without building the screens' layout at all.
+    b.stop()
+    expect(a, "P6 (2): host back at the front end", r"back at the front end", 0, 120)
+    a.stop()
+    a, b = start_pair()
+    ok3 = lobby_and_join(a, b, "join3_nolayout", nolayout=True)
+    for r, who in ((a, "host"), (b, "partner")):
+        n = len(grep_log(r, r"layout build skipped", 10))
+        note("INFO", f"join3_nolayout: {who} layout builds skipped: {n}")
+    note("PASS" if ok3 else "FAIL", "join3_nolayout: player 2 spawned with no layout built")
     with open(os.path.join(OUT, "launch28_results.txt"), "w", encoding="utf-8") as f:
         f.write("\n".join(L.results) + "\n")
     a.stop()

@@ -49,6 +49,9 @@ extern "C" void rex_ui_set_lobby_cover(const char* text);
 REXCVAR_DEFINE_BOOL(coop_join_screen_skip, false, "Network",
                     "Co-op campaign: answer the game's own join screens through their action "
                     "readers (fable2_coop_joinscreen.h) instead of pad presses");
+REXCVAR_DEFINE_BOOL(coop_join_screen_nolayout, false, "Network",
+                    "Experiment: with coop_join_screen_skip, do not build the join screens' "
+                    "layout at all (fable2_coop_joinscreen.h)");
 REXCVAR_DEFINE_BOOL(coop_join_screens_auto, true, "Network",
                     "Co-op campaign: answer the game's own join screens automatically "
                     "(off only for rig traces that step through them)");
