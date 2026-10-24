@@ -43,6 +43,9 @@
 // rexglue-sdk: narrow the game's save list to one slot ("" = all saves).
 extern "C" void rex_content_set_save_filter(const char* file_name);
 
+REXCVAR_DEFINE_BOOL(coop_join_screens_auto, true, "Network",
+                    "Co-op campaign: answer the game's own join screens automatically "
+                    "(off only for rig traces that step through them)");
 REXCVAR_DEFINE_BOOL(coop_menu_probe, false, "Network",
                     "Testing: log the main menu dispatch's element memory on each press (T018a)");
 REXCVAR_DEFINE_STRING(coop_rig_save_filter, "", "Network",
@@ -384,6 +387,7 @@ inline void on_coop() {
 // One A for the game's join screens if one is due: the first kAcceptFirstMs after
 // `since` (the join), then every kAcceptEveryMs, kAcceptPresses in all.
 inline void accept_tick(SessionState& s, int64_t since, int64_t now, const char* who) {
+  if (!REXCVAR_GET(coop_join_screens_auto)) return;  // rig: stepped by hand (trace run)
   if (s.accept_presses >= kAcceptPresses) return;
   const int64_t due = s.accept_presses ? s.accept_ms + kAcceptEveryMs : since + kAcceptFirstMs;
   if (now < due) return;
