@@ -25,6 +25,8 @@
 #include <rex/logging.h>
 #include <rex/ppc/context.h>
 
+#include "fable2_f5_lua.h"
+
 REXCVAR_DEFINE_BOOL(coop_join_screen_probe, false, "Network",
                     "Testing: log the game's co-op join screen controller (events, phases, flags)");
 
@@ -52,11 +54,47 @@ inline void log_state(const char* where, PPCContext& ctx, uint8_t* base) {
 // Per-frame slots log only when their phase argument changes.
 inline std::atomic<int32_t> g_last_slot4_r4{-999}, g_last_slot4_r5{-999}, g_last_slot6_r5{-999};
 
+// --- the skip: answer the screens through their own action readers ------------------
+//
+// The screens' per-frame updates read an action code from sub_82841730 (host phase:
+// reader at controller+308, sub_82479C28; partner phase: reader at +348,
+// sub_82479F18) and switch on it: 36 = accept / Yes (host: sub_8247BF00 +
+// sub_8247AAB0 = accept the split; partner prompt: sub_8247C1B0 = continue without a
+// save), 37 = back / No (static read of both switches, launch 27 map). With
+// coop_join_screen_skip on, during a campaign, while the controller is open, a reader
+// that returns no action returns 36 instead (at most every kSkipEveryMs). No pad
+// press is involved, so nothing reaches the world after the screens close.
+constexpr int64_t kSkipEveryMs = 400;
+inline std::atomic<uint32_t> g_controller{0};  // set at open, cleared at close
+inline std::atomic<int64_t> g_last_skip_ms{0};
+inline std::atomic<int> g_skips{0};
+
 }  // namespace fable2::coopjoinscreen
+
+// coop_join_screen_skip is defined in fable2_coop_frontend.h (its pad answers stand down).
+
+extern "C" void __imp__sub_82841730(PPCContext& ctx, uint8_t* base);
+extern "C" void sub_82841730(PPCContext& ctx, uint8_t* base) {
+  using namespace fable2::coopjoinscreen;
+  const uint32_t reader = ctx.r3.u32;
+  __imp__sub_82841730(ctx, base);
+  const uint32_t ctrl = g_controller.load();
+  if (!ctrl || ctx.r3.u32 != 0 || !REXCVAR_GET(coop_join_screen_skip) || !REXCVAR_GET(coop_campaign))
+    return;
+  if (reader != ctrl + 308 && reader != ctrl + 348) return;
+  const int64_t now = fable2::f5lua::steady_ms();
+  if (now - g_last_skip_ms.load() < kSkipEveryMs) return;
+  g_last_skip_ms.store(now);
+  ctx.r3.u64 = 36;
+  REXSYS_INFO("[joinscreen] skip: accept (36) to the {} reader ({})",
+              reader == ctrl + 308 ? "host" : "partner", g_skips.fetch_add(1) + 1);
+}
 
 extern "C" void __imp__sub_82476600(PPCContext& ctx, uint8_t* base);
 extern "C" void sub_82476600(PPCContext& ctx, uint8_t* base) {
   if (fable2::coopjoinscreen::on()) fable2::coopjoinscreen::log_state("open", ctx, base);
+  fable2::coopjoinscreen::g_controller.store(ctx.r3.u32);
+  fable2::coopjoinscreen::g_skips.store(0);
   __imp__sub_82476600(ctx, base);
 }
 
@@ -86,5 +124,6 @@ extern "C" void sub_82479BF0(PPCContext& ctx, uint8_t* base) {
 extern "C" void __imp__sub_82476FC8(PPCContext& ctx, uint8_t* base);
 extern "C" void sub_82476FC8(PPCContext& ctx, uint8_t* base) {
   if (fable2::coopjoinscreen::on()) fable2::coopjoinscreen::log_state("close", ctx, base);
+  fable2::coopjoinscreen::g_controller.store(0);
   __imp__sub_82476FC8(ctx, base);
 }

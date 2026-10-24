@@ -46,6 +46,9 @@ extern "C" void rex_ui_set_lobby_view(const char* view);
 extern "C" void rex_ui_set_lobby_font(const char* bft_path);
 extern "C" void rex_ui_set_lobby_cover(const char* text);
 
+REXCVAR_DEFINE_BOOL(coop_join_screen_skip, false, "Network",
+                    "Co-op campaign: answer the game's own join screens through their action "
+                    "readers (fable2_coop_joinscreen.h) instead of pad presses");
 REXCVAR_DEFINE_BOOL(coop_join_screens_auto, true, "Network",
                     "Co-op campaign: answer the game's own join screens automatically "
                     "(off only for rig traces that step through them)");
@@ -429,6 +432,7 @@ inline void on_coop() {
 // `since` (the join), then every kAcceptEveryMs, kAcceptPresses in all.
 inline void accept_tick(SessionState& s, int64_t since, int64_t now, const char* who) {
   if (!REXCVAR_GET(coop_join_screens_auto)) return;  // rig: stepped by hand (trace run)
+  if (REXCVAR_GET(coop_join_screen_skip)) return;  // answered in code instead
   // Player 2 has spawned: the screens are gone, and A in the world would act
   // (launch 26: the partner pressed 3 more times after the spawn).
   if (g_cover_hide_at_ms.load()) return;
