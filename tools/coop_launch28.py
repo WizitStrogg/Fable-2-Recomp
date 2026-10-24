@@ -64,7 +64,31 @@ def main() -> int:
         expect(a, f"{tag}: Start continues the campaign", r"host start: campaign .* continuing", 0, 10)
         expect(a, f"{tag}: host world up", r"host world up \(starter save", 0, 240)
         expect(a, f"{tag}: join approved", r"\[joingate\] join approved", 0, 90)
-        ok = expect(a, f"{tag}: player 2 spawned (screens answered in code)", r"henchman spawned", 0, 90)
+        # What the game itself draws under the cover: the renderer's own frame
+        # (no overlay), about every second until player 2 spawns.
+        import numpy as np
+        from PIL import Image
+        stock = 0
+        shots_dir = os.path.join(OUT, f"{tag}_game_frames")
+        os.makedirs(shots_dir, exist_ok=True)
+        t0 = time.time()
+        k = 0
+        while count(a, r"henchman spawned") == 0 and time.time() - t0 < 90:
+            for r, who in ((a, "a"), (b, "b")):
+                p = os.path.join(shots_dir, f"{k:03d}_{who}.png")
+                try:
+                    r.shot(p)
+                    im = np.asarray(Image.open(p).convert("RGB")).astype(int)
+                    rr, gg, bb = im[..., 0], im[..., 1], im[..., 2]
+                    parch = ((rr > 170) & (gg > 150) & (bb > 100) & (rr - bb < 110) & (rr - bb > 20)).mean()
+                    stock += parch > 0.05
+                except Exception:  # noqa: BLE001
+                    pass
+            k += 1
+            time.sleep(0.8)
+        note("INFO" if not nolayout else ("PASS" if stock == 0 else "FAIL"),
+             f"{tag}: game frames under the cover with stock-screen parchment: {stock} of {2 * k}")
+        ok = expect(a, f"{tag}: player 2 spawned (screens answered in code)", r"henchman spawned", 0, 30)
         time.sleep(4)
         for r, who in ((a, "host"), (b, "partner")):
             skips = grep_log(r, r"\[joinscreen\] skip:", 50)
