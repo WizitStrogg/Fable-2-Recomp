@@ -351,7 +351,6 @@ inline void on_host_start() {
     std::lock_guard<std::mutex> l1(lb.m);
     std::lock_guard<std::mutex> l2(S().m);
     S().s = Session::kHostStarting;
-    g_past_title = false;  // the next front-end visit (after the session) starts at the title
     S().cid = cid;
     S().partner_name = lb.host.rec.partner;
     S().partner_ip = lb.host.partner_ip;
@@ -426,7 +425,6 @@ inline void on_partner_go(uint32_t ip) {
   {
     std::lock_guard<std::mutex> l(S().m);
     S().s = Session::kPartnerJoining;
-    g_past_title = false;
     S().since_ms = fable2::f5lua::steady_ms();
     S().host_ip = ip;
     S().host_xuid = host_xuid;
@@ -868,6 +866,7 @@ end
         if (loaded && settled > 20000 && s.gender_sent) {
           s.s = Session::kHostInWorld;
           s.since_ms = now;
+          g_past_title = false;  // the next front-end visit starts at the title
           g_seen_spawn_epoch = fable2::coophero::g_spawn_epoch.load();
           s.accept_presses = 0;
           const std::string go = fable2::cooplobby::Format(fable2::cooplobby::GoRecord{s.cid, ++s.go_seq, fable2::cooplobby::XuidStr(fable2::cooplobby::MyXuid())});
@@ -925,6 +924,7 @@ end
           lobby::GetLobbyStatus().in_world) {
         s.s = Session::kHostInWorld;
         s.since_ms = now;
+        g_past_title = false;
         g_seen_spawn_epoch = fable2::coophero::g_spawn_epoch.load();
         s.accept_presses = 0;
         const std::string go = fable2::cooplobby::Format(fable2::cooplobby::GoRecord{s.cid, ++s.go_seq, fable2::cooplobby::XuidStr(fable2::cooplobby::MyXuid())});
@@ -1029,6 +1029,7 @@ end
         accept_tick(s, s.joined_since_ms, now, "partner");
         if (now - s.joined_since_ms > kAcceptFirstMs + kAcceptPresses * kAcceptEveryMs) {
           REXSYS_INFO("[coop] partner: in the host's world (after {} attempt(s))", s.tries);
+          g_past_title = false;
           s.s = Session::kNone;
           g_armed = false;  // in the host's world: pause-menu presses are not New Game
         }
@@ -1105,6 +1106,21 @@ inline bool OnPress(PPCContext& ctx, uint8_t* base) {
   }
 
   const uint32_t mask = ctx.r5.u32 & 0xFFFF;
+  if (mask & kA) {
+    // The host's Start: load the campaign save with the game's own Continue
+    // ("Load Game"), here on the game thread; the press that brought us here
+    // was injected for this and goes no further. Before the title logic: the
+    // menu is open (final smoke test, 2026-10-24: the press was taken for the
+    // title's and reopened the hub).
+    if (g_load_pending.exchange(false)) {
+      swallow_closing_a();
+      g_past_title = true;
+      if (g_request_load && g_request_load(ctx, base)) return true;
+      REXSYS_WARN("[coop] host start: main menu not known, steering to Continue instead");
+      inject_continue(300);
+      return true;
+    }
+  }
   // The title prompt ("Press A to start") goes through the same dispatch with
   // the same registers while the state probe already says MainMenu, so the
   // first A of a front-end visit is the title's and always passes.
@@ -1125,16 +1141,6 @@ inline bool OnPress(PPCContext& ctx, uint8_t* base) {
   g_last_press_ms = now;
 
   if (mask & kA) {
-    // The host's Start: load the campaign save with the game's own Continue
-    // ("Load Game"), here on the game thread; the press that brought us here
-    // was injected for this and goes no further.
-    if (g_load_pending.exchange(false)) {
-      swallow_closing_a();
-      if (g_request_load && g_request_load(ctx, base)) return true;
-      REXSYS_WARN("[coop] host start: main menu not known, steering to Continue instead");
-      inject_continue(300);
-      return true;
-    }
     if (g_pass_a > 0) {
       // The closing (or injected) A, both of its dispatch calls, goes to the
       // stock menu: New Game starts.

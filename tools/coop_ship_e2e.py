@@ -763,10 +763,49 @@ def run_err():
         relay.kill()
 
 
+def run_final():
+    """Smoke test of the release build: the Co-op row, the host-left message,
+    then a join from the hub to player 2 spawned (no restarts)."""
+    setup_tomls()
+    relay_log = open(os.path.join(OUT, "relay_final.log"), "w")
+    relay = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                           "coop_relay.py")], stdout=relay_log, stderr=relay_log)
+    a, b = Game("mod-a", "host"), Game("mod-b", "partner")
+    a.start()
+    b.start()
+    try:
+        a.past_title()
+        b.past_title()
+        note("PASS" if a.count(r"main menu: Co-op entry added") else "FAIL", "final: native Co-op entry added")
+        open_coop_entry(a, "final")
+        host_new_campaign(a, "final")
+        open_coop_entry(b, "final")
+        partner_joins(b, "Join TestA", "final_err")
+        time.sleep(2)
+        # The host leaves its lobby: the partner is told and stays in the hub.
+        n = b.count(r"partner: the host left the lobby")
+        a.select("Back")
+        a.press("E")
+        b.wait("final: partner is told the host left", r"partner: the host left the lobby", n, 30)
+        time.sleep(1)
+        b.shot("final_partner_host_left.png")
+        # Back in the hub: host a new campaign again; the partner joins from the list.
+        time.sleep(2)
+        host_new_campaign(a, "final")
+        partner_joins(b, "Join TestA", "final")
+        if both_ready_and_start(a, b, "final"):
+            a.wait("final: host loads through the game's own Load Game", r"main menu: Load Game", 0, 20)
+            join_phase(a, b, "final")
+    finally:
+        for g in (a, b):
+            g.stop()
+        relay.kill()
+
+
 def main():
     os.makedirs(OUT, exist_ok=True)
     mode = sys.argv[1] if len(sys.argv) > 1 else "coop"
-    {"coop": run_coop, "solo": run_solo, "multi": run_multi, "menu": run_menu, "menu2": run_menu2, "err": run_err}[mode]()
+    {"coop": run_coop, "solo": run_solo, "multi": run_multi, "menu": run_menu, "menu2": run_menu2, "err": run_err, "final": run_final}[mode]()
     with open(os.path.join(OUT, f"results_{mode}.txt"), "w", encoding="utf-8") as f:
         f.write("\n".join(results) + "\n")
     return 0 if not any(r.startswith("FAIL") for r in results) else 1
