@@ -44,6 +44,7 @@
 extern "C" void rex_content_set_save_filter(const char* file_name);
 extern "C" void rex_ui_set_lobby_view(const char* view);
 extern "C" void rex_ui_set_lobby_font(const char* bft_path);
+extern "C" void rex_ui_set_lobby_cover(const char* text);
 
 REXCVAR_DEFINE_BOOL(coop_join_screens_auto, true, "Network",
                     "Co-op campaign: answer the game's own join screens automatically "
@@ -178,13 +179,15 @@ inline void ShowCover(const std::string& text) {
   g_cover_epoch.store(fable2::coophero::g_spawn_epoch.load());
   g_cover_hide_at_ms.store(0);
   g_cover_since_ms.store(fable2::f5lua::steady_ms());
-  rex_ui_set_lobby_view(("C" + text + "\nDThe co-op campaign is starting").c_str());
+  // Its own channel: the lobby closing underneath (the partner's go) must not
+  // clear it (launch 26: the partner's cover was wiped by the lobby's "").
+  rex_ui_set_lobby_cover((text + "\nThe co-op campaign is starting").c_str());
   REXSYS_INFO("[coop] join cover up: {}", text);
 }
 inline void HideCover(const char* why) {
   if (!g_cover_since_ms.exchange(0)) return;
   g_cover_hide_at_ms.store(0);
-  rex_ui_set_lobby_view("");
+  rex_ui_set_lobby_cover("");
   REXSYS_INFO("[coop] join cover down ({})", why);
 }
 inline void cover_tick() {
@@ -426,6 +429,9 @@ inline void on_coop() {
 // `since` (the join), then every kAcceptEveryMs, kAcceptPresses in all.
 inline void accept_tick(SessionState& s, int64_t since, int64_t now, const char* who) {
   if (!REXCVAR_GET(coop_join_screens_auto)) return;  // rig: stepped by hand (trace run)
+  // Player 2 has spawned: the screens are gone, and A in the world would act
+  // (launch 26: the partner pressed 3 more times after the spawn).
+  if (g_cover_hide_at_ms.load()) return;
   if (s.accept_presses >= kAcceptPresses) return;
   const int64_t due = s.accept_presses ? s.accept_ms + kAcceptEveryMs : since + kAcceptFirstMs;
   if (now < due) return;

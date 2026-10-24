@@ -128,6 +128,29 @@ def main() -> int:
     cap.stop_flag = True
     cap.join(5)
     note("INFO", f"join capture: {cap.n} frames per PC at ~200 ms")
+    # Every frame from the first cover frame on: the cover (dark leather) or the
+    # world, never the game's co-op screens (mostly bright parchment).
+    import numpy as np
+    from PIL import Image
+    folder = os.path.join(OUT, "join_frames")
+    with open(os.path.join(OUT, "join_frames_check.txt"), "w", encoding="utf-8") as f:
+        for who in ("a", "b"):
+            seen_cover, bad, kinds = False, [], []
+            for name in sorted(n for n in os.listdir(folder) if n.endswith(f"_{who}.png")):
+                im = np.asarray(Image.open(os.path.join(folder, name)).convert("RGB")).astype(int)
+                body = im[40:-10, 10:-10]
+                r, g, b = body[..., 0], body[..., 1], body[..., 2]
+                dark = ((r < 70) & (g < 55) & (b < 40)).mean()
+                parch = ((r > 170) & (g > 150) & (b > 100) & (r - b < 110) & (r - b > 20)).mean()
+                kind = "cover" if dark > 0.9 else ("STOCK?" if parch > 0.15 else "world/other")
+                seen_cover |= kind == "cover"
+                if seen_cover and kind == "STOCK?":
+                    bad.append(name)
+                kinds.append(kind)
+                f.write(f"{name} dark={dark:.3f} parchment={parch:.3f} {kind}\n")
+            note("PASS" if seen_cover and not bad else "FAIL",
+                 f"{who}: no stock co-op screen in any frame from the cover on "
+                 f"({kinds.count('cover')} cover frames, {len(bad)} suspect: {bad[:3]})")
     for l in grep_log(a, r"join cover|join approved|henchman spawned|A for the join", 12):
         note("INFO", "a: " + l[l.find("["):][:160])
     for l in grep_log(b, r"join cover|henchman spawned|A for the join|in the host's world", 12):
