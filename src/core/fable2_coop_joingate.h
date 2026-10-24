@@ -160,8 +160,11 @@ inline void after_join(uint8_t* base, const JoinRestore& r) {
   if (r.refused) wr8(base, r.flags + 245, 1);
   if (r.open && ok(r.flags) && !rd8(base, r.flags + 245)) {
     REXSYS_INFO("[joingate] join approved");
-    if (REXCVAR_GET(coop_campaign))
+    if (REXCVAR_GET(coop_campaign)) {
+      // Before the game builds its co-op join screen (next frames): cover first.
+      fable2::coopfrontend::ShowCover("Your partner is joining");
       fable2::coopfrontend::g_join_approved_ms.store(fable2::f5lua::steady_ms());
+    }
   }
 }
 

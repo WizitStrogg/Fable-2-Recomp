@@ -42,6 +42,8 @@
 
 // rexglue-sdk: narrow the game's save list to one slot ("" = all saves).
 extern "C" void rex_content_set_save_filter(const char* file_name);
+extern "C" void rex_ui_set_lobby_view(const char* view);
+extern "C" void rex_ui_set_lobby_font(const char* bft_path);
 
 REXCVAR_DEFINE_BOOL(coop_join_screens_auto, true, "Network",
                     "Co-op campaign: answer the game's own join screens automatically "
@@ -158,8 +160,43 @@ inline std::atomic<bool> g_gender_ok{false};
 // The game's own join screens (gold/XP split on the host; look, then "continue
 // without choosing a save" on the partner) all accept with A (launch 13). During a
 // campaign A is pressed for both, every kAcceptEveryMs, at most kAcceptPresses times.
-constexpr int64_t kAcceptFirstMs = 3000, kAcceptEveryMs = 3000;
-constexpr int kAcceptPresses = 5;
+constexpr int64_t kAcceptFirstMs = 2000, kAcceptEveryMs = 2000;
+constexpr int kAcceptPresses = 7;
+
+// The join cover (Josh, 2026-10-24: neither player may see the game's own co-op
+// join screens, not for one frame). A full-screen card in the menu style (lobby
+// panel 'C' view) goes up before those screens can exist: on the host at the
+// join approval (inside ProcessJoinSession, fable2_coop_joingate.h), on the
+// partner at the host's go. It comes down kCoverAfterSpawnMs after player 2
+// spawns (the screens close at the spawn; both PCs see the spawn), or after
+// kCoverMaxMs. While it is up the stock screens are answered underneath.
+constexpr int64_t kCoverAfterSpawnMs = 1500, kCoverMaxMs = 120000;
+inline std::atomic<int64_t> g_cover_since_ms{0};
+inline std::atomic<int64_t> g_cover_hide_at_ms{0};
+inline std::atomic<uint32_t> g_cover_epoch{0};
+inline void ShowCover(const std::string& text) {
+  g_cover_epoch.store(fable2::coophero::g_spawn_epoch.load());
+  g_cover_hide_at_ms.store(0);
+  g_cover_since_ms.store(fable2::f5lua::steady_ms());
+  rex_ui_set_lobby_view(("C" + text + "\nDThe co-op campaign is starting").c_str());
+  REXSYS_INFO("[coop] join cover up: {}", text);
+}
+inline void HideCover(const char* why) {
+  if (!g_cover_since_ms.exchange(0)) return;
+  g_cover_hide_at_ms.store(0);
+  rex_ui_set_lobby_view("");
+  REXSYS_INFO("[coop] join cover down ({})", why);
+}
+inline void cover_tick() {
+  const int64_t since = g_cover_since_ms.load();
+  if (!since) return;
+  const int64_t now = fable2::f5lua::steady_ms();
+  if (!g_cover_hide_at_ms.load() && fable2::coophero::g_spawn_epoch.load() != g_cover_epoch.load())
+    g_cover_hide_at_ms.store(now + kCoverAfterSpawnMs);
+  const int64_t hide_at = g_cover_hide_at_ms.load();
+  if (hide_at && now >= hide_at) HideCover("player 2 is in the world");
+  else if (now - since > kCoverMaxMs) HideCover("timed out");
+}
 inline SessionState& S() {
   static SessionState s;
   return s;
@@ -356,6 +393,7 @@ inline void on_partner_go(uint32_t ip) {
     S().tries = 0;
   }
   fable2::cooplobby::Close();
+  ShowCover("Joining your partner's campaign");
   REXSYS_INFO("[coop] partner: go from host {:08X}, joining when its game is joinable", ip);
 }
 
@@ -832,6 +870,7 @@ end
       if (now - s.since_ms > 300000) {
         REXSYS_INFO("[coop] partner: no join in 5 min ({} attempt(s)), giving up", s.tries);
         s.s = Session::kNone;
+        HideCover("no join");
         break;
       }
       if (now - s.since_ms < REXCVAR_GET(coop_partner_join_delay_ms)) break;  // rig only
@@ -992,6 +1031,14 @@ inline void OnFrame() {
     rex_content_set_save_filter(f.c_str());
   }
   if (!REXCVAR_GET(coop_campaign)) return;
+  static const bool font_set = [] {
+    // The menu panel draws with the game's own font, from the player's data.
+    const auto bft = fable2::cooptemplate::exe_dir() / "data" / "language" / "en-uk" / "fonts" / "gui_large.bft";
+    rex_ui_set_lobby_font(bft.string().c_str());
+    return true;
+  }();
+  (void)font_set;
+  cover_tick();
   static const bool backup_shown = (fable2::coopbackup::LoadLast(), true);  // F6, once
   (void)backup_shown;
   fable2::coopbackup::EnsureListener();  // the partner side of campaign backups (T039)
