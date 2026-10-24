@@ -32,9 +32,14 @@ extern "C" int rex_content_save_busy();
 namespace fable2::coopbusy {
 
 constexpr int64_t kProbeEveryMs = 1000, kStaleMs = 5000, kAfterLoadMs = 10000;
+// A probe that says busy for longer than this is not trusted (a query that
+// means something else must not block co-op for good); logged once.
+constexpr int64_t kMaxLuaBusyMs = 120000;
 
 inline std::atomic<int> g_lua_busy{0};
 inline std::atomic<int64_t> g_heard_ms{0};
+inline std::atomic<int64_t> g_busy_since_ms{0};
+inline std::atomic<bool> g_distrust_logged{false};
 inline std::mutex g_why_mu;
 inline std::string g_why;
 inline int64_t g_next_probe_ms = 0;
@@ -79,7 +84,9 @@ inline void OnBusyLine(std::string_view line) {
   if (eq == std::string_view::npos || eq + 5 >= line.size()) return;
   const bool busy = line[eq + 5] == '1';
   const int was = g_lua_busy.exchange(busy ? 1 : 0);
-  g_heard_ms.store(fable2::f5lua::steady_ms());
+  const int64_t now = fable2::f5lua::steady_ms();
+  g_heard_ms.store(now);
+  if (busy && !was) g_busy_since_ms.store(now);
   std::lock_guard<std::mutex> l(g_why_mu);
   g_why = busy && eq + 7 < line.size() ? std::string(line.substr(eq + 7)) : "";
   if (was != (busy ? 1 : 0)) REXSYS_INFO("[coop] host {}{}", busy ? "busy: " : "not busy", g_why);
@@ -94,6 +101,11 @@ inline std::string Busy() {
   const int64_t heard = g_heard_ms.load();
   if (!heard || now - heard > kStaleMs) return "no recent probe (paused?)";
   if (g_lua_busy.load()) {
+    if (now - g_busy_since_ms.load() > kMaxLuaBusyMs) {
+      if (!g_distrust_logged.exchange(true))
+        REXSYS_WARN("[coop] busy probe has said busy for over {} s: ignoring it", kMaxLuaBusyMs / 1000);
+      return "";
+    }
     std::lock_guard<std::mutex> l(g_why_mu);
     return g_why.empty() ? std::string("busy") : g_why;
   }
