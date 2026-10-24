@@ -796,6 +796,122 @@ def run_final():
         if both_ready_and_start(a, b, "final"):
             a.wait("final: host loads through the game's own Load Game", r"main menu: Load Game", 0, 20)
             join_phase(a, b, "final")
+        # Case 2: the partner leaves; the host returns to "Press A to start", passes
+        # the title with one A, continues the co-op save; the partner rejoins.
+        b.stop()
+        n = a.count(r"host: back at the front end")
+        a.wait("final2: host saves and returns to the front end", r"host: back at the front end", n, 240)
+        time.sleep(15)
+        a.shot("final2_host_title.png")
+        n = a.count(r"main menu: Co-op entry added")
+        a.past_title()
+        # The front end builds the menu some seconds after the title's A (17 s in
+        # the run of 2026-10-24): steer only once the Co-op entry exists.
+        a.wait("final2: main menu built with the Co-op entry", r"main menu: Co-op entry added", n, 60)
+        time.sleep(3)
+        open_coop_entry(a, "final2")
+        a.select("Host: continue a co-op save")
+        n = a.count(r"\[lobby\] open saves")
+        a.press("E")
+        a.wait("final2: the hub lists the co-op saves", r"\[lobby\] open saves", n, 10)
+        time.sleep(1.5)
+        a.shot("final2_host_saves.png")
+        n = a.count(r"\[lobby\] open host kind=continue")
+        a.press("E")  # the newest campaign: the one just played
+        a.wait("final2: the save's lobby opens", r"\[lobby\] open host kind=continue", n, 10)
+        b = Game("mod-b", "partner")
+        b.start()
+        b.past_title()
+        open_coop_entry(b, "final2")
+        partner_joins(b, "Continue TestA", "final2")
+        n = a.count(r"main menu: Load Game")
+        if both_ready_and_start(a, b, "final2"):
+            a.wait("final2: host loads through the game's own Load Game", r"main menu: Load Game", n, 20)
+            join_phase(a, b, "final2")
+    finally:
+        for g in (a, b):
+            g.stop()
+        relay.kill()
+
+
+def wait_row(g, prefix, what, timeout=20):
+    """Waits for a panel row (from the [lobby] view log lines) to appear."""
+    t = time.time()
+    while time.time() - t < timeout:
+        if any(r[0].startswith(prefix) for r in g.rows()):
+            note("PASS", f"{g.who}: {what}")
+            return True
+        time.sleep(0.5)
+    note("FAIL", f"{g.who}: {what} (no row '{prefix}' in {timeout} s; rows {g.rows()})")
+    return False
+
+
+def menu_then_coop(g, tag, n_menu):
+    """After a title A: wait until the front end has built the menu with the
+    Co-op entry, then Down twice to Co-op and A -> the hub."""
+    g.wait(f"{tag}: main menu built with the Co-op entry", r"main menu: Co-op entry added", n_menu, 90)
+    time.sleep(2)  # the menu's slide-in
+    return open_coop_entry(g, tag)
+
+
+def run_last():
+    """778069c, the unproven part: in the world once; the partner leaves; the host
+    returns to the title; Co-op -> continue the co-op save; the partner rejoins."""
+    setup_tomls()
+    relay_log = open(os.path.join(OUT, "relay_last.log"), "w")
+    relay = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                           "coop_relay.py")], stdout=relay_log, stderr=relay_log)
+    a, b = Game("mod-a", "host"), Game("mod-b", "partner")
+    a.start()
+    b.start()
+    try:
+        for g in (a, b):
+            n = g.count(r"main menu: Co-op entry added")
+            g.past_title()
+            g.n_menu = n
+        menu_then_coop(a, "last", a.n_menu)
+        a.shot("1_main_menu_coop_row_778069c.png")
+        host_new_campaign(a, "last")
+        menu_then_coop(b, "last", b.n_menu)
+        wait_row(b, "Join TestA", "last: the host's lobby is listed")
+        partner_joins(b, "Join TestA", "last")
+        wait_row(a, "Start", "last: host lobby shows the partner")
+        if not both_ready_and_start(a, b, "last"):
+            return
+        a.wait("last: host loads through the game's own Load Game", r"main menu: Load Game", 0, 20)
+        if not join_phase(a, b, "last"):
+            return
+        # The partner leaves; the host saves and returns to the title.
+        b.stop()
+        n = a.count(r"host: back at the front end")
+        a.wait("last2: host saves and returns to the front end", r"host: back at the front end", n, 240)
+        n_menu = a.count(r"main menu: Co-op entry added")
+        a.wait("last2: the title is up (front end menu state)", r"\[coop\] message:", 0, 5)
+        time.sleep(10)  # the "left the campaign" card is up for 12 s; the title is under it
+        a.shot("last2_host_title.png")
+        a.past_title()
+        menu_then_coop(a, "last2", n_menu)
+        wait_row(a, "Host: continue a co-op save", "last2: the hub offers the co-op saves")
+        a.select("Host: continue a co-op save")
+        n = a.count(r"\[lobby\] open saves")
+        a.press("E")
+        a.wait("last2: the hub lists the co-op saves", r"\[lobby\] open saves", n, 10)
+        a.shot("last2_host_saves.png")
+        n = a.count(r"\[lobby\] open host kind=continue")
+        a.press("E")  # the newest campaign: the one just played
+        a.wait("last2: the save's lobby opens", r"\[lobby\] open host kind=continue", n, 10)
+        b = Game("mod-b", "partner")
+        b.start()
+        n = b.count(r"main menu: Co-op entry added")
+        b.past_title()
+        menu_then_coop(b, "last2", n)
+        wait_row(b, "Continue TestA", "last2: the campaign is listed for the partner")
+        partner_joins(b, "Continue TestA", "last2")
+        wait_row(a, "Start", "last2: host lobby shows the partner")
+        n = a.count(r"main menu: Load Game")
+        if both_ready_and_start(a, b, "last2"):
+            a.wait("last2: host loads through the game's own Load Game", r"main menu: Load Game", n, 20)
+            join_phase(a, b, "last2")
     finally:
         for g in (a, b):
             g.stop()
@@ -805,7 +921,7 @@ def run_final():
 def main():
     os.makedirs(OUT, exist_ok=True)
     mode = sys.argv[1] if len(sys.argv) > 1 else "coop"
-    {"coop": run_coop, "solo": run_solo, "multi": run_multi, "menu": run_menu, "menu2": run_menu2, "err": run_err, "final": run_final}[mode]()
+    {"coop": run_coop, "solo": run_solo, "multi": run_multi, "menu": run_menu, "menu2": run_menu2, "err": run_err, "final": run_final, "last": run_last}[mode]()
     with open(os.path.join(OUT, f"results_{mode}.txt"), "w", encoding="utf-8") as f:
         f.write("\n".join(results) + "\n")
     return 0 if not any(r.startswith("FAIL") for r in results) else 1
