@@ -54,16 +54,23 @@ inline fs::path exe_dir() {
 #endif
 }
 
-inline fs::path template_dir() { return exe_dir() / "coop_template"; }
+// The starter save for the host's hero: coop_template_female for a female host
+// when it is there (tools/make_female_template.py; the in-game gender switch
+// does not change the hero, T021a), else coop_template.
+inline fs::path template_dir(bool female = false) {
+  const fs::path f = exe_dir() / "coop_template_female";
+  if (female && fs::exists(f / "template.txt") && fs::exists(f / "slot" / "mainsave.bin")) return f;
+  return exe_dir() / "coop_template";
+}
 
 struct TemplateInfo {
   bool female = false;
   std::string source;
 };
 
-inline std::optional<TemplateInfo> ReadTemplate() {
-  std::ifstream in(template_dir() / "template.txt");
-  if (!in || !fs::exists(template_dir() / "slot" / "mainsave.bin")) return std::nullopt;
+inline std::optional<TemplateInfo> ReadTemplate(bool female = false) {
+  std::ifstream in(template_dir(female) / "template.txt");
+  if (!in || !fs::exists(template_dir(female) / "slot" / "mainsave.bin")) return std::nullopt;
   TemplateInfo t;
   std::string line;
   while (std::getline(in, line)) {
@@ -130,13 +137,13 @@ inline std::optional<NewSlot> NewestSlot() {
 
 // Copies the template into the next free slot. Returns nothing (and leaves
 // nothing behind) on any failure.
-inline std::optional<NewSlot> CreateCampaignSlot(std::string* error) {
+inline std::optional<NewSlot> CreateCampaignSlot(std::string* error, bool female = false) {
   auto fail = [&](const std::string& why) -> std::optional<NewSlot> {
     if (error) *error = why;
     REXSYS_ERROR("[coop] starter save: {}", why);
     return std::nullopt;
   };
-  if (!ReadTemplate()) return fail("no template in " + template_dir().string());
+  if (!ReadTemplate(female)) return fail("no template in " + template_dir(female).string());
   uint64_t xuid = 0;
   const auto title = ProfileTitleDir(&xuid);
   if (!title) return fail("no profile save folder under " + (exe_dir() / "saves").string());
@@ -159,7 +166,7 @@ inline std::optional<NewSlot> CreateCampaignSlot(std::string* error) {
   };
   fs::create_directories(dst, ec);
   fs::create_directories(headers, ec);
-  for (const auto& e : fs::directory_iterator(template_dir() / "slot", ec)) {
+  for (const auto& e : fs::directory_iterator(template_dir(female) / "slot", ec)) {
     if (!e.is_regular_file() || e.path().filename() == "saveuid.bin") continue;
     fs::copy_file(e.path(), dst / e.path().filename(), fs::copy_options::overwrite_existing, ec);
     if (ec) {
@@ -185,7 +192,7 @@ inline std::optional<NewSlot> CreateCampaignSlot(std::string* error) {
   // copy_file keeps the template's times: make the slot the newest save.
   fs::last_write_time(dst / "mainsave.bin", fs::file_time_type::clock::now(), ec);
   REXSYS_INFO("[coop] starter save: created {} for XUID {:016X} from {}", dst.string(), xuid,
-              template_dir().string());
+              template_dir(female).string());
   return NewSlot{*name, dst};
 }
 

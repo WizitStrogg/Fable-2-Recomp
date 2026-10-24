@@ -243,8 +243,9 @@ inline void on_host_start() {
       slot = campaign_slot(cid);
       if (!slot) error = "the campaign's save was not found";
     } else {
-      tmpl = fable2::cooptemplate::ReadTemplate();
-      slot = fable2::cooptemplate::CreateCampaignSlot(&error);
+      const bool female = rec.gender1 == fable2::cooplobby::Gender::kFemale;
+      tmpl = fable2::cooptemplate::ReadTemplate(female);
+      slot = fable2::cooptemplate::CreateCampaignSlot(&error, female);
       if (slot) {
         fable2::coopcampaign::Marker m;
         m.campaign_id = cid;
