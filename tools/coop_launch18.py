@@ -7,6 +7,7 @@ is noted and the run goes on.
     -> coop_go -> b joins -> player 2 spawns
   3 T017 capture2   4 P4b save (campaign marker kept)   5 P6 partner loss
   T030/T031 player 2 file written at saves and restored on continue; 7 T027 host loss
+  T028: mod-c (TestC, a stranger) presses F9 the moment the host world is up; refused
   6 T025/T026: a restarts, Continue on the campaign save opens its lobby, b restarts
     and finds it, both ready, Start reloads the same slot, b rejoins
 Evidence: research/001-evidence/launch18/ (under D:/Fable2-LAN).
@@ -98,6 +99,18 @@ def open_coop(r, who):
     time.sleep(3)
 
 
+def tree_hash(root):
+    import hashlib
+    h = hashlib.sha256()
+    for d, _, files in sorted(os.walk(root)):
+        for name in sorted(files):
+            p = os.path.join(d, name)
+            h.update(p.encode())
+            with open(p, "rb") as f:
+                h.update(f.read())
+    return h.hexdigest()[:16]
+
+
 VIEW_RE = re.compile(r"\[lobby\] view: (.*)$")
 
 
@@ -136,9 +149,15 @@ def main() -> int:
     a.start(trace=True)
     b = coop_rig.Instance("b")
     b.start()
+    c = coop_rig.Instance("c")
+    c_slot = r"D:\Fable2-LAN\mod-c\saves"
+    c_hash0 = tree_hash(c_slot)
+    c.start()
+    note("INFO", f"mod-c pid {c.pid} log {c.log}; mod-c saves hash {c_hash0}")
     note("INFO", f"mod-a pid {a.pid} port {a.port} log {a.log}; mod-b pid {b.pid} port {b.port} log {b.log}")
     past_title(a, "a")
     past_title(b, "b")
+    past_title(c, "c")
 
     # --- 1 lobby with both players, host hero female ------------------------------------
     open_coop(a, "a")
@@ -195,6 +214,8 @@ def main() -> int:
         note("INFO", l[l.find("P2STATE"):][:300])
     shots(a, "2_a_adult_world")
     expect(a, "a: host world up, coop_go published", r"host world up \(starter save", 0, 120)
+    ps("key", c.pid, "F9")  # T028: a stranger tries to join the campaign
+    note("INFO", "T028: c pressed F9")
     expect(b, "b: coop_go received, joining", r"coop_go received", n_go_b, 60)
     # Phase 1: gates logged, nothing forced; the partner retries every 15 s.
     a.cmd({"cmd": "cvar", "name": "coop_join_gate_log", "value": "true"})
@@ -213,6 +234,15 @@ def main() -> int:
         note("INFO", f"stopped; mod-a pid {a.pid} and mod-b pid {b.pid} left running")
         return 1
     expect(a, "T031a: player 2 seeded from the host's starter profile", r"player 2 seeded from the host", 0, 30)
+    expect(a, "T028: the stranger's join was refused", r"join from [0-9A-F]+ refused: this campaign's partner", 0, 5)
+    for l in grep_log(a, r"refused: this campaign|friends check", 4):
+        note("INFO", l[l.find("[joingate]"):][:200])
+    for l in grep_log(c, r"LAN lobby|XSession", 6):
+        note("INFO", "c: " + l[l.find("["):][:200])
+    shots(c, "2_c_after_refusal")
+    c.stop()
+    c_hash1 = tree_hash(c_slot)
+    note("PASS" if c_hash1 == c_hash0 else "FAIL", f"mod-c saves untouched ({c_hash1})")
     time.sleep(10)
     shots(a, "2_a_camp_with_p2")
     shots(b, "2_b_camp")
