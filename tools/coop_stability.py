@@ -3,7 +3,8 @@
 campaign (starter save), mod-b joins, then both heroes keep moving near the
 Gypsy camp for --minutes (default 120). Every 5 min: both processes alive,
 partner still in the world, no crash line in either log, working-set memory
-recorded. Every 30 min: a pause-menu save on the host. Screenshots every 15 min.
+recorded. Every 30 min: a pause-menu save on the host, and the partner must
+receive and verify a backup of the slot (T040). Screenshots every 15 min.
 Stops early (cleanly, results written) when D:/Fable2-LAN/tmp/stop-stability
 exists, so the PC can be handed back.
 Evidence: research/001-evidence/stability/ (under D:/Fable2-LAN).
@@ -140,7 +141,11 @@ def main() -> int:
             next_save = now + 30 * 60
             n = L.count(a, r"player 2 file written")
             pause_save(a)
+            nb = L.count(b, r"backup of campaign .* kept")
             L.expect(a, f"save at {int((now - start) / 60)} min wrote player 2", r"player 2 file written", n, 20)
+            # T040: the partner verified (SHA-256 manifest) and kept a backup of the slot.
+            L.expect(b, f"save at {int((now - start) / 60)} min: backup kept on the partner",
+                     r"backup of campaign .* kept", nb, 30)
         try:
             walk(a, step)
             walk(b, step)
