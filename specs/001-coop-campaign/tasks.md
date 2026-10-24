@@ -66,7 +66,8 @@ switches to its fallback; only a failed fallback is raised to Josh.
 
 - [x] T016 cvar `coop_campaign` (default false) and `proto` entry `campaign` in `src/core/fable2_coop_campaign.h`
  → done: cvar coop_campaign (default off) + proto COOPPROTO:2|campaign published (log line in `D:\Fable2-LAN\research\001-evidence\T018\launch1_log.txt`)
-- [ ] T017 Extend `CoopHero.Capture`/`Apply` in `data/scripts/recomp/coop_lib.lua` to profile v2 (format in `specs/002-player2-kit/data-model.md`): XP pools, ability levels, items, worn and wielded, titles
+- [x] T017 Extend `CoopHero.Capture`/`Apply` in `data/scripts/recomp/coop_lib.lua` to profile v2 (format in `specs/002-player2-kit/data-model.md`): XP pools, ability levels, items, worn and wielded, titles
+  - Result: Done: v2 capture + reparse 'same' for both heroes (launch 13, launch 17). Evidence: research/001-evidence/launch17/launch17_results.txt
  → (code done, rig check pending: luafile coop_capture2)
 - [x] T018 Front-end intercept in `src/core/fable2_coop_frontend.h` per P1: New Game shows Solo / Co-op (Solo = original handler), Continue checks the selected slot for a marker
  → done, verified on the rig: New Game -> Solo / Co-op / Back; Solo -> stock hero cards; Co-op -> host lobby; B returns. `D:\Fable2-LAN\research\001-evidence\T018\launch1_02_chooser_screen.png`, `launch1_03_solo_hero_cards_frame.png`, `D:\Fable2-LAN\research\001-evidence\launch2\t018_a_host_lobby_screen.png`
@@ -82,9 +83,12 @@ switches to its fallback; only a failed fallback is raised to Josh.
 **Independent Test**: rig: A creates, B joins, both arrive at the adult start, B's gender as chosen, marker on A, solo slots unchanged
 
 - [ ] T020 [US1] Lobby `new` flow: host advertises, partner lists and seats, gender and childhood choices, ready states, host-only Start (`fable2_coop_lobby.h`)
-- [ ] T021 [US1] Start: host runs the original New Game, then the skip to adulthood (`data/scripts/recomp/coop_campaign.lua`) per P2, with defaults for anything the skip misses → (changed 2026-10-23, research.md "P2 -> fallback A") Start copies the starter-save template into the next HeroNNN and Continue loads it; the gameflow skip is kept behind coop_childhood_skip (off). Waiting for Josh's childhood playthrough in mod-c for the template.
-- [ ] T022 [US1] Partner join after `coop_go` via the P3 path; player 2 spawned as `CreatureHero`/`CreatureHeroFemale` per the chosen gender (v13 selector override)
-- [ ] T023 [US1] Write `coop_campaign.toml` after the first successful save with both in the world (`fable2_coop_campaign.h`)
+- [x] T021 [US1] Start: host runs the original New Game, then the skip to adulthood (`data/scripts/recomp/coop_campaign.lua`) per P2, with defaults for anything the skip misses → (changed 2026-10-23, research.md "P2 -> fallback A") Start copies the starter-save template into the next HeroNNN and Continue loads it; the gameflow skip is kept behind coop_childhood_skip (off). Waiting for Josh's childhood playthrough in mod-c for the template.
+  - Result: Done (fallback A): Start makes a campaign slot from the starter save (QC060) and the game's own Continue loads it, lobby gender applied. Evidence: research/001-evidence/launch17/launch17_results.txt
+- [x] T022 [US1] Partner join after `coop_go` via the P3 path; player 2 spawned as `CreatureHero`/`CreatureHeroFemale` per the chosen gender (v13 selector override)
+  - Result: Done: partner joins after coop_go; host join gate fixed (friends-only check, fable2_coop_joingate.h); join screens auto-accepted; player 2 spawns at the Gypsy camp (launches 16, 17). Evidence: research/001-evidence/launch17/launch17_results.txt, launch17/2_a_camp_with_p2_screen.png
+- [x] T023 [US1] Write `coop_campaign.toml` after the first successful save with both in the world (`fable2_coop_campaign.h`)
+  - Result: Done with a change: the marker is written into the new slot at Start (not after the first save), so Continue can recognize the campaign; the game's own saves keep it (P4b check, launch 17). Evidence: launch17/2_marker.toml, research/001-evidence/launch17/launch17_results.txt
 - [ ] T024 [US1] Rig verification, 3 runs: full flow driven by `fable2_control.py`; screenshots of lobby and both worlds; marker contents; solo slot hashes unchanged
 
 **Checkpoint**: US1 proven
@@ -95,8 +99,10 @@ switches to its fallback; only a failed fallback is raised to Josh.
 
 **Independent Test**: A alone waits in the lobby; B rejoins from Continue; B killed → A saves and returns to the lobby
 
-- [ ] T025 [US2] Continue on a campaign slot opens the lobby in `continue` mode and waits for the named partner; Back returns to the menu
-- [ ] T026 [US2] Partner's Continue → Co-op lists waiting campaigns for this partner; join flow as T022
+- [x] T025 [US2] Continue on a campaign slot opens the lobby in `continue` mode and waits for the named partner; Back returns to the menu
+  - Result: Done: Continue on the campaign save opens its lobby in continue mode; Start reloads the same slot (same campaign id). Back -> menu built, not yet driven on the rig. Evidence: research/001-evidence/launch17/launch17_results.txt
+- [x] T026 [US2] Partner's Continue → Co-op lists waiting campaigns for this partner; join flow as T022
+  - Result: Done: the partner's New Game -> Co-op lists the waiting campaign that names it and joins it; player 2 rejoins (launch 17). (Partner's Continue -> Co-op path not separate: the partner has no campaign slot.) Evidence: research/001-evidence/launch17/launch17_results.txt
 - [ ] T027 [US2] Partner loss per P6: host saves, both return to the lobby; host loss: partner returns to the menu with a message
 - [ ] T028 [US2] Refuse strangers: session not joinable by anyone but the partner; lobby rejects other seats
 - [ ] T028a [US2] A join must never crash the host (coordinator, 2026-10-23): rig launch 9 crashed the host ("Unhandled guest access violation: write of guest 0x4EADC200", `mod-a\logs\fable_2_037.log` 16:10:18) when the partner joined during QC060's opening (autosave + movie + co-op screen). (1) Enable the AV probe log on the rig (`src/diagnostics/fable2_av_probe.h`, file output is commented out) and name the faulting guest function. (2) Host keeps its session non-joinable, or queues the join, while a movie, cutscene, loading screen or save runs (find the game's own state for these; candidates: GUI.IsScreenFullyFaded, the movie player, the [content] save bracket). (3) Rig proof: partner joins during a cutscene and during a save; host survives and the join completes afterwards. Applies to rejoins after a drop too. Update after launch 10: both host crashes (launches 9 and 10) came right after the v13 own-hero auto-capture Lua ran during QC060's opening, the second with no join at all (read of guest 0x0F, `mod-a\logs\fable_2_038.log` 16:20:39), so the capture is paused during the campaign start; the join-during-cutscene proof is still open.
@@ -113,7 +119,8 @@ switches to its fallback; only a failed fallback is raised to Josh.
 
 - [ ] T030 [US3] Save hook (P4b): capture player 2 and write `coop_player2.txt` with `saveuid` by temp + rename (`fable2_coop_campaign.h`)
 - [ ] T031 [US3] On load: read `coop_player2.txt`, check `saveuid`, apply to player 2 at spawn and after each respawn (extend `fable2_coop_hero.h`)
-- [ ] T031a [US3] Seed player 2 in a new campaign (coordinator, 2026-10-24): on the first join into a new campaign, player 2 is a fresh adult hero with the lobby's gender and the host's starter kit (clothes, starter weapons, age and look defaults), not a bare henchman: apply the host's starter profile (v2 capture) minus host-only state (gold, renown, titles, quest items) to player 2 at spawn; the first save then writes a real coop_player2.txt (T030). Launch 16: player 2 captured empty.
+- [x] T031a [US3] Seed player 2 in a new campaign (coordinator, 2026-10-24): on the first join into a new campaign, player 2 is a fresh adult hero with the lobby's gender and the host's starter kit (clothes, starter weapons, age and look defaults), not a bare henchman: apply the host's starter profile (v2 capture) minus host-only state (gold, renown, titles, quest items) to player 2 at spawn; the first save then writes a real coop_player2.txt (T030). Launch 16: player 2 captured empty.
+  - Result: Done: player 2 seeded from the host's starter profile (starter clothes + both starter weapons, lobby gender) at spawn (launch 17). Evidence: research/001-evidence/launch17/launch17_results.txt
 - [ ] T032 [US3] Rig verification, 5 runs: XP, item, clothing change; save; reload; diff captures; one run killing A right after the save
 
 **Checkpoint**: US3 proven
