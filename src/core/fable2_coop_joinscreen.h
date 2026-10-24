@@ -77,11 +77,17 @@ extern "C" void __imp__sub_82841730(PPCContext& ctx, uint8_t* base);
 extern "C" void sub_82841730(PPCContext& ctx, uint8_t* base) {
   using namespace fable2::coopjoinscreen;
   const uint32_t reader = ctx.r3.u32;
+  const int32_t input = int32_t(ctx.r4.u32);  // the screen's input code this frame
   __imp__sub_82841730(ctx, base);
   const uint32_t ctrl = g_controller.load();
-  if (!ctrl || ctx.r3.u32 != 0 || !REXCVAR_GET(coop_join_screen_skip) || !REXCVAR_GET(coop_campaign))
-    return;
+  if (!ctrl || !REXCVAR_GET(coop_join_screen_skip) || !REXCVAR_GET(coop_campaign)) return;
   if (reader != ctrl + 308 && reader != ctrl + 348) return;
+  // No action this frame: the reader hands its input code straight back (24 every
+  // idle frame, launch 28; 0 in some branches). Real actions are 28..38.
+  const int32_t got = int32_t(ctx.r3.u32);
+  if ((got != 0 && got != input) || (input >= 28 && input <= 38)) return;
+  if (REXCVAR_GET(coop_join_screen_probe) && g_skips.load() == 0)
+    REXSYS_INFO("[joinscreen] reader idle: input {} returned {}", input, got);
   const int64_t now = fable2::f5lua::steady_ms();
   if (now - g_last_skip_ms.load() < kSkipEveryMs) return;
   g_last_skip_ms.store(now);
