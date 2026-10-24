@@ -17,6 +17,7 @@
 #include "fable2_coop_frontend.h"
 // Co-op join gate probe / force (starter save inside QC060).
 #include "fable2_coop_joingate.h"
+#include "fable2_coop_joinscreen.h"
 
 #include "fable_2_app.h"
 #include "fps_meter.h"
