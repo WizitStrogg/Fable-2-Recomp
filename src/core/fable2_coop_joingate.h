@@ -142,6 +142,55 @@ inline void after_join(uint8_t* base, const JoinRestore& r) {
   }
 }
 
+// --- inside ProcessJoinSession ------------------------------------------------------------
+//
+// The NOTHOSTING cause in QC060 (launch 15: every gate above passed): when the host's
+// options say friends only (profile +412 == 1) and the request is public, the host
+// asks XamUserAreUsersFriends (sub_82CBC158: user, xuids, count, &result, overlapped)
+// about the joiner, and the SDK answers "no friends" for everyone. During a co-op
+// campaign the LAN partner counts as a friend, for this call only.
+//
+// coop_join_gate_log also logs the game's own debug prints made inside the handler
+// (sub_82172EE8: "JOINRESPONSE_*", slot counts) and the result in the reply it sends
+// (sub_822EB8E0, message type 1: result u32 at +3).
+
+inline thread_local bool t_in_join = false;
+
+inline std::string guest_str(uint8_t* base, uint32_t a, size_t max = 120) {
+  std::string s;
+  if (!ok(a)) return s;
+  for (size_t i = 0; i < max && base[a + i]; ++i) s.push_back(static_cast<char>(base[a + i]));
+  while (!s.empty() && (s.back() == '\n' || s.back() == '\r')) s.pop_back();
+  return s;
+}
+
+inline void on_friends(PPCContext& ctx, uint8_t* base, uint32_t result_ptr, uint32_t xuids) {
+  if (!t_in_join || !ok(result_ptr)) return;
+  const uint32_t got = rd32(base, result_ptr);
+  const bool campaign = REXCVAR_GET(coop_campaign);
+  if (campaign && !got) wr32(base, result_ptr, 1);
+  REXSYS_INFO("[joingate] friends check for {:08X}{:08X}: game said {}, {} (r3={:08X})",
+              rd32(base, xuids), rd32(base, xuids + 4), got,
+              campaign && !got ? "co-op campaign: treated as a friend" : "unchanged", ctx.r3.u32);
+}
+
+inline void on_print(PPCContext& ctx, uint8_t* base) {
+  if (!t_in_join || !REXCVAR_GET(coop_join_gate_log)) return;
+  REXSYS_INFO("[joingate] game: {} ({})", guest_str(base, ctx.r3.u32), ctx.r4.u32);
+}
+
+inline void on_send(PPCContext& ctx, uint8_t* base) {
+  if (!t_in_join || !REXCVAR_GET(coop_join_gate_log)) return;
+  const uint32_t msg = ctx.r4.u32;
+  if (!ok(msg)) return;
+  static const char* kNames[] = {"APPROVED", "SESSIONFULL", "DIFFERENTVERSION", "NOTHOSTING",
+                                 "DIFFERENTVERSIONORDLCS"};
+  const uint8_t type = rd8(base, msg + 2);
+  const uint32_t res = rd32(base, msg + 3);
+  REXSYS_INFO("[joingate] reply type {} result {} ({})", type, res,
+              type == 1 && res < 5 ? kNames[res] : "-");
+}
+
 // --- in-session messages (sub_8230DFF0) --------------------------------------------------
 
 inline void before(PPCContext& ctx, uint8_t* base) {
@@ -167,8 +216,29 @@ inline void before(PPCContext& ctx, uint8_t* base) {
 extern "C" void __imp__sub_822EE2D8(PPCContext& ctx, uint8_t* base);
 extern "C" void sub_822EE2D8(PPCContext& ctx, uint8_t* base) {
   const auto restore = fable2::coopjoingate::before_join(ctx, base);
+  fable2::coopjoingate::t_in_join = true;
   __imp__sub_822EE2D8(ctx, base);
+  fable2::coopjoingate::t_in_join = false;
   fable2::coopjoingate::after_join(base, restore);
+}
+
+extern "C" void __imp__sub_82CBC158(PPCContext& ctx, uint8_t* base);
+extern "C" void sub_82CBC158(PPCContext& ctx, uint8_t* base) {
+  const uint32_t xuids = ctx.r4.u32, result_ptr = ctx.r6.u32;
+  __imp__sub_82CBC158(ctx, base);
+  fable2::coopjoingate::on_friends(ctx, base, result_ptr, xuids);
+}
+
+extern "C" void __imp__ProcessAndProcessAndProcess2254_82172EE8(PPCContext& ctx, uint8_t* base);
+extern "C" void ProcessAndProcessAndProcess2254_82172EE8(PPCContext& ctx, uint8_t* base) {
+  fable2::coopjoingate::on_print(ctx, base);
+  __imp__ProcessAndProcessAndProcess2254_82172EE8(ctx, base);
+}
+
+extern "C" void __imp__sub_822EB8E0(PPCContext& ctx, uint8_t* base);
+extern "C" void sub_822EB8E0(PPCContext& ctx, uint8_t* base) {
+  fable2::coopjoingate::on_send(ctx, base);
+  __imp__sub_822EB8E0(ctx, base);
 }
 
 extern "C" void __imp__sub_8230DFF0(PPCContext& ctx, uint8_t* base);
