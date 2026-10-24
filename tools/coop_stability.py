@@ -140,8 +140,10 @@ def main() -> int:
         if now >= next_save:
             next_save = now + 30 * 60
             n = L.count(a, r"player 2 file written")
-            pause_save(a)
+            # Counted before the save: the backup lands within ~15 ms of the save
+            # (stability run 2026-10-24 counted it after and reported 4 false FAILs).
             nb = L.count(b, r"backup of campaign .* kept")
+            pause_save(a)
             L.expect(a, f"save at {int((now - start) / 60)} min wrote player 2", r"player 2 file written", n, 20)
             # T040: the partner verified (SHA-256 manifest) and kept a backup of the slot.
             L.expect(b, f"save at {int((now - start) / 60)} min: backup kept on the partner",

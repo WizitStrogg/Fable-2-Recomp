@@ -158,9 +158,11 @@ switches to its fallback; only a failed fallback is raised to Josh.
 
 ## Phase 7: User Story 5 - The partner keeps a backup (Priority: P3)
 
-- [ ] T039 [US5] Backup sender and receiver per P7 and `contracts/campaign-files.md` (`src/core/fable2_coop_backup.h`); F6 shows the latest backup date
+- [x] T039 [US5] Backup sender and receiver per P7 and `contracts/campaign-files.md` (`src/core/fable2_coop_backup.h`); F6 shows the latest backup date
+  - Result: Done: proven in the T044 run: 4 of 4 saves sent (OK) and kept on the partner with hashes ok. Evidence: research/001-evidence/stability/T044-T040-NOTES.txt
   - Built (not yet on the rig): src/core/fable2_coop_backup_fmt.h (SHA-256, CRC-32, store-only zip, manifest, keep-10; tools/coop_backup_test.cpp 13/13, the zip opens in Python zipfile with all hashes matching) and fable2_coop_backup.h (host sends after each save with player 2 present over TCP 3077; partner accepts only from its joined host, verifies, keeps 10; F6 shows the newest). Rig proof runs inside T044 (backup kept on the partner after each save).
-- [ ] T040 [US5] Rig verification: hash-equal copy on B after each session; last 10 kept
+- [x] T040 [US5] Rig verification: hash-equal copy on B after each session; last 10 kept
+  - Result: Done: newest backup byte-identical to the host slot (all 8 files); backups kept per save (4 in 2 h); keep-10 rule unit-tested (tools/coop_backup_test.cpp). Evidence: research/001-evidence/stability/T044-T040-NOTES.txt
 - [ ] T041 [JOSH] Gate 2 for v14.1; install and friend zip after approval
 
 ---
@@ -171,7 +173,8 @@ switches to its fallback; only a failed fallback is raised to Josh.
   - Result: Done: FUNCTION_NAMES.md section K (ProcessJoinSession, the friends thunk, debug print, send message, message sizes, in-session handler, communication checks, FrontMenu_PressBitDispatch, AllowHenchman, data addresses, Lua natives).
 - [x] T043 [P] Update friend-package README and F6 help text
   - Result: Done (draft): release-v14/README-v14.txt (v13 README + 'What's new in v14', port 3077 for backups); F6 help is the box's own label and status lines (coop_campaign_status, coop_backup_last).
-- [ ] T044 Two-hour stability run on the rig with both players active; solo slots re-hashed
+- [x] T044 Two-hour stability run on the rig with both players active; solo slots re-hashed
+  - Result: Done: 120.1 min with both players moving, no crash, partner never lost; memory flat after 60 min (host 1525->1530 MB, partner 1303->1304 MB); 4 saves each wrote player 2 and a verified backup. Solo slots of the partner were not loaded. Evidence: research/001-evidence/stability/T044-T040-NOTES.txt, stability/memory.tsv, stability/stability_results.txt
   - Pre-run 2026-10-24 03:53Z stopped after 4 min for a gfx-test launch (no failure; research/001-evidence/stability-prerun/). Full run pending.
 - [ ] T045 [JOSH] Merge `coop/001-coop-campaign` into `systemlink` in both repos after approval
 - [ ] T046 Update `specs/README.md`; run `/speckit-plan` and `/speckit-tasks` for 002 and post them for Gate 1
