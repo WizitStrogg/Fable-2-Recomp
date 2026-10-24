@@ -80,6 +80,7 @@ struct JoinRestore {
   uint32_t old_state = 0;
   uint32_t flags = 0;    // [0x834971D0] at the call
   bool open = false;     // its +245 was set before the call
+  bool refused = false;  // T028: +245 cleared for a stranger, put back after
 };
 
 inline void log_join(uint8_t* base, uint32_t mgr, uint32_t req, const char* when) {
@@ -116,6 +117,18 @@ inline JoinRestore before_join(PPCContext& ctx, uint8_t* base) {
       if (listed(force, "245")) wr8(base, flags + 245, 1);
     }
   }
+  // T028: while a campaign is hosted only its partner may join. The handler
+  // then answers SESSIONFULL (+245 clear), which the joiner shows as full.
+  const uint64_t partner = fable2::coopfrontend::g_partner_xuid.load();
+  if (REXCVAR_GET(coop_campaign) && partner && ok(flags) && rd8(base, flags + 245)) {
+    const uint64_t who = (uint64_t(rd32(base, req + 3 + 77)) << 32) | rd32(base, req + 3 + 81);
+    if (who != partner) {
+      wr8(base, flags + 245, 0);
+      r.refused = true;
+      REXSYS_INFO("[joingate] join from {:016X} refused: this campaign's partner is {:016X}", who,
+                  partner);
+    }
+  }
   r.open = ok(flags) && rd8(base, flags + 245);
   if (force.empty()) return r;
   if (listed(force, "456")) {
@@ -135,6 +148,7 @@ inline JoinRestore before_join(PPCContext& ctx, uint8_t* base) {
 // screens' auto-accept on the host (fable2_coop_frontend.h).
 inline void after_join(uint8_t* base, const JoinRestore& r) {
   if (r.state) wr32(base, r.mgr + 456, r.old_state);
+  if (r.refused) wr8(base, r.flags + 245, 1);
   if (r.open && ok(r.flags) && !rd8(base, r.flags + 245)) {
     REXSYS_INFO("[joingate] join approved");
     if (REXCVAR_GET(coop_campaign))

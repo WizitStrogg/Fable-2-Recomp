@@ -21,6 +21,9 @@
 #include <cstdio>
 #include <ctime>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <optional>
 #include <functional>
 #include <mutex>
 #include <string>
@@ -31,6 +34,7 @@
 
 #include "fable2_coop_campaign.h"
 #include "fable2_coop_lobby.h"
+#include "fable2_coop_p2file.h"
 #include "fable2_coop_template.h"
 #include "fable2_front_hooks.h"
 #include "../diagnostics/fable2_state_probe.h"
@@ -50,6 +54,9 @@ inline int g_pass_a = 0;            // injected A presses to let through
 inline int64_t g_last_press_ms = 0;
 inline bool g_past_title = false;   // the title's "Press A" was passed this visit
 inline bool g_continue_swallowed = false;  // the last A on Continue opened a campaign lobby
+// Host: the campaign partner's online XUID; joins from anyone else are refused
+// while a campaign is hosted (T028, fable2_coop_joingate.h). 0 = not known.
+inline std::atomic<uint64_t> g_partner_xuid{0};
 inline uint32_t g_last_mask = 0;
 // The A that closes a panel is still held on the next poll, so the game's own
 // dispatch receives it right after the panel closes (launch 3: it reopened the
@@ -69,6 +76,10 @@ inline bool in_main_menu() {
 }
 
 inline void open_chooser();
+inline std::optional<std::string> restore_player2_chunk(const std::filesystem::path& slot);
+inline void p2_watch_start(const std::filesystem::path& slot);
+inline void p2_watch_stop();
+
 
 // Lets the next A press (normally the one that closed the panel) reach the
 // stock New Game.
@@ -81,6 +92,8 @@ inline void swallow_closing_a() { g_swallow_a_until = fable2::f5lua::steady_ms()
 
 inline void on_solo() {
   fable2::coophero::SetCampaignPlayer2("");  // a solo game has no campaign player 2
+  g_partner_xuid.store(0);
+  p2_watch_stop();
   REXSYS_INFO("[coop] new game: Solo");
   pass_next_a_to_new_game();
 }
@@ -115,6 +128,7 @@ struct SessionState {
   // and when the loaded world was first seen settled.
   bool from_template = false, template_female = false, gender_sent = false;
   std::string slot_name;
+  std::filesystem::path slot_path;
 };
 inline std::atomic<int64_t> g_qc060_started_ms{0};  // "QC060_NewBeginning Starting" printed
 inline std::atomic<bool> g_skip_installed{false};      // coop_skip_childhood.lua took
@@ -260,6 +274,10 @@ inline void on_host_start() {
     S().cid = cid;
     S().partner_name = lb.host.rec.partner;
     S().partner_ip = lb.host.partner_ip;
+    uint64_t pxuid = 0;
+    for (const auto& p : lobby::GetLanPeers())
+      if (p.ip == lb.host.partner_ip) pxuid = p.xuid;
+    g_partner_xuid.store(pxuid);
     S().since_ms = fable2::f5lua::steady_ms();
     S().partner_spawned = false;
     S().host_female = lb.host.rec.gender1 == fable2::cooplobby::Gender::kFemale;
@@ -276,14 +294,18 @@ inline void on_host_start() {
     S().template_female = resume ? S().host_female : tmpl && tmpl->female;
     S().gender_sent = false;
     S().slot_name = slot ? slot->name : "";
+    S().slot_path = slot ? slot->path : std::filesystem::path();
     S().load_epoch = fable2::f5lua::g_load_epoch.load() + 1;  // the world load that follows
     REXSYS_INFO("[coop] host start: campaign {} with {}, host hero {}, {}", S().cid, S().partner_name,
                 S().host_female ? "female" : "male",
                 resume ? "continuing " + S().slot_name
                 : from_template ? "starter save " + S().slot_name : std::string("gameflow skip"));
   }
+  // T031: a continued campaign brings player 2 back from its file; otherwise
+  // (new campaign, or no usable file) player 2 is seeded (T031a).
+  std::optional<std::string> restore = resume && slot ? restore_player2_chunk(slot->path) : std::nullopt;
   fable2::coophero::SetCampaignPlayer2(
-      seed_player2_chunk(rec.gender2 == fable2::cooplobby::Gender::kMale));
+      restore ? *restore : seed_player2_chunk(rec.gender2 == fable2::cooplobby::Gender::kMale));
   fable2::cooplobby::HidePanel();
   if (S().from_template) {
     // The game's own Continue loads the campaign slot: while the save list
@@ -353,6 +375,157 @@ inline void accept_tick(SessionState& s, int64_t since, int64_t now, const char*
   REXSYS_INFO("[coop] {}: A for the join screen ({}/{})", who, s.accept_presses, kAcceptPresses);
 }
 
+// --- player 2's hero file (T030 save, T031 load; fable2_coop_p2file.h) -------
+//
+// Host only. Player 2 is captured every kP2CacheEveryMs while in the world; a
+// game save of the campaign slot (mainsave.bin changes, then holds still for
+// kP2SettleMs) writes coop_player2.txt from a fresh capture, or from the last
+// one when player 2 has already left (the partner-loss autosave, P6).
+constexpr int64_t kP2CacheEveryMs = 20000, kP2SettleMs = 3000;
+constexpr const char* kP2File = "coop_player2.txt";
+
+struct P2Watch {
+  std::mutex m;
+  std::filesystem::path slot;  // the campaign slot folder ("" = not hosting a campaign)
+  std::string cache;           // last COOPHERO:v2 line of player 2
+  std::filesystem::file_time_type seen{};
+  int64_t changed_ms = 0, next_cache_ms = 0;
+};
+inline P2Watch& P2() {
+  static P2Watch w;
+  return w;
+}
+
+inline std::optional<std::string> read_bytes(const std::filesystem::path& p) {
+  std::ifstream in(p, std::ios::binary);
+  if (!in) return std::nullopt;
+  return std::string(std::istreambuf_iterator<char>(in), {});
+}
+
+inline bool write_p2_file(const std::filesystem::path& slot, const std::string& profile,
+                          const char* source) {
+  namespace pf = fable2::coopp2file;
+  const auto uid = read_bytes(slot / "saveuid.bin");
+  const auto main = read_bytes(slot / "mainsave.bin");
+  if (!uid || !main || profile.rfind("COOPHERO:v2|", 0) != 0) {
+    REXSYS_WARN("[coop] player 2 file not written (slot files or profile missing)");
+    return false;
+  }
+  pf::P2File f{pf::HexBytes(*uid), pf::Hex64(pf::Fnv1a64(*main)), utc_now(), source, profile};
+  const bool ok = fable2::coopcampaign::WriteFileAtomic(slot, kP2File, pf::Format(f));
+  REXSYS_INFO("[coop] player 2 file {} ({}, stamp {})", ok ? "written" : "NOT written", source, f.stamp);
+  return ok;
+}
+
+inline void request_p2_capture(const char* tag) {
+  const std::string lib = fable2::coophero::read_lib();
+  if (lib.empty()) return;
+  fable2::luaconsole::RunChunk(
+      lib + "\nlocal h = GetPlayerHenchman()\n"
+            "if h and h:IsAlive() then print('" + tag +
+      "|' .. CoopHero.SerializeV2(CoopHero.Capture(h), 0))\n"
+      "else print('" + tag + "-NONE') end\n");
+}
+
+inline void p2_watch_start(const std::filesystem::path& slot) {
+  auto& w = P2();
+  std::lock_guard<std::mutex> l(w.m);
+  std::error_code ec;
+  w.slot = slot;
+  w.cache.clear();
+  w.seen = std::filesystem::last_write_time(slot / "mainsave.bin", ec);
+  w.changed_ms = 0;
+  w.next_cache_ms = 0;
+}
+inline void p2_watch_stop() {
+  std::lock_guard<std::mutex> l(P2().m);
+  P2().slot.clear();
+}
+
+// Called from session_tick while hosting a campaign world.
+inline void p2_watch_tick(int64_t now, bool player2_here) {
+  auto& w = P2();
+  std::unique_lock<std::mutex> l(w.m);
+  if (w.slot.empty()) return;
+  if (player2_here && now >= w.next_cache_ms) {
+    w.next_cache_ms = now + kP2CacheEveryMs;
+    l.unlock();
+    request_p2_capture("COOPP2");
+    l.lock();
+  }
+  std::error_code ec;
+  const auto t = std::filesystem::last_write_time(w.slot / "mainsave.bin", ec);
+  if (ec) return;
+  if (t != w.seen) {
+    w.seen = t;
+    w.changed_ms = now;  // still being written: wait for it to settle
+    return;
+  }
+  if (!w.changed_ms || now - w.changed_ms < kP2SettleMs) return;
+  w.changed_ms = 0;
+  REXSYS_INFO("[coop] campaign saved: recording player 2");
+  if (player2_here) {
+    l.unlock();
+    request_p2_capture("COOPP2W");  // written by the line handler
+    return;
+  }
+  if (w.cache.empty()) {
+    REXSYS_WARN("[coop] campaign saved without player 2 and no earlier capture: file not written");
+    return;
+  }
+  write_p2_file(w.slot, w.cache, "cache");
+}
+
+inline void on_p2_line(std::string_view line, bool write) {
+  const size_t bar = line.find('|');
+  if (bar == std::string_view::npos) return;
+  const std::string profile(line.substr(bar + 1));
+  auto& w = P2();
+  std::lock_guard<std::mutex> l(w.m);
+  w.cache = profile;
+  if (write && !w.slot.empty()) write_p2_file(w.slot, profile, "capture");
+}
+inline void on_p2_none(bool write) {
+  auto& w = P2();
+  std::lock_guard<std::mutex> l(w.m);
+  if (write && !w.slot.empty() && !w.cache.empty()) write_p2_file(w.slot, w.cache, "cache");
+}
+
+// T031: the Lua that brings player 2 back from the slot's file, or nothing
+// (no file, or one from another slot): then the seed applies.
+inline std::optional<std::string> restore_player2_chunk(const std::filesystem::path& slot) {
+  namespace pf = fable2::coopp2file;
+  const auto text = read_bytes(slot / kP2File);
+  if (!text) {
+    REXSYS_INFO("[coop] player 2: no {} in {}, seeding", kP2File, slot.filename().string());
+    return std::nullopt;
+  }
+  const auto f = pf::Parse(*text);
+  const auto uid = read_bytes(slot / "saveuid.bin");
+  const auto main = read_bytes(slot / "mainsave.bin");
+  if (!f || !uid || !main) {
+    REXSYS_WARN("[coop] player 2: {} unreadable, seeding", kP2File);
+    return std::nullopt;
+  }
+  const auto match = pf::Check(*f, pf::HexBytes(*uid), pf::Hex64(pf::Fnv1a64(*main)));
+  if (match == pf::Match::kOtherSlot) {
+    REXSYS_WARN("[coop] player 2: {} belongs to another save (saveuid {}), seeding", kP2File, f->saveuid);
+    return std::nullopt;
+  }
+  REXSYS_INFO("[coop] player 2: restoring from {} ({}, written {}{})", kP2File, f->source, f->written,
+              match == pf::Match::kOlder ? ", older than the last save" : "");
+  const std::string eq = fable2::luaconsole::long_bracket_level(f->profile);
+  std::string c;
+  c += "local hench = GetPlayerHenchman()\n";
+  c += "if not hench or not hench:IsAlive() then print('[coop] restore: no live player 2') return end\n";
+  c += "local p = CoopHero.Parse([" + eq + "[" + f->profile + "]" + eq + "])\n";
+  c += "if not p then print('[coop] restore: bad profile') return end\n";
+  c += "CoopHero.Apply(hench, p, {body = false})\n";
+  c += "print('[coop] player 2 restored from coop_player2.txt')\n";
+  c += "print(CoopHero.SerializeV2(CoopHero.Capture(hench), 0))\n";
+  return c;
+}
+
 // Session watcher (render thread, ~2 Hz).
 inline int64_t g_next_session_ms = 0;
 inline uint32_t g_seen_spawn_epoch = 0;
@@ -387,6 +560,7 @@ inline void session_tick() {
           // Never leave the player's save list narrowed to one slot.
           REXSYS_INFO("[coop] host start: the campaign world did not load in 3 min, giving up");
           fable2::coophero::SetCampaignPlayer2("");
+          p2_watch_stop();
           rex_content_set_save_filter("");
           s.s = Session::kNone;
           fable2::coophero::g_capture_paused.store(false);
@@ -400,6 +574,7 @@ inline void session_tick() {
           const std::string go = fable2::cooplobby::Format(fable2::cooplobby::GoRecord{s.cid, ++s.go_seq});
           lobby::PublishData("coop_go", go);
           REXSYS_INFO("[coop] host world up (starter save {}): published {}", s.slot_name, go);
+          if (!s.slot_path.empty()) p2_watch_start(s.slot_path);
           rex_content_set_save_filter("");
           fable2::coophero::g_capture_paused.store(false);
         }
@@ -471,6 +646,7 @@ inline void session_tick() {
         if (approved > s.since_ms) accept_tick(s, approved, now, "host");
         break;
       }
+      p2_watch_tick(now, true);
       int quiet = -1;
       for (const auto& p : lobby::GetLanPeers())
         if (p.ip == s.partner_ip) quiet = p.seconds_since_seen;
@@ -488,6 +664,7 @@ inline void session_tick() {
       break;
     }
     case Session::kHostPartnerLost:
+      if (!s.quit_sent) p2_watch_tick(now, false);  // the autosave: player 2 from the cache
       if (!s.quit_sent && now - s.since_ms > 10000) {
         s.quit_sent = true;
         REXSYS_INFO("[coop] host: returning to the front end");
@@ -497,6 +674,7 @@ inline void session_tick() {
       if (s.quit_sent && !lobby::GetLobbyStatus().in_world && in_main_menu() && now - s.since_ms > 13000) {
         REXSYS_INFO("[coop] host: back at the front end, waiting for {} in the lobby", s.partner_name);
         fable2::coophero::SetCampaignPlayer2("");
+        p2_watch_stop();
         s.s = Session::kNone;
         after = [cid = s.cid, partner = s.partner_name] {
           open_host_lobby(fable2::cooplobby::Kind::kContinue, cid, partner);
@@ -665,6 +843,9 @@ inline void OnFrame() {
 
 inline const bool g_installed = [] {
   fable2::fronthooks::g_press_hook = &OnPress;
+  fable2::luaconsole::AddLineHandler("COOPP2W|", [](std::string_view l) { on_p2_line(l, true); });
+  fable2::luaconsole::AddLineHandler("COOPP2W-NONE", [](std::string_view) { on_p2_none(true); });
+  fable2::luaconsole::AddLineHandler("COOPP2|", [](std::string_view l) { on_p2_line(l, false); });
   fable2::luaconsole::AddLineHandler("QC060_NewBeginning Starting", [](std::string_view) {
     g_qc060_started_ms.store(fable2::f5lua::steady_ms());
   });
