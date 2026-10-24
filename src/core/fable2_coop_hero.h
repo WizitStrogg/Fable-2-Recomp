@@ -51,6 +51,7 @@
 #include <rex/ppc/context.h>
 
 #include "fable2_f5_lua.h"
+#include "fable2_coop_busy.h"
 #include "fable2_coop_camera.h"
 #include "fable2_coop_camscan.h"
 #include "fable2_lua_console.h"
@@ -269,6 +270,7 @@ inline uint32_t g_capture_load_epoch = 0;
 // the adult world is ready: a capture during QC060's opening (autosave, movie)
 // crashed the host twice (rig launches 9 and 10).
 inline std::atomic<bool> g_capture_paused{false};
+inline int64_t g_capture_wait_logged = 0;
 
 inline void auto_capture(const lobby::LobbyStatus& status, int64_t now) {
   if (g_capture_paused.load()) {
@@ -298,6 +300,16 @@ inline void auto_capture(const lobby::LobbyStatus& status, int64_t now) {
     g_next_capture_ms = now + kFirstCaptureDelayMs;
   }
   if (g_next_capture_ms == 0 || now < g_next_capture_ms) return;
+  // T028b: never during a movie, cutscene, load or save (launches 9, 10).
+  if (const std::string why = fable2::coopbusy::Busy(); !why.empty()) {
+    if (g_capture_wait_logged != g_next_capture_ms) {
+      g_capture_wait_logged = g_next_capture_ms;
+      REXSYS_INFO("[coop] hero capture waits: {}", why);
+    }
+    g_next_capture_ms = now + 2000;
+    g_capture_wait_logged = g_next_capture_ms;
+    return;
+  }
   g_next_capture_ms = 0;
   fable2::luaconsole::RunFile("coop_capture.lua");
 }
@@ -630,6 +642,7 @@ inline void OnFrame() {
   g_world_changed = world_key != g_world_key;
   fable2::coopcam::g_joined.store(status.joined_host_ip != 0);
   g_world_key = world_key;
+  fable2::coopbusy::tick(status, now);
   joiner_story(status);
   camera_tick(status, now);
   update_partner_gender(status);

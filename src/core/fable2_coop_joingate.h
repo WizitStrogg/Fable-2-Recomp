@@ -119,6 +119,15 @@ inline JoinRestore before_join(PPCContext& ctx, uint8_t* base) {
   }
   // T028: while a campaign is hosted only its partner may join. The handler
   // then answers SESSIONFULL (+245 clear), which the joiner shows as full.
+  // T028a: no join while the host is in a movie, cutscene, load or save
+  // (launch 9 crashed the host); the partner retries every 15 s.
+  if (REXCVAR_GET(coop_campaign) && ok(flags) && rd8(base, flags + 245)) {
+    if (const std::string why = fable2::coopbusy::Busy(); !why.empty()) {
+      wr8(base, flags + 245, 0);
+      r.refused = true;
+      REXSYS_INFO("[joingate] join held off: host busy ({})", why);
+    }
+  }
   const uint64_t partner = fable2::coopfrontend::g_partner_xuid.load();
   if (REXCVAR_GET(coop_campaign) && partner && ok(flags) && rd8(base, flags + 245)) {
     const uint64_t who = (uint64_t(rd32(base, req + 3 + 77)) << 32) | rd32(base, req + 3 + 81);

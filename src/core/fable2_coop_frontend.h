@@ -42,6 +42,10 @@
 // rexglue-sdk: narrow the game's save list to one slot ("" = all saves).
 extern "C" void rex_content_set_save_filter(const char* file_name);
 
+REXCVAR_DEFINE_INT32(coop_partner_join_delay_ms, 0, "Network",
+                     "Testing: the partner waits this long after coop_go before its first join "
+                     "attempt (rig T028: lets a third player try the open slot first)");
+
 namespace fable2::coopfrontend {
 
 constexpr uint32_t kUp = 1, kDown = 2, kBack = 32, kA = 0x1000, kB = 0x2000;
@@ -526,6 +530,48 @@ inline std::optional<std::string> restore_player2_chunk(const std::filesystem::p
   return c;
 }
 
+// --- one shared purse (T033, spec FR-010) ---------------------------------
+//
+// The game gives player 2 a purse of its own and splits gold between the two
+// (P5: Money.Modify(player2, 100) gave each +50). The host's purse is the
+// campaign's: once a second, whatever either purse gained or spent since the
+// last sync is added to one total, and both purses are set to it (Money.Set,
+// no split). A split pickup (+50/+50) counts +100; a purchase by either counts
+// once. After player 2 (re)spawns its purse starts at the host's total.
+constexpr int64_t kPurseEveryMs = 1000;
+inline int64_t g_next_purse_ms = 0;
+inline uint32_t g_purse_epoch = ~0u;
+
+inline void purse_tick(int64_t now) {
+  if (now < g_next_purse_ms) return;
+  g_next_purse_ms = now + kPurseEveryMs;
+  const uint32_t epoch = fable2::coophero::g_spawn_epoch.load();
+  const bool reset = epoch != g_purse_epoch;
+  g_purse_epoch = epoch;
+  std::string c = R"lua(
+local hero, hench = GetPlayerHero(), GetPlayerHenchman()
+if not hench or not hench:IsAlive() then return end
+local H, h = Money.Get(hero), Money.Get(hench)
+)lua";
+  if (reset) c += "CoopPurseLast = nil\n";
+  c += R"lua(
+if CoopPurseLast == nil then
+  CoopPurseLast = H
+  if h ~= H then Money.Set(hench, H) end
+  print('[coop] purse: shared total ' .. H)
+  return
+end
+if H == CoopPurseLast and h == CoopPurseLast then return end
+local total = CoopPurseLast + (H - CoopPurseLast) + (h - CoopPurseLast)
+Money.Set(hero, total)
+Money.Set(hench, total)
+print(string.format('[coop] purse: host %d, player 2 %d, was %d -> total %d (now %d / %d)',
+  H, h, CoopPurseLast, total, Money.Get(hero), Money.Get(hench)))
+CoopPurseLast = total
+)lua";
+  fable2::luaconsole::RunChunk(c);
+}
+
 // Session watcher (render thread, ~2 Hz).
 inline int64_t g_next_session_ms = 0;
 inline uint32_t g_seen_spawn_epoch = 0;
@@ -647,6 +693,7 @@ inline void session_tick() {
         break;
       }
       p2_watch_tick(now, true);
+      purse_tick(now);
       int quiet = -1;
       for (const auto& p : lobby::GetLanPeers())
         if (p.ip == s.partner_ip) quiet = p.seconds_since_seen;
@@ -703,6 +750,7 @@ inline void session_tick() {
         s.s = Session::kNone;
         break;
       }
+      if (now - s.since_ms < REXCVAR_GET(coop_partner_join_delay_ms)) break;  // rig only
       bool joinable = false;
       for (const auto& p : lobby::GetLanPeers())
         if (p.ip == s.host_ip) joinable = p.in_world && p.joinable;
