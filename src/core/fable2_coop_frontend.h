@@ -101,6 +101,9 @@ struct SessionState {
   uint32_t host_ip = 0;
   int64_t last_try_ms = 0, joined_since_ms = 0;
   int tries = 0;
+  // Join screens: A presses made, and when the last one was.
+  int accept_presses = 0;
+  int64_t accept_ms = 0;
   // Start -> stock New Game -> hero card -> childhood -> skip to QC060 (T021)
   int64_t newgame_ms = 0, card_ms = 0, skip_ms = 0;
   uint32_t load_epoch = 0;  // first game script load after the card pick
@@ -114,6 +117,13 @@ inline std::atomic<bool> g_skip_installed{false};      // coop_skip_childhood.lu
 inline std::atomic<bool> g_childhood_started{false};   // the game moved to QC010 itself
 inline std::atomic<int64_t> g_coop_screen_ms{0};       // QC060's co-op introduction finished
 inline std::atomic<bool> g_coop_screen_hook_failed{false};
+// Host: when ProcessJoinSession last approved a join (fable2_coop_joingate.h).
+inline std::atomic<int64_t> g_join_approved_ms{0};
+// The game's own join screens (gold/XP split on the host; look, then "continue
+// without choosing a save" on the partner) all accept with A (launch 13). During a
+// campaign A is pressed for both, every kAcceptEveryMs, at most kAcceptPresses times.
+constexpr int64_t kAcceptFirstMs = 3000, kAcceptEveryMs = 3000;
+constexpr int kAcceptPresses = 5;
 inline SessionState& S() {
   static SessionState s;
   return s;
@@ -229,6 +239,18 @@ inline void on_coop() {
   open_host_lobby(fable2::cooplobby::Kind::kNew, "", "");
 }
 
+// One A for the game's join screens if one is due: the first kAcceptFirstMs after
+// `since` (the join), then every kAcceptEveryMs, kAcceptPresses in all.
+inline void accept_tick(SessionState& s, int64_t since, int64_t now, const char* who) {
+  if (s.accept_presses >= kAcceptPresses) return;
+  const int64_t due = s.accept_presses ? s.accept_ms + kAcceptEveryMs : since + kAcceptFirstMs;
+  if (now < due) return;
+  s.accept_ms = now;
+  ++s.accept_presses;
+  fable2::cooplobby::InjectPress(static_cast<uint16_t>(fable2::cooplobby::kA), 0, 200);
+  REXSYS_INFO("[coop] {}: A for the join screen ({}/{})", who, s.accept_presses, kAcceptPresses);
+}
+
 // Session watcher (render thread, ~2 Hz).
 inline int64_t g_next_session_ms = 0;
 inline uint32_t g_seen_spawn_epoch = 0;
@@ -271,6 +293,7 @@ inline void session_tick() {
           s.s = Session::kHostInWorld;
           s.since_ms = now;
           g_seen_spawn_epoch = fable2::coophero::g_spawn_epoch.load();
+          s.accept_presses = 0;
           const std::string go = fable2::cooplobby::Format(fable2::cooplobby::GoRecord{s.cid, ++s.go_seq});
           lobby::PublishData("coop_go", go);
           REXSYS_INFO("[coop] host world up (starter save {}): published {}", s.slot_name, go);
@@ -325,6 +348,7 @@ inline void session_tick() {
         s.s = Session::kHostInWorld;
         s.since_ms = now;
         g_seen_spawn_epoch = fable2::coophero::g_spawn_epoch.load();
+        s.accept_presses = 0;
         const std::string go = fable2::cooplobby::Format(fable2::cooplobby::GoRecord{s.cid, ++s.go_seq});
         lobby::PublishData("coop_go", go);
         REXSYS_INFO("[coop] host world up: published {}", go);
@@ -339,7 +363,11 @@ inline void session_tick() {
         lobby::PublishData("coop_lobby", "");
         REXSYS_INFO("[coop] host: player 2 is in the world");
       }
-      if (!s.partner_spawned) break;
+      if (!s.partner_spawned) {
+        const int64_t approved = g_join_approved_ms.load();
+        if (approved > s.since_ms) accept_tick(s, approved, now, "host");
+        break;
+      }
       int quiet = -1;
       for (const auto& p : lobby::GetLanPeers())
         if (p.ip == s.partner_ip) quiet = p.seconds_since_seen;
@@ -372,11 +400,15 @@ inline void session_tick() {
       }
       break;
     case Session::kPartnerJoining: {
-      // Joined only counts once it holds for 10 s (a refused join shows the
-      // joined state for a few milliseconds).
+      // Joined only counts once it holds past the join screens (a refused join
+      // shows the joined state for a few milliseconds).
       if (lobby::GetLobbyStatus().joined_host_ip) {
-        if (!s.joined_since_ms) s.joined_since_ms = now;
-        if (now - s.joined_since_ms > 10000) {
+        if (!s.joined_since_ms) {
+          s.joined_since_ms = now;
+          s.accept_presses = 0;
+        }
+        accept_tick(s, s.joined_since_ms, now, "partner");
+        if (now - s.joined_since_ms > kAcceptFirstMs + kAcceptPresses * kAcceptEveryMs) {
           REXSYS_INFO("[coop] partner: in the host's world (after {} attempt(s))", s.tries);
           s.s = Session::kNone;
           g_armed = false;  // in the host's world: pause-menu presses are not New Game

@@ -78,6 +78,8 @@ struct JoinRestore {
   uint32_t mgr = 0;
   bool state = false;
   uint32_t old_state = 0;
+  uint32_t flags = 0;    // [0x834971D0] at the call
+  bool open = false;     // its +245 was set before the call
 };
 
 inline void log_join(uint8_t* base, uint32_t mgr, uint32_t req, const char* when) {
@@ -104,14 +106,18 @@ inline JoinRestore before_join(PPCContext& ctx, uint8_t* base) {
   if (!ok(mgr) || !ok(req)) return r;
   const bool log = REXCVAR_GET(coop_join_gate_log) && g_join_logged.fetch_add(1) < 40;
   if (log) log_join(base, mgr, req, "seen");
-  const std::string force = forced();
-  if (force.empty()) return r;
-  if (listed(force, "g") && ok(rd32(base, kLiveGlobal))) wr8(base, kGlobalGate, 1);
   const uint32_t flags = rd32(base, kSessionFlags);
-  if (ok(flags)) {
-    if (listed(force, "243")) wr8(base, flags + 243, 1);
-    if (listed(force, "245")) wr8(base, flags + 245, 1);
+  r.flags = flags;
+  const std::string force = forced();
+  if (!force.empty()) {
+    if (listed(force, "g") && ok(rd32(base, kLiveGlobal))) wr8(base, kGlobalGate, 1);
+    if (ok(flags)) {
+      if (listed(force, "243")) wr8(base, flags + 243, 1);
+      if (listed(force, "245")) wr8(base, flags + 245, 1);
+    }
   }
+  r.open = ok(flags) && rd8(base, flags + 245);
+  if (force.empty()) return r;
   if (listed(force, "456")) {
     const uint32_t s = rd32(base, mgr + 456);
     if (s < 4096 || s > 4101) {
@@ -125,8 +131,15 @@ inline JoinRestore before_join(PPCContext& ctx, uint8_t* base) {
   return r;
 }
 
+// The handler clears +245 only on JOINRESPONSE_APPROVED: that starts the join
+// screens' auto-accept on the host (fable2_coop_frontend.h).
 inline void after_join(uint8_t* base, const JoinRestore& r) {
   if (r.state) wr32(base, r.mgr + 456, r.old_state);
+  if (r.open && ok(r.flags) && !rd8(base, r.flags + 245)) {
+    REXSYS_INFO("[joingate] join approved");
+    if (REXCVAR_GET(coop_campaign))
+      fable2::coopfrontend::g_join_approved_ms.store(fable2::f5lua::steady_ms());
+  }
 }
 
 // --- in-session messages (sub_8230DFF0) --------------------------------------------------
