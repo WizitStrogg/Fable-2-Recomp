@@ -159,6 +159,7 @@ switches to its fallback; only a failed fallback is raised to Josh.
 ## Phase 7: User Story 5 - The partner keeps a backup (Priority: P3)
 
 - [ ] T039 [US5] Backup sender and receiver per P7 and `contracts/campaign-files.md` (`src/core/fable2_coop_backup.h`); F6 shows the latest backup date
+  - Built (not yet on the rig): src/core/fable2_coop_backup_fmt.h (SHA-256, CRC-32, store-only zip, manifest, keep-10; tools/coop_backup_test.cpp 13/13, the zip opens in Python zipfile with all hashes matching) and fable2_coop_backup.h (host sends after each save with player 2 present over TCP 3077; partner accepts only from its joined host, verifies, keeps 10; F6 shows the newest). Rig proof runs inside T044 (backup kept on the partner after each save).
 - [ ] T040 [US5] Rig verification: hash-equal copy on B after each session; last 10 kept
 - [ ] T041 [JOSH] Gate 2 for v14.1; install and friend zip after approval
 
@@ -166,9 +167,12 @@ switches to its fallback; only a failed fallback is raised to Josh.
 
 ## Phase 8: Polish
 
-- [ ] T042 [P] Update `FUNCTION_NAMES.md` with every hooked or called game function
-- [ ] T043 [P] Update friend-package README and F6 help text
+- [x] T042 [P] Update `FUNCTION_NAMES.md` with every hooked or called game function
+  - Result: Done: FUNCTION_NAMES.md section K (ProcessJoinSession, the friends thunk, debug print, send message, message sizes, in-session handler, communication checks, FrontMenu_PressBitDispatch, AllowHenchman, data addresses, Lua natives).
+- [x] T043 [P] Update friend-package README and F6 help text
+  - Result: Done (draft): release-v14/README-v14.txt (v13 README + 'What's new in v14', port 3077 for backups); F6 help is the box's own label and status lines (coop_campaign_status, coop_backup_last).
 - [ ] T044 Two-hour stability run on the rig with both players active; solo slots re-hashed
+  - Pre-run 2026-10-24 03:53Z stopped after 4 min for a gfx-test launch (no failure; research/001-evidence/stability-prerun/). Full run pending.
 - [ ] T045 [JOSH] Merge `coop/001-coop-campaign` into `systemlink` in both repos after approval
 - [ ] T046 Update `specs/README.md`; run `/speckit-plan` and `/speckit-tasks` for 002 and post them for Gate 1
 
