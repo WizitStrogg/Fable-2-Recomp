@@ -61,8 +61,8 @@ inline std::atomic<int32_t> g_last_slot4_r4{-999}, g_last_slot4_r5{-999}, g_last
 // The screens' per-frame updates read an action code from sub_82841730 (host phase:
 // reader at controller+308, sub_82479C28; partner phase: reader at +348,
 // sub_82479F18) and switch on it: 36 = accept / Yes (host: sub_8247BF00 +
-// sub_8247AAB0 = accept the split; partner prompt: sub_8247C1B0 = continue without a
-// save), 37 = back / No (static read of both switches, launch 27 map). With
+// sub_8247AAB0 = accept the split; partner look screen: 0x8247A118, which queues the
+// message boxes, see sub_8247A6A8 below), 37 = back / No (JOIN-SCREEN-SEQUENCE.txt). With
 // coop_join_screen_skip on, during a campaign, while the controller is open, a reader
 // that returns no action returns 36 instead (at most kMaxPerReader times). No pad
 // press is involved, so nothing reaches the world after the screens close.
@@ -220,6 +220,48 @@ extern "C" void sub_82479BF0(PPCContext& ctx, uint8_t* base) {
     log_state("update6", ctx, base);
   check_fallback();  // runs every frame the screens are open, even if no reader is
   __imp__sub_82479BF0(ctx, base);
+}
+
+// The partner's look-screen accept does not finish the join: it queues message boxes
+// at ctrl+480 (39 GUI_COOP_PROGRESS_WONT_BE_SAVED; 41 achievements, 43 profile space
+// when they apply) and runs this queue, which opens them one by one in the front end's
+// generic message box. The box reads its own input, not ctrl+348, which is why launch 28
+// stuck there (JOIN-SCREEN-SEQUENCE.txt P2). With the skip on, no box is opened: each
+// queued box gets what the game's answer handler sub_8247BA20 does for "yes" (id 39:
+// clear the stored hero save = continue without a save), then the queue is cleared and
+// the empty-queue step sub_8247B270 (the final partner accept) runs as the game's own.
+extern "C" void CopyAssign_RefCounted2_82265160(PPCContext& ctx, uint8_t* base);
+extern "C" void sub_8247D3B8(PPCContext& ctx, uint8_t* base);
+extern "C" void sub_8247B270(PPCContext& ctx, uint8_t* base);
+extern "C" void __imp__sub_8247A6A8(PPCContext& ctx, uint8_t* base);
+extern "C" void sub_8247A6A8(PPCContext& ctx, uint8_t* base) {
+  using namespace fable2::coopjoinscreen;
+  const uint32_t ctrl = ctx.r3.u32;
+  if (ctrl != g_controller.load() || !REXCVAR_GET(coop_join_screen_skip) || !REXCVAR_GET(coop_campaign) ||
+      rd32(base, ctrl + 488) == 0) {
+    __imp__sub_8247A6A8(ctx, base);
+    return;
+  }
+  const PPCContext saved = ctx;
+  const uint32_t sentinel = rd32(base, ctrl + 484);
+  int n = 0;
+  for (uint32_t node = rd32(base, sentinel); node != sentinel && n < 8; node = rd32(base, node), ++n) {
+    const int32_t id = int32_t(rd32(base, node + 8));
+    REXSYS_INFO("[joinscreen] skip: message box {} answered yes in code", id);
+    if (id != 39) continue;
+    // sub_8247BA20, box 39: assign "" to the hero-save string at net+4 (sub_82265160) and net+2024 = -1.
+    const uint32_t net = rd32(base, rd32(base, rd32(base, 0x83496920) + 12) + 148);
+    ctx.r3.u64 = net + 4;
+    ctx.r4.u64 = 0x834A5B6C;
+    CopyAssign_RefCounted2_82265160(ctx, base);
+    for (int i = 0; i < 4; ++i) base[net + 2024 + i] = 0xFF;
+  }
+  ctx.r3.u64 = ctrl + 480;
+  sub_8247D3B8(ctx, base);
+  ctx.r3.u64 = ctrl;
+  sub_8247B270(ctx, base);
+  ctx = saved;
+  g_skips.fetch_add(1);
 }
 
 extern "C" void __imp__sub_82476FC8(PPCContext& ctx, uint8_t* base);
