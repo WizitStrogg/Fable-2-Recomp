@@ -137,6 +137,7 @@ struct SessionState {
   // Starter-save start (default): the slot made from the template, its gender,
   // and when the loaded world was first seen settled.
   bool from_template = false, template_female = false, gender_sent = false;
+  int64_t gender_try_ms = 0;  // last gender switch attempt (T021a)
   std::string slot_name;
   std::filesystem::path slot_path;
 };
@@ -147,6 +148,8 @@ inline std::atomic<int64_t> g_coop_screen_ms{0};       // QC060's co-op introduc
 inline std::atomic<bool> g_coop_screen_hook_failed{false};
 // Host: when ProcessJoinSession last approved a join (fable2_coop_joingate.h).
 inline std::atomic<int64_t> g_join_approved_ms{0};
+// The host hero reads the lobby's gender ("[coop] hero gender ok", T021a).
+inline std::atomic<bool> g_gender_ok{false};
 // The game's own join screens (gold/XP split on the host; look, then "continue
 // without choosing a save" on the partner) all accept with A (launch 13). During a
 // campaign A is pressed for both, every kAcceptEveryMs, at most kAcceptPresses times.
@@ -304,6 +307,8 @@ inline void on_host_start() {
     // A continued campaign keeps its hero as saved: no gender switch.
     S().template_female = resume ? S().host_female : tmpl && tmpl->female;
     S().gender_sent = false;
+    S().gender_try_ms = 0;
+    g_gender_ok.store(false);
     S().slot_name = slot ? slot->name : "";
     S().slot_path = slot ? slot->path : std::filesystem::path();
     S().load_epoch = fable2::f5lua::g_load_epoch.load() + 1;  // the world load that follows
@@ -645,14 +650,34 @@ inline void session_tick() {
                             fable2::f5lua::g_load_epoch.load() >= s.load_epoch &&
                             lobby::GetLobbyStatus().in_world;
         const int64_t settled = now - fable2::f5lua::g_load_at_ms.load();
+        // T021a: the lobby's gender, by the game's own sex-change call (the potion's).
+        // It is a queued action: it takes only when the hero is free, which the
+        // starter's opening moments are not (launches 19, 20: one call, still male;
+        // launch 21: on a free hero it took within 12 s and survived save + reload).
+        // So: every 5 s while the host is not busy, read the gender and call again
+        // until it reads right; the partner's go waits for it (2 min at most).
         if (loaded && settled > 10000 && !s.gender_sent) {
-          s.gender_sent = true;
-          if (s.host_female != s.template_female) {
-            REXSYS_INFO("[coop] host start: hero gender {} -> {}", s.template_female ? "F" : "M",
-                        s.host_female ? "F" : "M");
-            fable2::luaconsole::RunChunk(std::string(
-                "print('[coop] hero gender: ' .. tostring(pcall(Player.ChangePlayerEntityType, GetPlayerHero(), '") +
-                (s.host_female ? "CreatureHeroFemale" : "CreatureHero") + "')))");
+          if (s.host_female == s.template_female || g_gender_ok.load()) {
+            s.gender_sent = true;
+            if (g_gender_ok.load()) REXSYS_INFO("[coop] host start: hero gender is {}", s.host_female ? "F" : "M");
+          } else if (now - s.since_ms > 180000) {
+            s.gender_sent = true;
+            REXSYS_WARN("[coop] host start: hero gender did not change in time; starting as the starter's");
+          } else if (now - s.gender_try_ms > 5000 && fable2::coopbusy::Busy().empty()) {
+            if (!s.gender_try_ms)
+              REXSYS_INFO("[coop] host start: hero gender {} -> {}", s.template_female ? "F" : "M",
+                          s.host_female ? "F" : "M");
+            s.gender_try_ms = now;
+            fable2::luaconsole::RunChunk(std::string(R"lua(
+local h = GetPlayerHero()
+local want = )lua") + (s.host_female ? "EGender.EG_FEMALE" : "EGender.EG_MALE") + R"lua(
+if Gender.Get(h) == want then
+  print('[coop] hero gender ok')
+elseif not Action.IsPerformingAnyAction(h) then
+  print('[coop] hero gender switching: ' .. tostring(pcall(Player.ChangePlayerEntityType, h, ')lua" +
+                (s.host_female ? "CreatureHeroFemale" : "CreatureHero") + R"lua(')))
+end
+)lua");
           }
         }
         if (!loaded && now - s.since_ms > 180000) {
@@ -954,6 +979,7 @@ inline void OnFrame() {
 
 inline const bool g_installed = [] {
   fable2::fronthooks::g_press_hook = &OnPress;
+  fable2::luaconsole::AddLineHandler("[coop] hero gender ok", [](std::string_view) { g_gender_ok.store(true); });
   fable2::luaconsole::AddLineHandler("COOPP2W|", [](std::string_view l) { on_p2_line(l, true); });
   fable2::luaconsole::AddLineHandler("COOPP2W-NONE", [](std::string_view) { on_p2_none(true); });
   fable2::luaconsole::AddLineHandler("COOPP2|", [](std::string_view l) { on_p2_line(l, false); });
