@@ -33,6 +33,9 @@
 #include "fable2_front_hooks.h"
 #include "../diagnostics/fable2_state_probe.h"
 
+// rexglue-sdk: narrow the game's save list to one slot ("" = all saves).
+extern "C" void rex_content_set_save_filter(const char* file_name);
+
 namespace fable2::coopfrontend {
 
 constexpr uint32_t kUp = 1, kDown = 2, kBack = 32, kA = 0x1000, kB = 0x2000;
@@ -177,8 +180,11 @@ inline void on_host_start() {
   }
   fable2::cooplobby::HidePanel();
   if (from_template) {
-    // Continue loads the newest save, which is the new slot: the panel's
-    // closing A is swallowed, then Down (cursor to Continue) and A.
+    // The game's own Continue loads the campaign slot: while the save list
+    // holds only that slot there is no save picker (with several saves the
+    // picker came up, launch 12) and no way to load the wrong hero. The
+    // panel's closing A is swallowed, then Down (cursor to Continue) and A.
+    rex_content_set_save_filter(slot->name.c_str());
     swallow_closing_a();
     fable2::cooplobby::InjectPress(static_cast<uint16_t>(fable2::cooplobby::kDown), 700, 200);
     fable2::cooplobby::InjectPress(static_cast<uint16_t>(fable2::cooplobby::kA), 1400, 200);
@@ -253,6 +259,14 @@ inline void session_tick() {
                 (s.host_female ? "CreatureHeroFemale" : "CreatureHero") + "')))");
           }
         }
+        if (!loaded && now - s.since_ms > 180000) {
+          // Never leave the player's save list narrowed to one slot.
+          REXSYS_INFO("[coop] host start: the campaign world did not load in 3 min, giving up");
+          rex_content_set_save_filter("");
+          s.s = Session::kNone;
+          fable2::coophero::g_capture_paused.store(false);
+          break;
+        }
         if (loaded && settled > 20000 && s.gender_sent) {
           s.s = Session::kHostInWorld;
           s.since_ms = now;
@@ -260,6 +274,7 @@ inline void session_tick() {
           const std::string go = fable2::cooplobby::Format(fable2::cooplobby::GoRecord{s.cid, ++s.go_seq});
           lobby::PublishData("coop_go", go);
           REXSYS_INFO("[coop] host world up (starter save {}): published {}", s.slot_name, go);
+          rex_content_set_save_filter("");
           fable2::coophero::g_capture_paused.store(false);
         }
         break;
