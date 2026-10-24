@@ -219,11 +219,11 @@ class Game:
         self.wait("menu detected in the ship build ([state] -> PressAScreen/MainMenu)",
                   r"\[state\].*-> (PressAScreen|MainMenu)", 0, 240)
         time.sleep(5)
-        for _ in range(3):
-            n = self.count(r"title passed")
-            self.press("E")
-            if self.wait("title A passes to the menu", r"title passed", n, 8):
-                break
+        # One press only: a retry that lands on the menu starts the stock New Game
+        # (launch of 2026-10-24, the error path).
+        n = self.count(r"title passed")
+        self.press("E")
+        self.wait("title A passes to the menu", r"title passed", n, 8)
         time.sleep(4)
 
 
@@ -663,10 +663,110 @@ def run_menu():
         relay.kill()
 
 
+def run_menu2():
+    """From m2 on: continue the campaign save m1 made in mod-a's scratch saves,
+    the partner rejoins; then the host-left message; then stock Continue."""
+    setup_tomls()
+    relay_log = open(os.path.join(OUT, "relay_menu2.log"), "w")
+    relay = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                           "coop_relay.py")], stdout=relay_log, stderr=relay_log)
+    a, b = Game("mod-a", "host"), Game("mod-b", "partner")
+    a.start()
+    b.start()
+    try:
+        a.past_title()
+        b.past_title()
+        # --- m2: host continues the co-op save; the partner rejoins -----------------
+        open_coop_entry(a, "m2")
+        a.select("Host: continue a co-op save")
+        n = a.count(r"\[lobby\] open saves")
+        a.press("E")
+        a.wait("m2: the hub lists the co-op saves", r"\[lobby\] open saves", n, 10)
+        time.sleep(1.5)
+        a.shot("m2_host_saves.png")
+        n = a.count(r"\[lobby\] open host kind=continue")
+        a.press("E")
+        a.wait("m2: the save's lobby opens", r"\[lobby\] open host kind=continue", n, 10)
+        time.sleep(3)
+        a.shot("m2_host_lobby.png")
+        open_coop_entry(b, "m2")
+        partner_joins(b, "Continue TestA", "m2")
+        if both_ready_and_start(a, b, "m2"):
+            a.wait("m2: host loads through the game's own Load Game", r"main menu: Load Game", 0, 20)
+            join_phase(a, b, "m2")
+        # --- err: the host leaves its lobby while the partner waits ---------------------
+        b.stop()
+        n = a.count(r"host: back at the front end")
+        a.wait("err: host back at the main menu", r"host: back at the front end", n, 240)
+        time.sleep(15)
+        a.past_title()
+        open_coop_entry(a, "err")
+        host_new_campaign(a, "err")
+        b = Game("mod-b", "partner")
+        b.start()
+        b.past_title()
+        open_coop_entry(b, "err")
+        partner_joins(b, "Join TestA", "err")
+        time.sleep(2)
+        n = b.count(r"partner: the host left the lobby")
+        a.select("Back")
+        a.press("E")
+        b.wait("err: partner is told the host left", r"partner: the host left the lobby", n, 30)
+        time.sleep(1)
+        b.shot("err_partner_host_left.png")
+        # --- stock Continue: the partner's newest solo save loads, no co-op panel ------
+        b.press("B")
+        time.sleep(2)
+        b.stop()
+        b = Game("mod-b", "partner")
+        b.start()
+        b.past_title()
+        b.press("Down")
+        time.sleep(1)
+        n = b.count(r"\[lobby\] open")
+        b.press("E")
+        time.sleep(30)
+        b.shot("stock_continue.png")
+        note("PASS" if b.count(r"\[lobby\] open") == n else "FAIL", "Continue is the stock game's (no co-op panel)")
+    finally:
+        for g in (a, b):
+            g.stop()
+        relay.kill()
+
+
+def run_err():
+    """The host leaves its lobby while the partner waits: the partner is told."""
+    setup_tomls()
+    relay_log = open(os.path.join(OUT, "relay_err.log"), "w")
+    relay = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                           "coop_relay.py")], stdout=relay_log, stderr=relay_log)
+    a, b = Game("mod-a", "host"), Game("mod-b", "partner")
+    a.start()
+    b.start()
+    try:
+        a.past_title()
+        b.past_title()
+        open_coop_entry(a, "err")
+        host_new_campaign(a, "err")
+        open_coop_entry(b, "err")
+        partner_joins(b, "Join TestA", "err")
+        time.sleep(2)
+        n = b.count(r"partner: the host left the lobby")
+        a.select("Back")
+        a.press("E")
+        b.wait("err: partner is told the host left", r"partner: the host left the lobby", n, 30)
+        time.sleep(1)
+        b.shot("err_partner_host_left.png")
+    finally:
+        for g in (a, b):
+            g.stop()
+        relay.kill()
+
+
 def main():
     os.makedirs(OUT, exist_ok=True)
     mode = sys.argv[1] if len(sys.argv) > 1 else "coop"
-    {"coop": run_coop, "solo": run_solo, "multi": run_multi, "menu": run_menu}[mode]()
+    {"coop": run_coop, "solo": run_solo, "multi": run_multi, "menu": run_menu, "menu2": run_menu2, "err": run_err}[mode]()
     with open(os.path.join(OUT, f"results_{mode}.txt"), "w", encoding="utf-8") as f:
         f.write("\n".join(results) + "\n")
     return 0 if not any(r.startswith("FAIL") for r in results) else 1

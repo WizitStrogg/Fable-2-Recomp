@@ -351,6 +351,7 @@ inline void on_host_start() {
     std::lock_guard<std::mutex> l1(lb.m);
     std::lock_guard<std::mutex> l2(S().m);
     S().s = Session::kHostStarting;
+    g_past_title = false;  // the next front-end visit (after the session) starts at the title
     S().cid = cid;
     S().partner_name = lb.host.rec.partner;
     S().partner_ip = lb.host.partner_ip;
@@ -425,6 +426,7 @@ inline void on_partner_go(uint32_t ip) {
   {
     std::lock_guard<std::mutex> l(S().m);
     S().s = Session::kPartnerJoining;
+    g_past_title = false;
     S().since_ms = fable2::f5lua::steady_ms();
     S().host_ip = ip;
     S().host_xuid = host_xuid;
