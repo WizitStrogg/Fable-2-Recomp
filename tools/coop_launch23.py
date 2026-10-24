@@ -47,6 +47,19 @@ def main() -> int:
     L.past_title(a, "a")
     L.past_title(b, "b")
 
+    # --- T018a discovery: the menu element's memory over Down x4 / Up x4 (log only) -----
+    a.cmd({"cmd": "cvar", "name": "coop_menu_probe", "value": "true"})
+    time.sleep(1)
+    for button in ["Down"] * 4 + ["Up"] * 4:
+        a.press(button, 200)
+        time.sleep(1.3)
+    a.cmd({"cmd": "cvar", "name": "coop_menu_probe", "value": "false"})
+    probe = grep_log(a, r"\[menuprobe\]", 40)
+    with open(os.path.join(OUT, "0_menuprobe.txt"), "w", encoding="utf-8") as f:
+        f.write("\n".join(l[l.find("[menuprobe]"):] for l in probe) + "\n")
+    note("INFO", f"T018a: {len(probe)} menu probe lines (0_menuprobe.txt)")
+    time.sleep(2)
+
     # --- Back from the host's campaign lobby -------------------------------------------
     a.press("Down", 250)
     time.sleep(1.5)

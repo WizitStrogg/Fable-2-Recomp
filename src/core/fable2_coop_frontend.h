@@ -43,6 +43,8 @@
 // rexglue-sdk: narrow the game's save list to one slot ("" = all saves).
 extern "C" void rex_content_set_save_filter(const char* file_name);
 
+REXCVAR_DEFINE_BOOL(coop_menu_probe, false, "Network",
+                    "Testing: log the main menu dispatch's element memory on each press (T018a)");
 REXCVAR_DEFINE_STRING(coop_rig_save_filter, "", "Network",
                       "Testing: list only this save slot (HeroNNN), so Continue loads it");
 REXCVAR_DEFINE_INT32(coop_partner_join_delay_ms, 0, "Network",
@@ -860,7 +862,25 @@ inline void open_chooser() {
 }
 
 // The press hook. Returns true to swallow the press.
-inline bool OnPress(PPCContext& ctx, uint8_t* /*base*/) {
+// T018a discovery (rig only, log only): the dispatch's registers and the first
+// 96 bytes of its r3 element, to find the menu's real focused-row field.
+inline void probe_menu_press(PPCContext& ctx, uint8_t* base) {
+  const uint32_t el = ctx.r3.u32;
+  std::string words;
+  if (el >= 0x10000 && el < 0xFFFFFF00u) {
+    char w[10];
+    for (uint32_t off = 0; off < 96; off += 4) {
+      const uint8_t* p = base + el + off;
+      std::snprintf(w, sizeof(w), "%02X%02X%02X%02X ", p[0], p[1], p[2], p[3]);
+      words += w;
+    }
+  }
+  REXSYS_INFO("[menuprobe] mask={:04X} row={} r3={:08X} r4={:08X} r6={:08X} el={}", ctx.r5.u32 & 0xFFFF,
+              g_row, el, ctx.r4.u32, ctx.r6.u32, words);
+}
+
+inline bool OnPress(PPCContext& ctx, uint8_t* base) {
+  if (REXCVAR_GET(coop_menu_probe) && in_main_menu()) probe_menu_press(ctx, base);
   if (!REXCVAR_GET(coop_campaign)) return false;
   // While the chooser or lobby is open the panel owns the pad; the stock
   // menu sees nothing (its state is idle, this catches stragglers).
