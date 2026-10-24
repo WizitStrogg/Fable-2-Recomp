@@ -100,6 +100,34 @@ struct NewSlot {
   fs::path path;     // the slot folder
 };
 
+// The profile's save slots (folders under 00000001 that hold a mainsave.bin).
+inline std::vector<NewSlot> Slots() {
+  std::vector<NewSlot> out;
+  const auto title = ProfileTitleDir(nullptr);
+  if (!title) return out;
+  std::error_code ec;
+  for (const auto& e : fs::directory_iterator(*title / "00000001", ec))
+    if (e.is_directory() && fs::exists(e.path() / "mainsave.bin"))
+      out.push_back({e.path().filename().string(), e.path()});
+  return out;
+}
+
+// The slot the game's Continue loads: the most recently saved one.
+inline std::optional<NewSlot> NewestSlot() {
+  std::optional<NewSlot> best;
+  fs::file_time_type best_time{};
+  std::error_code ec;
+  for (auto& s : Slots()) {
+    const auto t = fs::last_write_time(s.path / "mainsave.bin", ec);
+    if (ec) continue;
+    if (!best || t > best_time) {
+      best = s;
+      best_time = t;
+    }
+  }
+  return best;
+}
+
 // Copies the template into the next free slot. Returns nothing (and leaves
 // nothing behind) on any failure.
 inline std::optional<NewSlot> CreateCampaignSlot(std::string* error) {
@@ -154,6 +182,8 @@ inline std::optional<NewSlot> CreateCampaignSlot(std::string* error) {
       return fail("writing saveuid/header failed");
     }
   }
+  // copy_file keeps the template's times: make the slot the newest save.
+  fs::last_write_time(dst / "mainsave.bin", fs::file_time_type::clock::now(), ec);
   REXSYS_INFO("[coop] starter save: created {} for XUID {:016X} from {}", dst.string(), xuid,
               template_dir().string());
   return NewSlot{*name, dst};

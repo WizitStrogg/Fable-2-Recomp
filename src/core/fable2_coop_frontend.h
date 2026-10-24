@@ -19,6 +19,8 @@
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
+#include <ctime>
+#include <filesystem>
 #include <functional>
 #include <mutex>
 #include <string>
@@ -47,6 +49,7 @@ inline bool g_armed = true;         // false once the stock New Game is running
 inline int g_pass_a = 0;            // injected A presses to let through
 inline int64_t g_last_press_ms = 0;
 inline bool g_past_title = false;   // the title's "Press A" was passed this visit
+inline bool g_continue_swallowed = false;  // the last A on Continue opened a campaign lobby
 inline uint32_t g_last_mask = 0;
 // The A that closes a panel is still held on the next poll, so the game's own
 // dispatch receives it right after the panel closes (launch 3: it reopened the
@@ -138,19 +141,88 @@ inline std::string new_campaign_id() {
   return buf;
 }
 
-// Host pressed Start (spec D4): the stock New Game, the hero card from the
-// lobby's gender, the childhood world, then the game's own gameflow skip to
-// QC060 (session_tick); the partner is sent coop_go once adulthood starts.
+// A campaign slot is a save slot with a coop_campaign.toml marker (data-model.md).
+inline std::optional<fable2::cooptemplate::NewSlot> campaign_slot(const std::string& cid) {
+  for (auto& s : fable2::cooptemplate::Slots()) {
+    const auto m = fable2::coopcampaign::ReadMarker(s.path);
+    if (m && m->campaign_id == cid) return s;
+  }
+  return std::nullopt;
+}
+
+inline std::string utc_now() {
+  const std::time_t t = std::time(nullptr);
+  std::tm tm{};
+#ifdef _WIN32
+  gmtime_s(&tm, &t);
+#else
+  gmtime_r(&t, &tm);
+#endif
+  char buf[32];
+  std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tm);
+  return buf;
+}
+
+// The main menu's rows with saves present: New Game, Continue, ...
+constexpr int kContinueRow = 1;
+
+// Moves the mirrored cursor to Continue and presses A there, after `delay` ms.
+inline void inject_continue(int64_t delay) {
+  int row = g_row;
+  while (row != kContinueRow) {
+    const bool down = row < kContinueRow;
+    fable2::cooplobby::InjectPress(static_cast<uint16_t>(down ? fable2::cooplobby::kDown : fable2::cooplobby::kUp),
+                                   delay, 200);
+    row += down ? 1 : -1;
+    delay += 700;
+  }
+  fable2::cooplobby::InjectPress(static_cast<uint16_t>(fable2::cooplobby::kA), delay, 200);
+}
+
+// Host pressed Start (spec D4). A new campaign copies the starter save into a
+// slot of its own and marks it; a continued one (Continue on a campaign slot,
+// T025) reloads its slot. Either way the game's own Continue loads the slot.
 inline void on_host_start() {
-  // Default start: the starter save. Make the campaign slot first; if that
-  // fails the lobby stays open and says why.
   std::optional<fable2::cooptemplate::NewSlot> slot;
   std::optional<fable2::cooptemplate::TemplateInfo> tmpl;
   const bool from_template = !REXCVAR_GET(coop_childhood_skip);
-  if (from_template) {
+  fable2::cooplobby::LobbyRecord rec;
+  {
+    auto& lb = fable2::cooplobby::L();
+    std::lock_guard<std::mutex> l(lb.m);
+    rec = lb.host.rec;
+  }
+  const bool resume = rec.kind == fable2::cooplobby::Kind::kContinue;
+  const std::string cid = resume ? rec.cid : new_campaign_id();
+  if (from_template || resume) {
+    // If the slot cannot be made (or found) the lobby stays open and says why.
     std::string error;
-    tmpl = fable2::cooptemplate::ReadTemplate();
-    slot = fable2::cooptemplate::CreateCampaignSlot(&error);
+    if (resume) {
+      slot = campaign_slot(cid);
+      if (!slot) error = "the campaign's save was not found";
+    } else {
+      tmpl = fable2::cooptemplate::ReadTemplate();
+      slot = fable2::cooptemplate::CreateCampaignSlot(&error);
+      if (slot) {
+        fable2::coopcampaign::Marker m;
+        m.campaign_id = cid;
+        m.name = rec.host + " and " + rec.partner;
+        m.created = utc_now();
+        m.host_name = rec.host;
+        m.partner_name = rec.partner;
+        m.p2_gender = std::string(1, fable2::cooplobby::GenderChar(rec.gender2));
+        m.mod_version = "001";
+        if (!fable2::coopcampaign::WriteFileAtomic(slot->path, "coop_campaign.toml",
+                                                   fable2::coopcampaign::FormatMarker(m))) {
+          std::error_code ec;
+          std::filesystem::remove_all(slot->path, ec);
+          std::filesystem::remove(slot->path.parent_path().parent_path() / "Headers" / "00000001" /
+                                      (slot->name + ".header"), ec);
+          slot.reset();
+          error = "could not mark the campaign save";
+        }
+      }
+    }
     if (!slot) {
       auto& lb = fable2::cooplobby::L();
       std::lock_guard<std::mutex> l(lb.m);
@@ -165,7 +237,7 @@ inline void on_host_start() {
     std::lock_guard<std::mutex> l1(lb.m);
     std::lock_guard<std::mutex> l2(S().m);
     S().s = Session::kHostStarting;
-    S().cid = new_campaign_id();
+    S().cid = cid;
     S().partner_name = lb.host.rec.partner;
     S().partner_ip = lb.host.partner_ip;
     S().since_ms = fable2::f5lua::steady_ms();
@@ -179,25 +251,26 @@ inline void on_host_start() {
     g_coop_screen_ms.store(0);
     g_coop_screen_hook_failed.store(false);
     fable2::coophero::g_capture_paused.store(true);  // until the adult world is ready
-    S().from_template = from_template;
-    S().template_female = tmpl && tmpl->female;
+    S().from_template = from_template || resume;
+    // A continued campaign keeps its hero as saved: no gender switch.
+    S().template_female = resume ? S().host_female : tmpl && tmpl->female;
     S().gender_sent = false;
     S().slot_name = slot ? slot->name : "";
     S().load_epoch = fable2::f5lua::g_load_epoch.load() + 1;  // the world load that follows
     REXSYS_INFO("[coop] host start: campaign {} with {}, host hero {}, {}", S().cid, S().partner_name,
                 S().host_female ? "female" : "male",
-                from_template ? "starter save " + S().slot_name : std::string("gameflow skip"));
+                resume ? "continuing " + S().slot_name
+                : from_template ? "starter save " + S().slot_name : std::string("gameflow skip"));
   }
   fable2::cooplobby::HidePanel();
-  if (from_template) {
+  if (S().from_template) {
     // The game's own Continue loads the campaign slot: while the save list
     // holds only that slot there is no save picker (with several saves the
     // picker came up, launch 12) and no way to load the wrong hero. The
-    // panel's closing A is swallowed, then Down (cursor to Continue) and A.
+    // panel's closing A is swallowed, then the cursor goes to Continue and A.
     rex_content_set_save_filter(slot->name.c_str());
     swallow_closing_a();
-    fable2::cooplobby::InjectPress(static_cast<uint16_t>(fable2::cooplobby::kDown), 700, 200);
-    fable2::cooplobby::InjectPress(static_cast<uint16_t>(fable2::cooplobby::kA), 1400, 200);
+    inject_continue(700);
   } else {
     pass_next_a_to_new_game();
   }
@@ -226,11 +299,18 @@ inline void open_host_lobby(fable2::cooplobby::Kind kind, const std::string& cid
   fable2::cooplobby::Callbacks cb;
   cb.host_start = on_host_start;
   cb.partner_go = on_partner_go;
-  cb.back = [] {
-    REXSYS_INFO("[coop] lobby closed, back to the chooser");
-    swallow_closing_a();
-    open_chooser();
-  };
+  if (kind == fable2::cooplobby::Kind::kContinue) {
+    cb.back = [] {  // T025: Back from a campaign's lobby returns to the menu
+      REXSYS_INFO("[coop] campaign lobby closed, back to the menu");
+      swallow_closing_a();
+    };
+  } else {
+    cb.back = [] {
+      REXSYS_INFO("[coop] lobby closed, back to the chooser");
+      swallow_closing_a();
+      open_chooser();
+    };
+  }
   fable2::cooplobby::OpenHost(kind, cid, partner, cb);
 }
 
@@ -462,8 +542,12 @@ inline bool OnPress(PPCContext& ctx, uint8_t* /*base*/) {
     // (launch 6: an A meant for the prompt opened the chooser instead).
     std::lock_guard<std::mutex> l(S().m);
     if (S().s == Session::kPartnerJoining) return false;
+    // In the world the pause menu uses this same dispatch and the state probe
+    // can still say MainMenu (launch 16: a pause-menu A opened the chooser).
+    if (S().s == Session::kHostInWorld || S().s == Session::kHostPartnerLost) return false;
   }
-  if (!in_main_menu()) {
+  const auto st = lobby::GetLobbyStatus();
+  if (!in_main_menu() || st.in_world || st.joined_host_ip) {
     g_past_title = false;  // left the front end: the next visit starts at the title
     return false;
   }
@@ -502,11 +586,30 @@ inline bool OnPress(PPCContext& ctx, uint8_t* /*base*/) {
       return false;
     }
     if (now < g_swallow_a_until) return true;  // the A that closed a panel with Back
-    if (repeat) return g_row == kNewGameRow && g_armed;  // second call of a swallowed press
+    if (repeat)  // second call of a swallowed press
+      return g_armed && (g_row == kNewGameRow || (g_row == kContinueRow && g_continue_swallowed));
     if (g_row == kNewGameRow && g_armed) {
       REXSYS_INFO("[coop] new game: A on New Game, showing Solo / Co-op");
       open_chooser();
       return true;
+    }
+    if (g_row == kContinueRow && g_armed) {
+      // T025: Continue on a campaign save opens that campaign's lobby instead of
+      // loading it alone; any other save loads as usual. Start's own A on
+      // Continue (kHostStarting) passes.
+      {
+        std::lock_guard<std::mutex> l(S().m);
+        if (S().s == Session::kHostStarting) return false;
+      }
+      const auto newest = fable2::cooptemplate::NewestSlot();
+      const auto m = newest ? fable2::coopcampaign::ReadMarker(newest->path) : std::nullopt;
+      g_continue_swallowed = m.has_value();
+      if (m) {
+        REXSYS_INFO("[coop] continue: {} is campaign {} with {}, opening its lobby", newest->name,
+                    m->campaign_id, m->partner_name);
+        open_host_lobby(fable2::cooplobby::Kind::kContinue, m->campaign_id, m->partner_name);
+        return true;
+      }
     }
     return false;
   }
