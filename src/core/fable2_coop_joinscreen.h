@@ -64,11 +64,9 @@ inline std::atomic<int32_t> g_last_slot4_r4{-999}, g_last_slot4_r5{-999}, g_last
 // sub_8247AAB0 = accept the split; partner prompt: sub_8247C1B0 = continue without a
 // save), 37 = back / No (static read of both switches, launch 27 map). With
 // coop_join_screen_skip on, during a campaign, while the controller is open, a reader
-// that returns no action returns 36 instead (at most every kSkipEveryMs). No pad
+// that returns no action returns 36 instead (at most kMaxPerReader times). No pad
 // press is involved, so nothing reaches the world after the screens close.
-constexpr int64_t kSkipEveryMs = 400;
 inline std::atomic<uint32_t> g_controller{0};  // set at open, cleared at close
-inline std::atomic<int64_t> g_last_skip_ms{0};
 inline std::atomic<int64_t> g_open_ms{0};
 inline std::atomic<int> g_skips{0};
 
@@ -77,16 +75,39 @@ inline std::atomic<int> g_skips{0};
 // reader's raw samples, turn the skip off at runtime, and let the pad answers
 // (fable2_coop_frontend.h accept_tick) finish the join.
 constexpr int64_t kNoAcceptMs = 15000, kStuckMs = 25000;
+// Every reader call while the controller is open, any address (launch 28 rerun: the
+// partner's later screen did not use ctrl+348), kept as distinct (reader, caller,
+// input, returned) combinations with a count.
 struct Sample {
-  int32_t off, input, got;
+  uint32_t reader, lr;
+  int32_t input, got;
+  int count;
 };
 inline std::mutex g_samples_mu;
 inline Sample g_samples[32];
 inline int g_sample_n = 0;
-inline void record(uint32_t reader, uint32_t ctrl, int32_t input, int32_t got) {
+inline void record(uint32_t reader, uint32_t lr, int32_t input, int32_t got) {
   std::lock_guard<std::mutex> l(g_samples_mu);
-  g_samples[g_sample_n++ % 32] = {int32_t(reader - ctrl), input, got};
+  for (int i = 0; i < g_sample_n; ++i) {
+    Sample& s = g_samples[i];
+    if (s.reader == reader && s.lr == lr && s.input == input && s.got == got) {
+      ++s.count;
+      return;
+    }
+  }
+  if (g_sample_n < 32) g_samples[g_sample_n++] = {reader, lr, input, got, 1};
 }
+// At most kMaxPerReader accepts per reader, kSkipGapMs apart (launch 28 rerun: 62
+// accepts on the host reader may themselves have upset the screens).
+constexpr int kMaxPerReader = 2;
+constexpr int64_t kSkipGapMs = 1500;
+struct Injected {
+  uint32_t reader;
+  int count;
+  int64_t last_ms;
+};
+inline Injected g_injected[8];
+inline int g_injected_n = 0;
 inline void check_fallback() {
   const uint32_t ctrl = g_controller.load();
   if (!ctrl || !REXCVAR_GET(coop_join_screen_skip) || !REXCVAR_GET(coop_campaign)) return;
@@ -98,14 +119,27 @@ inline void check_fallback() {
               now - open, skips);
   {
     std::lock_guard<std::mutex> l(g_samples_mu);
-    const int n = std::min(g_sample_n, 32);
-    for (int i = 0; i < n; ++i) {
-      const Sample& s = g_samples[(g_sample_n - n + i) % 32];
-      REXSYS_INFO("[joinscreen] sample reader=ctrl{:+} input={} returned={}", s.off, s.input, s.got);
+    for (int i = 0; i < g_sample_n; ++i) {
+      const Sample& s = g_samples[i];
+      REXSYS_INFO("[joinscreen] sample reader={:08X} (ctrl{:+}) caller={:08X} input={} returned={} x{}", s.reader,
+                  int32_t(s.reader - ctrl), s.lr, s.input, s.got, s.count);
     }
   }
   rex::cvar::SetFlagByName("coop_join_screen_skip", "false");
 }
+
+// The fallback also runs from its own frame hook: launch 28 rerun showed the
+// partner's screens can leave the per-frame update the check used to hang off.
+inline void (*g_prev_frame_hook)() = nullptr;
+inline void OnFrame() {
+  if (g_prev_frame_hook) g_prev_frame_hook();
+  check_fallback();
+}
+inline const bool g_installed = [] {
+  g_prev_frame_hook = fable2::f5lua::g_frame_hook;
+  fable2::f5lua::g_frame_hook = &OnFrame;
+  return true;
+}();
 
 }  // namespace fable2::coopjoinscreen
 
@@ -120,21 +154,26 @@ extern "C" void sub_82841730(PPCContext& ctx, uint8_t* base) {
   const uint32_t ctrl = g_controller.load();
   if (!ctrl || !REXCVAR_GET(coop_join_screen_skip) || !REXCVAR_GET(coop_campaign)) return;
   const int32_t got = int32_t(ctx.r3.u32);
-  if (reader - ctrl < 0x1000) record(reader, ctrl, input, got);  // the controller's readers
-  check_fallback();
-  if (!REXCVAR_GET(coop_join_screen_skip)) return;
+  record(reader, uint32_t(ctx.lr), input, got);
   if (reader != ctrl + 308 && reader != ctrl + 348) return;
   // No action this frame: the reader hands its input code straight back (24 every
-  // idle frame, launch 28; 0 in some branches). Real actions are 28..38.
+  // idle frame, launch 28 rerun; 0 in some branches). Real actions are 28..38.
   if ((got != 0 && got != input) || (input >= 28 && input <= 38)) return;
-  if (REXCVAR_GET(coop_join_screen_probe) && g_skips.load() == 0)
-    REXSYS_INFO("[joinscreen] reader idle: input {} returned {}", input, got);
   const int64_t now = fable2::f5lua::steady_ms();
-  if (now - g_last_skip_ms.load() < kSkipEveryMs) return;
-  g_last_skip_ms.store(now);
+  Injected* inj = nullptr;
+  {
+    std::lock_guard<std::mutex> l(g_samples_mu);
+    for (int i = 0; i < g_injected_n; ++i)
+      if (g_injected[i].reader == reader) inj = &g_injected[i];
+    if (!inj && g_injected_n < 8) inj = &(g_injected[g_injected_n++] = {reader, 0, 0});
+    if (!inj || inj->count >= kMaxPerReader || now - inj->last_ms < kSkipGapMs) return;
+    ++inj->count;
+    inj->last_ms = now;
+  }
   ctx.r3.u64 = 36;
-  REXSYS_INFO("[joinscreen] skip: accept (36) to the {} reader ({})",
-              reader == ctrl + 308 ? "host" : "partner", g_skips.fetch_add(1) + 1);
+  REXSYS_INFO("[joinscreen] skip: accept (36) to the {} reader ({} of {} there)",
+              reader == ctrl + 308 ? "host" : "partner", inj->count, kMaxPerReader);
+  g_skips.fetch_add(1);
 }
 
 extern "C" void __imp__sub_82476600(PPCContext& ctx, uint8_t* base);
@@ -143,6 +182,11 @@ extern "C" void sub_82476600(PPCContext& ctx, uint8_t* base) {
   fable2::coopjoinscreen::g_controller.store(ctx.r3.u32);
   fable2::coopjoinscreen::g_skips.store(0);
   fable2::coopjoinscreen::g_open_ms.store(fable2::f5lua::steady_ms());
+  {
+    std::lock_guard<std::mutex> l(fable2::coopjoinscreen::g_samples_mu);
+    fable2::coopjoinscreen::g_sample_n = 0;
+    fable2::coopjoinscreen::g_injected_n = 0;
+  }
   // Experiment (rig, off by default): with the in-code answers on, do not build the
   // screens' layout at all. Whether the state machine still reaches the spawn without
   // it is what launch 28's third join tests.
