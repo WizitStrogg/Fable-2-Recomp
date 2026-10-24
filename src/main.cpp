@@ -15,6 +15,8 @@
 #include "fable2_coop_lobby.h"
 // Co-op campaign front end: New Game -> Solo / Co-op (feature 001, T018).
 #include "fable2_coop_frontend.h"
+// Co-op join gate probe / force (starter save inside QC060).
+#include "fable2_coop_joingate.h"
 
 #include "fable_2_app.h"
 #include "fps_meter.h"
