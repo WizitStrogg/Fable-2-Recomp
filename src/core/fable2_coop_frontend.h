@@ -34,6 +34,7 @@
 
 #include "fable2_coop_campaign.h"
 #include "fable2_coop_lobby.h"
+#include "fable2_coop_backup.h"
 #include "fable2_coop_p2file.h"
 #include "fable2_coop_template.h"
 #include "fable2_front_hooks.h"
@@ -84,7 +85,7 @@ inline bool in_main_menu() {
 
 inline void open_chooser();
 inline std::optional<std::string> restore_player2_chunk(const std::filesystem::path& slot);
-inline void p2_watch_start(const std::filesystem::path& slot);
+inline void p2_watch_start(const std::filesystem::path& slot, const std::string& cid, uint32_t partner_ip);
 inline void p2_watch_stop();
 
 
@@ -394,6 +395,8 @@ constexpr const char* kP2File = "coop_player2.txt";
 struct P2Watch {
   std::mutex m;
   std::filesystem::path slot;  // the campaign slot folder ("" = not hosting a campaign)
+  std::string cid;             // the campaign, and the partner the backups go to (T039)
+  uint32_t partner_ip = 0;
   std::string cache;           // last COOPHERO:v2 line of player 2
   std::filesystem::file_time_type seen{};
   int64_t changed_ms = 0, next_cache_ms = 0;
@@ -434,11 +437,14 @@ inline void request_p2_capture(const char* tag) {
       "else print('" + tag + "-NONE') end\n");
 }
 
-inline void p2_watch_start(const std::filesystem::path& slot) {
+inline void p2_watch_start(const std::filesystem::path& slot, const std::string& cid,
+                           uint32_t partner_ip) {
   auto& w = P2();
   std::lock_guard<std::mutex> l(w.m);
   std::error_code ec;
   w.slot = slot;
+  w.cid = cid;
+  w.partner_ip = partner_ip;
   w.cache.clear();
   w.seen = std::filesystem::last_write_time(slot / "mainsave.bin", ec);
   w.changed_ms = 0;
@@ -490,7 +496,9 @@ inline void on_p2_line(std::string_view line, bool write) {
   auto& w = P2();
   std::lock_guard<std::mutex> l(w.m);
   w.cache = profile;
-  if (write && !w.slot.empty()) write_p2_file(w.slot, profile, "capture");
+  // A save with player 2 in the world: the partner gets a backup of the slot (T039).
+  if (write && !w.slot.empty() && write_p2_file(w.slot, profile, "capture"))
+    fable2::coopbackup::SendBackup(w.slot, w.cid, w.partner_ip);
 }
 inline void on_p2_none(bool write) {
   auto& w = P2();
@@ -662,7 +670,7 @@ inline void session_tick() {
           const std::string go = fable2::cooplobby::Format(fable2::cooplobby::GoRecord{s.cid, ++s.go_seq});
           lobby::PublishData("coop_go", go);
           REXSYS_INFO("[coop] host world up (starter save {}): published {}", s.slot_name, go);
-          if (!s.slot_path.empty()) p2_watch_start(s.slot_path);
+          if (!s.slot_path.empty()) p2_watch_start(s.slot_path, s.cid, s.partner_ip);
           rex_content_set_save_filter("");
           fable2::coophero::g_capture_paused.store(false);
         }
@@ -921,6 +929,9 @@ inline void (*g_prev_frame_hook)() = nullptr;
 inline void OnFrame() {
   if (g_prev_frame_hook) g_prev_frame_hook();
   if (!REXCVAR_GET(coop_campaign)) return;
+  static const bool backup_shown = (fable2::coopbackup::LoadLast(), true);  // F6, once
+  (void)backup_shown;
+  fable2::coopbackup::EnsureListener();  // the partner side of campaign backups (T039)
   // A quick tap released before the next poll: the closing A never reached
   // the dispatch, so send one.
   if (g_pass_a > 0 && g_pass_deadline && fable2::f5lua::steady_ms() > g_pass_deadline) {
