@@ -1314,11 +1314,25 @@ def run_camera():
         lines = [l for l in b.lines() if "[coopcam] trace" in l][n_trace:]
         rx = re.compile(r"dt ([0-9.]+) ms creature (\S+) (\S+) (\S+) target \S+ \S+ \S+ cam (\S+) (\S+) (\S+) "
                         r"host \S+ \S+ \S+ fov ([0-9.]+)")
-        rows = [tuple(float(x) for x in m.groups()) for m in map(rx.search, lines) if m]
+        rows = []
+        for l in lines:
+            m = rx.search(l)
+            if not m:
+                continue
+            tm = re.search(r"(\d\d):(\d\d):(\d\d)\.(\d{3})\]", l)
+            t = int(tm.group(1)) * 3600 + int(tm.group(2)) * 60 + int(tm.group(3)) + int(tm.group(4)) / 1000
+            if rows and t - rows[-1][0] > 0.5:  # the gap between the two 30 s trace windows: not a frame
+                rows.append(None)
+            rows.append((t,) + tuple(float(x) for x in m.groups()))
+        # Drop the time column for the analysis below; None marks a window gap.
+        rows = [r[1:] if r else None for r in rows]
         cam_moves, cre_moves, jerks, fovs = [], [], [], set()
         prev = None
         prev_move = None
         for r in rows:
+            if r is None:  # window gap
+                prev, prev_move = None, None
+                continue
             fovs.add(round(r[7], 2))
             if prev:
                 cm = math.dist(r[4:7], prev[4:7])
@@ -1330,7 +1344,7 @@ def run_camera():
                 prev_move = cm
             prev = r
         hand = b.count(r"showing the host's camera") - n_hand
-        note("PASS" if len(rows) > 600 else "FAIL", f"cam: trace frames {len(rows)}")
+        note("PASS" if len(rows) > 600 else "FAIL", f"cam: trace frames {sum(1 for r in rows if r)}")
         note("PASS" if hand == 0 else "FAIL", f"cam: hand-backs to the host's camera in 60 s: {hand}")
         note("INFO", f"cam: host FOVs seen by the partner: {sorted(fovs)}")
         note("INFO", f"cam: partner creature per-frame move p50 {pct(cre_moves, .5):.3f} p99 {pct(cre_moves, .99):.3f} "
