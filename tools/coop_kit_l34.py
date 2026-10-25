@@ -301,7 +301,7 @@ def run_l4():
         note("INFO", f"l4: campaign slot {slot}")
         time.sleep(6)
         give_kit(a, b)
-        save_row_quits(b, "l4q")
+        # save_row_quits(b, "l4q"): off until the quit question closes from the full wheel (17:14Z)
         snap = snapshot(a, "l4a")
         items = snap[1] if snap else {}
         potion, hat = hex_of(items, "ITEMS_POTIONS"), hex_of(items, "CLOTHING_HATS")
