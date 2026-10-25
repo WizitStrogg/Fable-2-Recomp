@@ -65,6 +65,25 @@ REXCVAR_DEFINE_BOOL(coop_kit, false, "Network",
 REXCVAR_DEFINE_BOOL(coop_kit_mirror, false, "Network",
                     "Co-op kit (partner): keep player 2's inventory copy equal to the host's "
                     "(off until proven on the rig)");
+REXCVAR_DEFINE_BOOL(coop_kit_mirror_clothing, true, "Network",
+                    "Co-op kit (partner): the mirror also adds owned clothing missing from the copy "
+                    "(never removes it)");
+REXCVAR_DEFINE_BOOL(coop_kit_mirror_weapons, true, "Network",
+                    "Co-op kit (partner): the mirror also puts player 2's equipped melee and ranged "
+                    "weapons in the copy's inventory, so the Weapons page lists them");
+// Launch 2: each screen action and each page redirect on its own switch.
+REXCVAR_DEFINE_BOOL(coop_kit_send_wear, true, "Network",
+                    "Co-op kit (partner): wear / take off on the Clothing page is sent to the host");
+REXCVAR_DEFINE_BOOL(coop_kit_send_use, true, "Network",
+                    "Co-op kit (partner): use (potions, food) on the Items page is sent to the host");
+REXCVAR_DEFINE_BOOL(coop_kit_send_equip, true, "Network",
+                    "Co-op kit (partner): equip on the Weapons page is sent to the host");
+REXCVAR_DEFINE_BOOL(coop_kit_redirect_save, true, "Network",
+                    "Co-op kit (partner): the wheel's Save row opens the henchman quit instead");
+REXCVAR_DEFINE_BOOL(coop_kit_redirect_abilities, true, "Network",
+                    "Co-op kit (partner): the wheel's Abilities row opens the henchman abilities");
+REXCVAR_DEFINE_BOOL(coop_kit_redirect_kick, true, "Network",
+                    "Co-op kit (partner): the wheel's Kick row does nothing");
 
 extern "C" void sub_8261A058(PPCContext& ctx, uint8_t* base);
 extern "C" void sub_8261B1A0(PPCContext& ctx, uint8_t* base);
@@ -476,8 +495,10 @@ inline void OnStateLine(std::string_view line) {
 // --- joiner: the mirror ------------------------------------------------------------
 
 // Corrects the copy's inventory (component 13) to the state's non-clothing
-// items. Clothing is held by the appearance manager and is worn through the
-// host's own replication; it is not touched here.
+// items. Clothing is worn through the host's own replication, so it is never
+// removed here; with coop_kit_mirror_clothing, owned clothing missing from the
+// copy is added (L1b: the copy lists its worn clothes as inventory stacks, and
+// a hat given on the host never reached the Clothing page).
 inline void mirror_now(PPCContext& ctx, uint8_t* base, const KitState& want) {
   const uint32_t inv = component(base, fable2::coopcam::g_p2_entity.load(), kInventoryEC);
   if (!inv) return;
@@ -487,8 +508,7 @@ inline void mirror_now(PPCContext& ctx, uint8_t* base, const KitState& want) {
     REXSYS_WARN("[coopkit] mirror: the copy's inventory list did not read back whole; skipped");
     return;
   }
-  KitState inv_only = want;
-  std::erase_if(inv_only.items, [](const Item& i) { return i.category.rfind("CLOTHING", 0) == 0; });
+  const KitState inv_only = WantedInventory(want, REXCVAR_GET(coop_kit_mirror_weapons));
   std::map<std::string, uint32_t> have_inv;
   for (const auto& [rec, n] : have) {
     const auto it = std::find_if(want.items.begin(), want.items.end(), [&](const Item& i) { return i.rec == rec; });
@@ -500,6 +520,10 @@ inline void mirror_now(PPCContext& ctx, uint8_t* base, const KitState& want) {
     for (int i = 0; i < ch.delta && i < 64; ++i) adds += native_add(ctx, base, inv, id) ? 1 : 0;
     for (int i = 0; i < -ch.delta && i < 64; ++i, ++removes) native_remove(ctx, base, inv, id);
   }
+  if (REXCVAR_GET(coop_kit_mirror_clothing))
+    for (const auto& i : want.items)
+      if (i.category.rfind("CLOTHING", 0) == 0 && !have.count(i.rec))
+        adds += native_add(ctx, base, inv, HexToId(i.rec)) ? 1 : 0;
   if (adds || removes)
     REXSYS_INFO("[coopkit] mirror rev {}: +{} -{} on the copy's inventory", want.rev, adds, removes);
 }
@@ -612,9 +636,10 @@ inline bool worn_on_host(uint32_t id) {
   if (!st) return false;
   return std::find(st->worn.begin(), st->worn.end(), IdToHex(id)) != st->worn.end();
 }
-// The leaf call on the joiner: send instead of acting. True = skipped.
-inline bool screen_action(PPCContext& ctx, const char* action) {
-  if (!t_screen_item) return false;
+// The leaf call on the joiner: send instead of acting. True = skipped. With
+// the action's switch off the stock local change runs (launch 1 behaviour).
+inline bool screen_action(PPCContext& ctx, const char* action, bool enabled) {
+  if (!t_screen_item || !enabled) return false;
   const uint32_t id = t_screen_item;
   t_screen_item = 0;  // one command per press
   if (const auto op = OpForScreenAction(action, worn_on_host(id))) SendCommand(*op, id);
@@ -637,38 +662,59 @@ extern "C" void sub_825A5A40(PPCContext& ctx, uint8_t* base) {
 }
 extern "C" void __imp__sub_825A6020(PPCContext& ctx, uint8_t* base);
 extern "C" void sub_825A6020(PPCContext& ctx, uint8_t* base) {
-  if (fable2::coopkit::screen_action(ctx, "equip")) return;
+  if (fable2::coopkit::screen_action(ctx, "equip", REXCVAR_GET(coop_kit_send_equip))) return;
   __imp__sub_825A6020(ctx, base);
 }
 extern "C" void __imp__sub_825A60F8(PPCContext& ctx, uint8_t* base);
 extern "C" void sub_825A60F8(PPCContext& ctx, uint8_t* base) {
-  if (fable2::coopkit::screen_action(ctx, "use")) return;
+  if (fable2::coopkit::screen_action(ctx, "use", REXCVAR_GET(coop_kit_send_use))) return;
   __imp__sub_825A60F8(ctx, base);
 }
 extern "C" void __imp__sub_825A71A0(PPCContext& ctx, uint8_t* base);
 extern "C" void sub_825A71A0(PPCContext& ctx, uint8_t* base) {
-  if (fable2::coopkit::screen_action(ctx, "wear")) return;
+  if (fable2::coopkit::screen_action(ctx, "wear", REXCVAR_GET(coop_kit_send_wear))) return;
   __imp__sub_825A71A0(ctx, base);
 }
 
 // Pause wheel page events (r4 = event: +0 -> name string object whose +0 is
-// the C string, +4 = event type; 2/300 = page chosen). Launch 1 logs the names
-// the joiner's full wheel sends, so the unsafe pages (save, kick, the full
-// abilities screen) can be redirected by name in launch 2.
+// the C string, +4 = event type; 140/141 = highlight up/down, 300 = page
+// chosen). The dispatcher sends a name containing "Henchman" to the henchman
+// handler sub_824129C0, anything else to the full one sub_82412378. On the
+// joiner a chosen page is routed by RoutePage: Abilities and the save row are
+// renamed (for this call only) to the henchman pages, Kick is dropped.
+namespace fable2::coopkit {
+constexpr uint32_t kHenchmanAbilitiesStr = 0x820B065C;  // "HenchmanAbilities" (image)
+constexpr uint32_t kHenchmanQuitStr = 0x820B0680;       // "HenchmanQuit" (image)
+constexpr uint32_t kPageChosen = 300;
+}  // namespace fable2::coopkit
+
 extern "C" void __imp__sub_8240EAA0(PPCContext& ctx, uint8_t* base);
 extern "C" void sub_8240EAA0(PPCContext& ctx, uint8_t* base) {
   namespace ta = fable2::textappend;
-  if (fable2::coopkit::joiner_active() && ta::rdable2(base, ctx.r4.u32, 8)) {
-    const uint32_t ev = ctx.r4.u32, type = ta::load_be(base, ev + 4), obj = ta::load_be(base, ev);
-    const uint32_t str = obj && ta::rdable2(base, obj, 4) ? ta::load_be(base, obj) : 0;
-    char name[64] = {};
-    if (str && ta::rdable2(base, str, sizeof(name) - 1))
-      std::memcpy(name, reinterpret_cast<const void*>(ta::host_addr(base, str)), sizeof(name) - 1);
-    for (char& c : name)
-      if (c && (c < 32 || c > 126)) c = '?';
-    REXSYS_INFO("[coopkit] pause page event type {} name '{}'", type, name);
+  namespace ck = fable2::coopkit;
+  if (!ck::joiner_active() || !ta::rdable2(base, ctx.r4.u32, 8)) return __imp__sub_8240EAA0(ctx, base);
+  const uint32_t ev = ctx.r4.u32, type = ta::load_be(base, ev + 4), obj = ta::load_be(base, ev);
+  const uint32_t str = obj && ta::rdable2(base, obj, 4) ? ta::load_be(base, obj) : 0;
+  char name[64] = {};
+  if (str && ta::rdable2(base, str, sizeof(name) - 1))
+    std::memcpy(name, reinterpret_cast<const void*>(ta::host_addr(base, str)), sizeof(name) - 1);
+  for (char& c : name)
+    if (c && (c < 32 || c > 126)) c = '?';
+  if (type != ck::kPageChosen || !str) {
+    REXSYS_DEBUG("[coopkit] pause page event type {} name '{}'", type, name);
+    return __imp__sub_8240EAA0(ctx, base);
   }
+  const ck::PageRoute route = ck::RoutePage(
+      name, {REXCVAR_GET(coop_kit_redirect_save), REXCVAR_GET(coop_kit_redirect_abilities),
+             REXCVAR_GET(coop_kit_redirect_kick)});
+  static const char* kRouteNames[] = {"as is", "henchman abilities", "henchman quit", "ignored"};
+  REXSYS_INFO("[coopkit] pause page '{}' chosen: {}", name, kRouteNames[static_cast<int>(route)]);
+  if (route == ck::PageRoute::kSwallow) return;
+  if (route == ck::PageRoute::kPass) return __imp__sub_8240EAA0(ctx, base);
+  // Point the event's name object at the henchman string for this call, then put it back.
+  ck::be32(base, obj, route == ck::PageRoute::kHenchmanQuit ? ck::kHenchmanQuitStr : ck::kHenchmanAbilitiesStr);
   __imp__sub_8240EAA0(ctx, base);
+  ck::be32(base, obj, str);
 }
 
 // Wheel builder (r3 = pause menu, r4 = 1 full / 0 henchman). Launch 1: the

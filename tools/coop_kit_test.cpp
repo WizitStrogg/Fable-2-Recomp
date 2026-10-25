@@ -96,6 +96,35 @@ int main() {
   CHECK(!OpForScreenAction("drop", false));
   CHECK(IdToHex(0xBD511D47) == "BD511D47" && HexToId("BD511D47") == 0xBD511D47u);
 
+  // The copy's wanted inventory: no clothing; equipped weapons added once.
+  KitState eq;
+  eq.melee = "98F97077";
+  eq.ranged = "00000050";
+  eq.items = {{"00000050", 2, "WEAPONS_RANGED", ""}, {"C0F0F31B", 1, "CLOTHING_HATS", ""},
+              {"11111111", 1, "WEAPONS_MELEE", ""}};
+  const KitState wi = WantedInventory(eq, true);
+  CHECK(wi.items.size() == 3);
+  CHECK(std::count_if(wi.items.begin(), wi.items.end(), [](const Item& i) { return i.rec == "98F97077"; }) == 1);
+  CHECK(std::find_if(wi.items.begin(), wi.items.end(), [](const Item& i) { return i.rec == "00000050"; })->count == 2);
+  CHECK(WantedInventory(eq, false).items.size() == 2);
+  CHECK(MirrorDiff(wi, {{"00000050", 2}, {"11111111", 1}, {"98F97077", 1}}).empty());
+
+  // The partner's wheel: stock pages pass, unsafe ones are rerouted, each switch on its own.
+  const PageSwitches all{};
+  CHECK(RoutePage("Items", all) == PageRoute::kPass);
+  CHECK(RoutePage("Weapons", all) == PageRoute::kPass);
+  CHECK(RoutePage("Clothing", all) == PageRoute::kPass);
+  CHECK(RoutePage("Map", all) == PageRoute::kPass);
+  CHECK(RoutePage("HenchmanQuit", all) == PageRoute::kPass);
+  CHECK(RoutePage("Abilities", all) == PageRoute::kHenchmanAbilities);
+  CHECK(RoutePage("Kick", all) == PageRoute::kSwallow);
+  CHECK(RoutePage("Save", all) == PageRoute::kHenchmanQuit);
+  CHECK(RoutePage("SaveAndQuit", all) == PageRoute::kHenchmanQuit);
+  CHECK(RoutePage("items", all) == PageRoute::kHenchmanQuit);  // names are exact
+  CHECK(RoutePage("Abilities", {true, false, true}) == PageRoute::kPass);
+  CHECK(RoutePage("Kick", {true, true, false}) == PageRoute::kPass);
+  CHECK(RoutePage("Save", {false, true, true}) == PageRoute::kPass);
+
   std::printf("%s\n", g_fail ? "SOME CHECKS FAILED" : "all checks passed");
   return g_fail ? 1 : 0;
 }

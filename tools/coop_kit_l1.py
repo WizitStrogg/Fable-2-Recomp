@@ -263,28 +263,21 @@ def run_wheel():
         note("INFO", f"w1: page events on the partner: {names}")
         key("Escape")
         time.sleep(2)
-        # Open each item page by walking to it: Up to the top, then Down to the target.
-        for target in ("Items", "Weapons", "Clothing"):
-            nl = len(b.lines())
+        # Open each item page by walking to it. L1b: highlights only log
+        # MenuScrollUp/Down, so rows are counted. The wheel does not wrap; Up x10
+        # stops on Save (row 0). Rows: Save, Quests/Maps, Abilities, Items,
+        # Weapons, Clothing, Logbook, Options, Kick.
+        for target, row in (("Items", 3), ("Weapons", 4), ("Clothing", 5)):
             focus(b.hwnd)
             key("Escape")
             time.sleep(2)
             for _ in range(10):
                 key("Up")
                 time.sleep(0.3)
-            ok = False
-            for i in range(10):
-                seen = page_names(b, nl)
-                if seen and seen[-1] == target:
-                    ok = True
-                    break
+            for _ in range(row):
                 key("Down")
-                time.sleep(0.9)
-            if not ok:
-                note("FAIL", f"w2: no page event '{target}' while walking the wheel ({page_names(b, nl)})")
-                key("Escape")
-                time.sleep(2)
-                continue
+                time.sleep(0.6)
+            b.shot(f"w2_partner_wheel_on_{target.lower()}.png")
             key("E")
             time.sleep(3)
             b.shot(f"w2_partner_{target.lower()}.png")
