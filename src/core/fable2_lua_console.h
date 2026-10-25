@@ -28,6 +28,7 @@
 
 #include <array>
 #include <atomic>
+#include <deque>
 #include <cctype>
 #include <cstdint>
 #include <cstring>
@@ -207,6 +208,43 @@ inline bool RunFile(const std::string& name) {
   std::ostringstream text;
   text << in.rdbuf();
   return RunChunk(text.str());
+}
+
+// Chunks that must run (one-shots): queued now when a console slot is free,
+// otherwise kept, in order, and queued by RetryKept() on a later frame (all
+// 8 slots wait while the game is paused). Periodic callers just try again on
+// their next tick instead.
+inline std::deque<std::string>& kept() {
+  static std::deque<std::string> q;
+  return q;
+}
+inline std::mutex& kept_mtx() {
+  static std::mutex m;
+  return m;
+}
+inline void RunChunkOrKeep(std::string chunk) {
+  std::lock_guard<std::mutex> l(kept_mtx());
+  if (kept().empty() && RunChunk(chunk)) return;
+  kept().push_back(std::move(chunk));
+  REXSYS_INFO("lua: chunk kept until a console slot is free ({} kept)", kept().size());
+}
+inline void RunFileOrKeep(const std::string& name) {
+  std::ifstream in(recomp_dir() / name, std::ios::binary);
+  if (!in) {
+    REXSYS_ERROR("luafile: cannot read {}", (recomp_dir() / name).string());
+    return;
+  }
+  std::ostringstream text;
+  text << in.rdbuf();
+  RunChunkOrKeep(text.str());
+}
+// Once a frame: queue the kept chunks, oldest first, while slots are free.
+inline void RetryKept() {
+  std::lock_guard<std::mutex> l(kept_mtx());
+  while (!kept().empty() && RunChunk(kept().front())) {
+    kept().pop_front();
+    REXSYS_INFO("lua: kept chunk queued ({} left)", kept().size());
+  }
 }
 
 inline void CmdLua(std::string_view args) {

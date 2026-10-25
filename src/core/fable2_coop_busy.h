@@ -117,6 +117,7 @@ inline std::string Busy() {
 inline void tick(const rex::kernel::xam::lobby::LobbyStatus& status, int64_t now) {
   if (status.joined_host_ip || !fable2::f5lua::ready()) return;
   if (now < g_next_probe_ms) return;
+  if (fable2::f5lua::g_queued.load() > 0) return;  // paused: the probe would only stack up
   g_next_probe_ms = now + kProbeEveryMs;
   fable2::luaconsole::RunChunk(kProbe);
 }

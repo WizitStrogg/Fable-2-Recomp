@@ -287,7 +287,7 @@ inline void auto_capture(const lobby::LobbyStatus& status, int64_t now) {
   if (joined) {
     if (g_world_changed) {
       REXSYS_INFO("[coop] joining: capturing your hero before the host's world loads");
-      fable2::luaconsole::RunFile("coop_capture.lua");
+      fable2::luaconsole::RunFileOrKeep("coop_capture.lua");
     }
     g_next_capture_ms = 0;
     return;
@@ -313,7 +313,7 @@ inline void auto_capture(const lobby::LobbyStatus& status, int64_t now) {
     return;
   }
   g_next_capture_ms = 0;
-  fable2::luaconsole::RunFile("coop_capture.lua");
+  if (!fable2::luaconsole::RunFile("coop_capture.lua")) g_next_capture_ms = now + 1000;  // no free slot
 }
 
 // Co-op campaign (feature 001): player 2 is the campaign's own hero, not the
@@ -340,12 +340,12 @@ inline void host_apply(const lobby::LobbyStatus& status, int64_t now) {
   const std::string campaign = campaign_player2();
   if (!campaign.empty()) {
     if (g_applied_epoch == epoch && g_applied_ip == 0 && g_applied_rev == 2) return;
+    const std::string lib = read_lib();
+    if (lib.empty() || !fable2::luaconsole::RunChunk(lib + "\n" + campaign)) return;  // again next tick
     g_applied_epoch = epoch;
     g_applied_ip = 0;
     g_applied_rev = 2;
-    const std::string lib = read_lib();
-    if (!lib.empty() && fable2::luaconsole::RunChunk(lib + "\n" + campaign))
-      REXSYS_INFO("[coop] campaign player 2 queued");
+    REXSYS_INFO("[coop] campaign player 2 queued");
     return;
   }
 
@@ -357,6 +357,8 @@ inline void host_apply(const lobby::LobbyStatus& status, int64_t now) {
     g_applied_rev = 1;
     if (ApplyToHenchman(override_profile, "coop_partner_profile")) {
       REXSYS_INFO("[coop] applied hero from coop_partner_profile");
+    } else {
+      g_applied_rev = ~0u;  // not queued (no free console slot): again next tick
     }
     return;
   }
@@ -376,6 +378,8 @@ inline void host_apply(const lobby::LobbyStatus& status, int64_t now) {
   g_applied_epoch = epoch;
   if (ApplyToHenchman(best->value, "hero from " + best->gamertag)) {
     REXSYS_INFO("[coop] applied hero from {} rev {}", best->gamertag, best->revision);
+  } else {
+    g_applied_rev = ~0u;  // not queued (no free console slot): again next tick
   }
 }
 
@@ -514,7 +518,8 @@ inline void camera_tick(const lobby::LobbyStatus& status, int64_t now) {
               : g_world_changed               ? "world"
               : loaded                        ? "level load"
                                               : "spawn");
-  fable2::luaconsole::RunChunk(camera_chunk(own_camera, follow_partner, outdoor, indoor));
+  if (!fable2::luaconsole::RunChunk(camera_chunk(own_camera, follow_partner, outdoor, indoor)))
+    return;  // no free console slot: the next tick tries again
   g_camera_signature = any ? signature : std::string();
 }
 
@@ -621,7 +626,7 @@ inline void f5_cleanup_tick(int64_t now) {
   const uint32_t epoch = fable2::f5lua::g_load_epoch.load();
   if (epoch == g_f5_cleanup_epoch || now - fable2::f5lua::g_load_at_ms.load() < 5000) return;
   g_f5_cleanup_epoch = epoch;
-  fable2::luaconsole::RunFile("coop_f5_cleanup.lua");
+  fable2::luaconsole::RunFileOrKeep("coop_f5_cleanup.lua");
 }
 
 inline void OnFrame() {
