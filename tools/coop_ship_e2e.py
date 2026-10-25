@@ -20,6 +20,7 @@ Evidence: research/001-evidence/menus/ship-e2e/.
 import ctypes
 import ctypes.wintypes as wt
 import glob
+import math
 import os
 import re
 import subprocess
@@ -1243,10 +1244,112 @@ def run_combo():
         relay.kill()
 
 
+def pct(values, q):
+    v = sorted(values)
+    return v[min(len(v) - 1, int(len(v) * q))] if v else 0.0
+
+
+def run_camera():
+    """The joiner camera under motion (camera-glitch-notes.md): the partner walks
+    circles, the host sprints, aims and zooms, the partner's camera is traced for
+    60 s. Reports hand-backs, the host FOVs seen, and the per-frame camera move
+    against the partner's own movement."""
+    import threading
+    setup_tomls()
+    relay_log = open(os.path.join(OUT, "relay_camera.log"), "w")
+    relay = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                           "coop_relay.py")], stdout=relay_log, stderr=relay_log)
+    a, b = Game("mod-a", "host"), Game("mod-b", "partner")
+    a.start({"FABLE2_TEST_INPUT": "1"})
+    b.start({"FABLE2_TEST_INPUT": "1"})
+    try:
+        for g in (a, b):
+            g.n_menu = g.count(r"main menu: Co-op entry added")
+            g.past_title()
+        menu_then_coop(a, "cam", a.n_menu)
+        host_new_campaign(a, "cam")
+        menu_then_coop(b, "cam", b.n_menu)
+        wait_row(b, "Join TestA", "cam: the host's lobby is listed")
+        partner_joins(b, "Join TestA", "cam")
+        wait_row(a, "Start", "cam: host lobby shows the partner")
+        if not both_ready_and_start(a, b, "cam") or not join_phase(a, b, "cam"):
+            return
+        time.sleep(8)
+        n_trace = b.count(r"\[coopcam\] trace")
+        n_hand = b.count(r"showing the host's camera")
+        stop = time.time() + 60
+
+        def partner_walks():
+            k = 0
+            while time.time() < stop:
+                ang = k * 0.785398  # 8 directions: a circle every 6 s
+                b.send(f"stick L {math.cos(ang):.3f} {math.sin(ang):.3f} 800")
+                time.sleep(0.75)
+                k += 1
+
+        def host_acts():
+            while time.time() < stop:
+                a.send("stick L 0 1 3000")      # walk forward ...
+                a.send("press A 2500")           # ... holding A (sprint)
+                time.sleep(3.2)
+                a.send("trigger L 1 2500")       # LT
+                time.sleep(2.7)
+                a.send("press Y 2500")           # Y held (ranged aim)
+                a.send("stick R 0 1 1500")       # look while aiming
+                time.sleep(2.7)
+                a.send("trigger R 1 2000")       # RT
+                time.sleep(2.2)
+
+        b.send("cvar coop_cam_trace true")
+        threads = [threading.Thread(target=partner_walks), threading.Thread(target=host_acts)]
+        for t in threads:
+            t.start()
+        time.sleep(31)
+        b.send("cvar coop_cam_trace true")  # the trace stops itself after 30 s: a second 30 s
+        for t in threads:
+            t.join()
+        time.sleep(2)
+        b.shot("cam_partner_after.png")
+        a.shot("cam_host_after.png")
+        lines = [l for l in b.lines() if "[coopcam] trace" in l][n_trace:]
+        rx = re.compile(r"dt ([0-9.]+) ms creature (\S+) (\S+) (\S+) target \S+ \S+ \S+ cam (\S+) (\S+) (\S+) "
+                        r"host \S+ \S+ \S+ fov ([0-9.]+)")
+        rows = [tuple(float(x) for x in m.groups()) for m in map(rx.search, lines) if m]
+        cam_moves, cre_moves, jerks, fovs = [], [], [], set()
+        prev = None
+        prev_move = None
+        for r in rows:
+            fovs.add(round(r[7], 2))
+            if prev:
+                cm = math.dist(r[4:7], prev[4:7])
+                cr = math.dist(r[1:4], prev[1:4])
+                cam_moves.append(cm)
+                cre_moves.append(cr)
+                if prev_move is not None:
+                    jerks.append(abs(cm - prev_move))
+                prev_move = cm
+            prev = r
+        hand = b.count(r"showing the host's camera") - n_hand
+        note("PASS" if len(rows) > 600 else "FAIL", f"cam: trace frames {len(rows)}")
+        note("PASS" if hand == 0 else "FAIL", f"cam: hand-backs to the host's camera in 60 s: {hand}")
+        note("INFO", f"cam: host FOVs seen by the partner: {sorted(fovs)}")
+        note("INFO", f"cam: partner creature per-frame move p50 {pct(cre_moves, .5):.3f} p99 {pct(cre_moves, .99):.3f} "
+                     f"max {max(cre_moves or [0]):.3f} m")
+        note("INFO", f"cam: partner camera per-frame move p50 {pct(cam_moves, .5):.3f} p99 {pct(cam_moves, .99):.3f} "
+                     f"max {max(cam_moves or [0]):.3f} m; frame-to-frame change p99 {pct(jerks, .99):.3f} "
+                     f"max {max(jerks or [0]):.3f} m")
+        moving = sum(1 for m in cre_moves if m > 0.001)
+        note("PASS" if moving > 100 else "FAIL", f"cam: the partner walked ({moving} frames with movement)")
+    finally:
+        for g in (a, b):
+            g.stop()
+        relay.kill()
+
+
 def main():
     os.makedirs(OUT, exist_ok=True)
     mode = sys.argv[1] if len(sys.argv) > 1 else "coop"
-    {"coop": run_coop, "solo": run_solo, "multi": run_multi, "menu": run_menu, "menu2": run_menu2, "err": run_err, "final": run_final, "last": run_last, "start": run_start, "purse": run_purse, "fps": run_fps, "combo": run_combo}[mode]()
+    {"coop": run_coop, "solo": run_solo, "multi": run_multi, "menu": run_menu, "menu2": run_menu2, "err": run_err, "final": run_final, "last": run_last, "start": run_start, "purse": run_purse, "fps": run_fps, "combo": run_combo, "camera": run_camera}[mode]()
     with open(os.path.join(OUT, f"results_{mode}.txt"), "w", encoding="utf-8") as f:
         f.write("\n".join(results) + "\n")
     return 0 if not any(r.startswith("FAIL") for r in results) else 1

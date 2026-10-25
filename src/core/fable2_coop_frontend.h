@@ -39,6 +39,7 @@
 #include "fable2_coop_backup.h"
 #include "fable2_coop_p2file.h"
 #include "fable2_coop_template.h"
+#include "fable2_coop_test_input.h"
 #include "fable2_front_hooks.h"
 #include "../diagnostics/fable2_state_probe.h"
 
@@ -1267,10 +1268,7 @@ inline void (*g_prev_frame_hook)() = nullptr;
 // tools/coop_ship_e2e.py; never by play-coop.cmd): commands from
 // <exe dir>\test_input.txt, read and emptied each frame, so proofs do not depend
 // on which window is in front (2026-10-25: focus loss and key repeat at 60 fps
-// broke two runs).
-//   press <A|B|X|Y|Up|Down|Left|Right|Start|Back> [ms]   one pad press (default 120 ms)
-//   lua <chunk>                                          run Lua in the game
-//   cvar <name> <value>                                  set a setting (e.g. coop_cam_trace true)
+// broke two runs). Command language: fable2_coop_test_input.h.
 inline void test_input_tick() {
   static const bool on = std::getenv("FABLE2_TEST_INPUT") != nullptr;
   if (!on) return;
@@ -1287,39 +1285,34 @@ inline void test_input_tick() {
     text.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
   }
   std::ofstream(path, std::ios::binary | std::ios::trunc).close();
-  namespace cl = fable2::cooplobby;
+  namespace ti = fable2::cooptestinput;
   std::istringstream lines(text);
   std::string line;
-  int64_t delay = 0;
+  int64_t delay = 0;  // presses in one read run one after the other
   while (std::getline(lines, line)) {
-    while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
-    if (line.rfind("cvar ", 0) == 0) {  // cvar <name> <value>
-      std::istringstream w(line.substr(5));
-      std::string name, value;
-      w >> name >> value;
-      rex::cvar::SetFlagByName(name, value);
-      REXSYS_INFO("[test-input] cvar {} = {}", name, value);
-      continue;
+    const ti::Command c = ti::Parse(line);
+    switch (c.kind) {
+      case ti::Kind::kLua:
+        fable2::luaconsole::RunChunk(c.text);
+        break;
+      case ti::Kind::kCvar:
+        rex::cvar::SetFlagByName(c.text, c.value_text);
+        break;
+      case ti::Kind::kPress:
+        fable2::cooplobby::InjectPress(c.mask, delay, c.ms);
+        delay += c.ms + 150;
+        break;
+      case ti::Kind::kStick:
+        fable2::cooplobby::InjectAnalog(c.side == 'L' ? 'l' : 'r', ti::StickValue(c.x), ti::StickValue(c.y), 0, 0,
+                                        c.ms);
+        break;
+      case ti::Kind::kTrigger:
+        fable2::cooplobby::InjectAnalog(c.side, 0, 0, ti::TriggerValue(c.value), 0, c.ms);
+        break;
+      case ti::Kind::kNone:
+        continue;
     }
-    if (line.rfind("lua ", 0) == 0) {
-      fable2::luaconsole::RunChunk(line.substr(4));
-      REXSYS_INFO("[test-input] lua {}", line.substr(4));
-      continue;
-    }
-    std::istringstream w(line);
-    std::string cmd, name;
-    int ms = 120;
-    w >> cmd >> name >> ms;
-    if (cmd != "press") continue;
-    static const std::pair<const char*, uint16_t> kNames[] = {
-        {"Up", cl::kUp}, {"Down", cl::kDown}, {"Left", cl::kLeft}, {"Right", cl::kRight},
-        {"Start", 0x0010}, {"Back", 0x0020}, {"A", cl::kA}, {"B", cl::kB}, {"X", cl::kX}, {"Y", 0x8000}};
-    for (const auto& [n, mask] : kNames) {
-      if (name != n) continue;
-      cl::InjectPress(mask, delay, ms);
-      delay += ms + 150;  // several presses in one read: one after the other
-      REXSYS_INFO("[test-input] press {} {} ms", name, ms);
-    }
+    REXSYS_INFO("[test-input] {}", line);
   }
 }
 
