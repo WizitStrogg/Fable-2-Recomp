@@ -214,10 +214,108 @@ def run():
                 shutil.copy(g.log, os.path.join(e2e.OUT, f"{g.who}.log"))
 
 
+def page_names(b, n0):
+    return [re.search(r"name '([^']*)'", l).group(1) for l in b.lines()[n0:] if "[coopkit] pause page event" in l]
+
+
+def run_wheel():
+    """L1b: the full wheel on the partner, its page names, and the Items,
+    Weapons and Clothing pages with the mirrored inventory."""
+    os.makedirs(e2e.OUT, exist_ok=True)
+    e2e.SCAN.setdefault("Right", (0x4D, True))
+    e2e.SCAN.setdefault("Left", (0x4B, True))
+    a, b = e2e.Game("wt002-a", "host"), e2e.Game("wt002-b", "partner")
+    a.start()
+    b.start()
+    try:
+        for g in (a, b):
+            g.n_menu = g.count(r"main menu: Co-op entry added")
+            g.past_title()
+        e2e.menu_then_coop(a, "w", a.n_menu)
+        e2e.host_new_campaign(a, "w")
+        e2e.menu_then_coop(b, "w", b.n_menu)
+        e2e.wait_row(b, "Join TestA", "w: the host's lobby is listed")
+        e2e.partner_joins(b, "Join TestA", "w")
+        e2e.wait_row(a, "Start", "w: host lobby shows the partner")
+        if not e2e.both_ready_and_start(a, b, "w") or not e2e.join_phase(a, b, "w"):
+            return
+        time.sleep(8)
+        for name in (POTION, POTION, FOOD, HAT, KEY_ITEM):
+            console(a, f"lua Inventory.AddItemOfType(GetPlayerHenchman(), '{name}')")
+            time.sleep(0.5)
+        console(b, "coop_kit_mirror true")
+        n = b.count(r"\[coopkit\] mirror rev")
+        b.wait("w: the mirror corrected the partner's copy", r"\[coopkit\] mirror rev", n, 20)
+        time.sleep(3)
+        probe(b, "w0")
+        # The wheel: open, walk down every row (each highlight logs its page name).
+        nl = len(b.lines())
+        focus(b.hwnd)
+        key("Escape")
+        b.wait("w: partner's pause menu builds the full wheel", r"\[coopkit\] pause menu: full wheel", 0, 10)
+        time.sleep(2)
+        b.shot("w1_partner_wheel.png")
+        for i in range(10):
+            key("Down")
+            time.sleep(0.9)
+            b.shot(f"w1_partner_wheel_row{i}.png")
+        names = page_names(b, nl)
+        note("INFO", f"w1: page events on the partner: {names}")
+        key("Escape")
+        time.sleep(2)
+        # Open each item page by walking to it: Up to the top, then Down to the target.
+        for target in ("Items", "Weapons", "Clothing"):
+            nl = len(b.lines())
+            focus(b.hwnd)
+            key("Escape")
+            time.sleep(2)
+            for _ in range(10):
+                key("Up")
+                time.sleep(0.3)
+            ok = False
+            for i in range(10):
+                seen = page_names(b, nl)
+                if seen and seen[-1] == target:
+                    ok = True
+                    break
+                key("Down")
+                time.sleep(0.9)
+            if not ok:
+                note("FAIL", f"w2: no page event '{target}' while walking the wheel ({page_names(b, nl)})")
+                key("Escape")
+                time.sleep(2)
+                continue
+            key("E")
+            time.sleep(3)
+            b.shot(f"w2_partner_{target.lower()}.png")
+            key("Down")
+            time.sleep(1)
+            b.shot(f"w2_partner_{target.lower()}_2.png")
+            note("PASS", f"w2: partner opened the {target} page (screenshot w2_partner_{target.lower()}.png)")
+            key("B")
+            time.sleep(1.5)
+            key("Escape")
+            time.sleep(2)
+        a.shot("w3_host_end.png")
+        b.shot("w3_partner_end.png")
+    finally:
+        for g in (a, b):
+            g.stop()
+        for g in (a, b):
+            if g.log:
+                shutil.copy(g.log, os.path.join(e2e.OUT, f"{g.who}.log"))
+
+
 def main():
-    run()
-    with open(os.path.join(e2e.OUT, "results_l1.txt"), "w", encoding="utf-8") as f:
-        f.write("\n".join(e2e.results) + "\n")
+    if len(sys.argv) > 1 and sys.argv[1] == "wheel":
+        e2e.OUT = os.path.join(e2e.ROOT, "research", "002-evidence", "l1b")
+        run_wheel()
+        name = "results_l1b.txt"
+    else:
+        run()
+        name = "results_l1.txt"
+    with open(os.path.join(e2e.OUT, name), "w", encoding="utf-8") as f:
+        f.write(chr(10).join(e2e.results) + chr(10))
     return 0 if not any(r.startswith("FAIL") for r in e2e.results) else 1
 
 
