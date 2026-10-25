@@ -77,7 +77,13 @@ def down(n, pause=0.5):
         time.sleep(pause)
 
 
+HOST = [None]  # the host Game: its "[coopkit] host: game paused / resumed" lines
+
+
 def open_wheel(b, tag):
+    if HOST[0]:
+        b.n_paused = HOST[0].count(r"\[coopkit\] host: game paused")
+        b.n_resumed = HOST[0].count(r"\[coopkit\] host: game resumed")
     focus(b.hwnd)
     key("Escape")
     time.sleep(2)
@@ -88,11 +94,28 @@ def open_wheel(b, tag):
 
 
 def close_menus(b, backs):
-    for _ in range(backs):
+    """B until the partner's menus are closed (the wheel's B closes it). When the
+    host logged a pause since the wheel opened, closed = the host logged its
+    resume; otherwise backs + 1 presses."""
+    h = HOST[0]
+    paused = h is not None and h.count(r"\[coopkit\] host: game paused") > getattr(b, "n_paused", 1 << 30)
+    if not paused:
+        for _ in range(backs + 1):
+            key("B")
+            time.sleep(1.0)
+        time.sleep(1)
+        return True
+    for i in range(backs + 4):
         key("B")
-        time.sleep(1.0)
-    key("Escape")
-    time.sleep(2)
+        t = time.time()
+        while time.time() - t < 3:
+            if h.count(r"\[coopkit\] host: game resumed") > b.n_resumed:
+                note("PASS", f"{b.who}: menus closed and the host resumed ({i + 1} B)")
+                time.sleep(1)
+                return True
+            time.sleep(0.25)
+    note("FAIL", f"{b.who}: the host did not resume after {backs + 4} B presses")
+    return False
 
 
 def open_page(b, tag, page, sub_row):
@@ -107,8 +130,10 @@ def open_page(b, tag, page, sub_row):
     b.shot(f"{tag}_list.png")
 
 
-def press_a_on_entry(a, b, tag, row, want_op=None):
-    """A on the list entry `row`; returns (command line, ack line) from the partner's log."""
+def press_a_on_entry(a, b, tag, row, want_op=None, backs=2):
+    """A on the list entry `row`, then the menus closed (the partner's item pages
+    pause the host, which applies the command on the unpause); returns
+    (command line, ack line) from the partner's log."""
     nc = b.count(r"\[coopkit\] partner: command \d+ ")
     na = b.count(r"\[coopkit\] command \d+: ")
     down(row)
@@ -118,6 +143,10 @@ def press_a_on_entry(a, b, tag, row, want_op=None):
     cmd = last(b, r"\[coopkit\] partner: command \d+ ") if sent else None
     if cmd and want_op and f" {want_op} " not in cmd:
         note("FAIL", f"{tag}: sent {cmd.split('] ', 1)[-1]} (want {want_op})")
+    time.sleep(1.5)
+    b.shot(f"{tag}_after_a.png")
+    a.shot(f"{tag}_host_paused.png")
+    close_menus(b, backs)
     ack = None
     if sent and b.wait(f"{tag}: partner got the host's answer", r"\[coopkit\] command \d+: ", na, 40):
         ack = last(b, r"\[coopkit\] command \d+: ")
@@ -141,6 +170,7 @@ def field(snap, name):
 def run():
     os.makedirs(e2e.OUT, exist_ok=True)
     a, b = e2e.Game("wt002-a", "host"), e2e.Game("wt002-b", "partner")
+    HOST[0] = a
     a.start()
     b.start()
     try:
@@ -182,13 +212,41 @@ def run():
             if h:
                 note("PASS" if have.get(h, 0) >= 1 else "FAIL", f"l2a: the partner's copy holds the {what} {h}")
 
-        # --- Weapons > Melee lists both swords; A swaps to the second -------------------------
+        # --- probe: does the STOCK henchman wheel pause the host too? ----------------------
+        # coop_kit off on the partner = the stock henchman wheel; its first row
+        # is HenchmanAbilities. The host's coop_kit stays on (it logs pause/resume).
+        console(b, "coop_kit false")
+        time.sleep(1)
+        n_p, n_r = a.count(r"\[coopkit\] host: game paused"), a.count(r"\[coopkit\] host: game resumed")
+        focus(b.hwnd)
+        key("Escape")
+        time.sleep(2)
+        b.shot("l2probe_partner_henchman_wheel.png")
+        key("E")
+        time.sleep(6)
+        b.shot("l2probe_partner_henchman_abilities.png")
+        a.shot("l2probe_host.png")
+        stock_pauses = a.count(r"\[coopkit\] host: game paused") > n_p
+        note("INFO", f"probe: the stock henchman Abilities page {'PAUSES' if stock_pauses else 'does NOT pause'} "
+                     f"the host (screenshot l2probe_host.png)")
+        for _ in range(4):
+            key("B")
+            time.sleep(2)
+            if not stock_pauses or a.count(r"\[coopkit\] host: game resumed") > n_r:
+                break
+        if stock_pauses:
+            note("PASS" if a.count(r"\[coopkit\] host: game resumed") > n_r else "FAIL",
+                 "probe: the host resumed when the stock henchman menu closed")
+        console(b, "coop_kit true")
+        time.sleep(3)
+
+        # --- Weapons > Melee lists both swords; A swaps to another --------------------------
+        # L2 14:56Z: row 0 is the sword in hand (Rusty Longsword), row 1 the next one.
         open_page(b, "l2w", "Weapons", WEAPONS_ROW["Melee"])
         b.shot("l2w_melee_list.png")
-        cmd, ack = press_a_on_entry(a, b, "l2w0", 0, "equip")
-        if rec_of(cmd) == melee0:  # the first entry was the sword already in hand: take the next
-            cmd, ack = press_a_on_entry(a, b, "l2w1", 1, "equip")
-        close_menus(b, 2)
+        cmd, ack = press_a_on_entry(a, b, "l2w", 1, "equip")
+        if rec_of(cmd) == melee0:
+            note("FAIL", f"l2w: row 1 is the sword already in hand ({melee0})")
         snap = snapshot(a, "l2w")
         melee1 = field(snap, "melee")
         note("PASS" if ack and ": ok" in ack and melee1 == rec_of(cmd) and melee1 != melee0 else "FAIL",
@@ -200,7 +258,6 @@ def run():
         open_page(b, "l2h", "Clothing", CLOTHING_ROW["Headgear"])
         note("INFO", "l2h: Headgear list screenshot l2h_list.png (the hat must be listed)")
         cmd, ack = press_a_on_entry(a, b, "l2h", 0, "wear")
-        close_menus(b, 2)
         snap = snapshot(a, "l2h")
         note("PASS" if hat and hat in field(snap, "worn").split(",") else "FAIL",
              f"l2h: the host's player 2 wears the hat {hat} (worn={field(snap, 'worn')})")
@@ -211,7 +268,6 @@ def run():
         before = (snap[1].get(potion) or (0,))[0] if snap and potion else 0
         open_page(b, "l2p", "Items", ITEMS_ROW["Potions"])
         cmd, ack = press_a_on_entry(a, b, "l2p", 0, "use")
-        close_menus(b, 2)
         snap = snapshot(a, "l2p")
         after = (snap[1].get(potion) or (0,))[0] if snap and potion else 0
         hp1 = lua(a, "print('KITHP '..Health.Get(GetPlayerHenchman()))", "KITHP", "l2p: host reads player 2's health")
@@ -225,7 +281,6 @@ def run():
         # --- Items > Miscellaneous; A on the silver key is refused ------------------------------
         open_page(b, "l2k", "Items", ITEMS_ROW["Miscellaneous"])
         cmd, ack = press_a_on_entry(a, b, "l2k", 0, "use")
-        close_menus(b, 2)
         note("PASS" if ack and "no:questitem" in ack else "FAIL",
              f"l2k: the host refused the quest item ({ack and ack.split('] ', 1)[-1]})")
 

@@ -6,7 +6,7 @@
 
 L3 (evidence research/002-evidence/l3/): the console is used only to give player 2
 the test kit and to read the host's snapshot; every action is a button press.
-  - neither game pauses while the other has its menu open (two screenshots 3 s apart differ)
+  - the partner's item pages pause the host (stock, decision A); the host resumes when they close
   - partner's Save row -> the henchman quit (cancelled with B, never confirmed)
   - Abilities -> henchman abilities, Kick -> nothing, Options opens as is
   - drink a potion and wear the hat from the stock pages with the host's menu open too
@@ -122,6 +122,7 @@ def press_entry(a, b, tag, row, op):
 def run_l3():
     out_dir("l3")
     a, b = e2e.Game("wt002-a", "host"), e2e.Game("wt002-b", "partner")
+    l2.HOST[0] = a
     a.start()
     b.start()
     try:
@@ -133,19 +134,19 @@ def run_l3():
         items = snap[1] if snap else {}
         potion, hat = hex_of(items, "ITEMS_POTIONS"), hex_of(items, "CLOTHING_HATS")
 
-        # Neither game pauses for the other's menu.
+        # Pauses (decision A, the stock behaviour): the partner's wheel alone does not
+        # pause the host; an item page does, and the host resumes when it closes.
         open_wheel(b, "l3m_partner")
-        note("PASS" if moving(a, "l3m_host_while_partner_menu") else "FAIL",
-             "l3m: the host's game keeps running while the partner's menu is open")
+        note("PASS" if moving(a, "l3m_host_while_partner_wheel") else "FAIL",
+             "l3m: the host's game keeps running while only the partner's wheel is open")
         close_menus(b, 0)
-        focus(a.hwnd)
-        key("Escape")
-        time.sleep(2)
-        note("PASS" if moving(b, "l3m_partner_while_host_menu") else "FAIL",
-             "l3m: the partner's game keeps running while the host's menu is open")
-        focus(a.hwnd)
-        key("Escape")
-        time.sleep(2)
+        open_page(b, "l3m_items", "Items", ITEMS_ROW["Potions"])
+        time.sleep(4)
+        note("INFO", f"l3m: host paused while the partner's Items page is open: "
+                     f"{not moving(a, 'l3m_host_while_partner_items')}")
+        note("PASS" if close_menus(b, 2) else "FAIL", "l3m: the host resumes when the partner's menus close")
+        note("PASS" if moving(a, "l3m_host_after_partner_closed") else "FAIL",
+             "l3m: the host's game runs again after the partner closed the menu")
 
         # Wheel rows that are not item pages.
         b_saves = os.path.join(e2e.ROOT, r"wt002-b\saves")
@@ -173,25 +174,18 @@ def run_l3():
         changed = sorted(p for p in set(saves0) | set(saves1) if saves0.get(p) != saves1.get(p))
         note("PASS" if not changed else "FAIL", f"l3s: wt002-b\\saves unchanged (changed: {changed})")
 
-        # Item actions by buttons, with the host's own menu open at the same time.
-        focus(a.hwnd)
-        key("Escape")
-        time.sleep(1.5)
+        # Item actions by buttons (each applied when the partner's menu closes).
         before = (items.get(potion) or (0,))[0] if potion else 0
         open_page(b, "l3p", "Items", ITEMS_ROW["Potions"])
         _, ack_p = press_entry(a, b, "l3p", 0, "use")
-        close_menus(b, 2)
         open_page(b, "l3h", "Clothing", CLOTHING_ROW["Headgear"])
         _, ack_h = press_entry(a, b, "l3h", 0, "wear")
-        close_menus(b, 2)
-        focus(a.hwnd)
-        key("Escape")  # host's menu closed again
         time.sleep(3)
         snap = snapshot(a, "l3z")
         after = (snap[1].get(potion) or (0,))[0] if snap and potion else 0
         worn = l2.field(snap, "worn").split(",")
         note("PASS" if ack_p and ": ok" in ack_p and after == before - 1 else "FAIL",
-             f"l3p: potion by buttons with both menus open: {before} -> {after} ({ack_p and ack_p.split('] ', 1)[-1]})")
+             f"l3p: potion by buttons: {before} -> {after} ({ack_p and ack_p.split('] ', 1)[-1]})")
         note("PASS" if ack_h and ": ok" in ack_h and hat in worn else "FAIL",
              f"l3h: hat by buttons: worn={','.join(worn)} ({ack_h and ack_h.split('] ', 1)[-1]})")
         a.shot("l3z_host_end.png")
@@ -252,6 +246,7 @@ def run_l4():
         shutil.copytree(os.path.join(e2e.ROOT, side, "saves"), dst)
     note("INFO", f"l4: saves backed up to {backup}")
     a, b = e2e.Game("wt002-a", "host"), e2e.Game("wt002-b", "partner")
+    l2.HOST[0] = a
     a.start()
     b.start()
     try:
@@ -267,10 +262,8 @@ def run_l4():
         # Change the kit by buttons: drink one potion, wear the hat.
         open_page(b, "l4p", "Items", ITEMS_ROW["Potions"])
         press_entry(a, b, "l4p", 0, "use")
-        close_menus(b, 2)
         open_page(b, "l4h", "Clothing", CLOTHING_ROW["Headgear"])
         press_entry(a, b, "l4h", 0, "wear")
-        close_menus(b, 2)
         time.sleep(3)
         before = snapshot(a, "l4b")
         n0 = host_count(a, "l4b")
@@ -293,6 +286,7 @@ def run_l4():
 
     # Restart both; the host continues the campaign, the partner rejoins.
     a, b = e2e.Game("wt002-a", "host"), e2e.Game("wt002-b", "partner")
+    l2.HOST[0] = a
     a.start()
     b.start()
     try:
