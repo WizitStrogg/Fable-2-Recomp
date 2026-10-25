@@ -162,6 +162,25 @@ int main() {
     CHECK(h4.partner_ip == 0 && h4.left == "CALVIN-PC" && h4.state == HostState::kHosting);
   }
 
+  // Shared purse (Josh's playtest 2026-10-25): both had 3; a chest of 150 gave
+  // the game's own share +75/+75 -> 153 on both; spending 100 anywhere -> 53.
+  {
+    int64_t last = 3;
+    int64_t t = PurseTotal(last, 78, 78);
+    CHECK(t == 153);
+    last = t;
+    CHECK(PurseTotal(last, 53, 153) == 53);   // the host spends 100
+    CHECK(PurseTotal(last, 153, 53) == 53);   // player 2 spends 100 (host's henchman copy)
+    CHECK(PurseTotal(last, 163, 140) == 150); // both in one tick: host +10, player 2 -13
+    CHECK(PurseTotal(last, 153, 153) == 153); // nothing happened
+    PurseRecord r{XuidStr(0x0009AAAA00000001ull), 153, 7};
+    auto p = ParsePurse(Format(r));
+    CHECK(p && p->total == 153 && p->seq == 7 && p->hxuid == XuidStr(0x0009AAAA00000001ull));
+    CHECK(SenderXuid(Format(r)) == 0);  // only lobby/go/seat/ack carry a sender field it reads
+    CHECK(!ParsePurse("COOPPURSE:v1|hxuid=1|seq=2"));  // no total
+    CHECK(ParsePurse(Format(PurseRecord{"", -5, 1}))->total == -5);
+  }
+
   std::printf("%s (%d failed)\n", g_fail ? "FAILED" : "ALL PASSED", g_fail);
   return g_fail ? 1 : 0;
 }

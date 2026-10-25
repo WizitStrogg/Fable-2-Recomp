@@ -163,6 +163,10 @@ inline std::atomic<int64_t> g_coop_screen_ms{0};       // QC060's co-op introduc
 inline std::atomic<bool> g_coop_screen_hook_failed{false};
 // Host: when ProcessJoinSession last approved a join (fable2_coop_joingate.h).
 inline std::atomic<int64_t> g_join_approved_ms{0};
+// Partner: the campaign host whose purse total this PC mirrors (partner_purse_tick).
+inline std::atomic<uint64_t> g_purse_host_xuid{0};  // set at the go, cleared on leaving
+inline uint32_t g_purse_host_ip = 0;
+inline uint32_t g_purse_applied_seq = 0;
 // The host hero reads the lobby's gender ("[coop] hero gender ok", T021a).
 inline std::atomic<bool> g_gender_ok{false};
 // The game's own join screens (gold/XP split on the host; look, then "continue
@@ -435,6 +439,9 @@ inline void on_partner_go(uint32_t ip) {
     S().host_ip = ip;
     S().host_xuid = host_xuid;
     S().host_name = host_name;
+    g_purse_host_ip = ip;
+    g_purse_applied_seq = 0;
+    g_purse_host_xuid.store(host_xuid ? host_xuid : 1);
     S().last_try_ms = S().joined_since_ms = 0;
     S().tries = 0;
   }
@@ -746,9 +753,68 @@ inline std::optional<std::string> restore_player2_chunk(const std::filesystem::p
 // last sync is added to one total, and both purses are set to it (Money.Set,
 // no split). A split pickup (+50/+50) counts +100; a purchase by either counts
 // once. After player 2 (re)spawns its purse starts at the host's total.
+// The host's Money.Set on its henchman copy does not reach the partner's own
+// game (Josh's playtest 2026-10-25: the host showed 153, the partner 78), so
+// the host publishes the total (coop_purse, COOPPURSE line from the Lua) and
+// the partner sets its own purse to it (partner_purse_tick). The partner sends
+// nothing back: everything it does with gold happens in the host's world and
+// is already in the host's sum. The partner joins without a save of its own
+// ("continue without choosing a save"), so the mirrored total never reaches
+// the partner's own hero save.
 constexpr int64_t kPurseEveryMs = 1000;
 inline int64_t g_next_purse_ms = 0;
 inline uint32_t g_purse_epoch = ~0u;
+
+// Host: the Lua's COOPPURSE:<total> line -> the coop_purse record.
+inline uint32_t g_purse_seq = 0;
+inline void on_purse_line(std::string_view line) {
+  const int64_t total = std::strtoll(std::string(line.substr(10)).c_str(), nullptr, 10);
+  fable2::cooplobby::PurseRecord r{fable2::cooplobby::XuidStr(fable2::cooplobby::MyXuid()), total, ++g_purse_seq};
+  lobby::PublishData("coop_purse", fable2::cooplobby::Format(r));
+}
+
+// Partner, in a campaign host's world: its own purse shows the host's total.
+inline int64_t g_next_mirror_ms = 0, g_mirror_again_ms = 0;
+inline bool g_purse_joined = false;
+inline void partner_purse_tick(int64_t now) {
+  const uint64_t hx = g_purse_host_xuid.load();
+  if (!hx || now < g_next_mirror_ms) return;
+  g_next_mirror_ms = now + 500;
+  const bool joined = lobby::GetLobbyStatus().joined_host_ip != 0;
+  if (!joined) {
+    if (g_purse_joined) {  // left the host's world
+      g_purse_joined = false;
+      g_purse_host_xuid.store(0);
+      g_purse_applied_seq = 0;
+    }
+    return;
+  }
+  g_purse_joined = true;
+  if (!fable2::f5lua::ready()) return;
+  std::optional<fable2::cooplobby::PurseRecord> best;
+  for (const auto& d : lobby::GetPeerData("coop_purse")) {
+    auto r = fable2::cooplobby::ParsePurse(d.value);
+    if (!r) continue;
+    const uint64_t from = std::strtoull(r->hxuid.c_str(), nullptr, 16);
+    if (from ? from != hx : d.ip != g_purse_host_ip) continue;
+    if (!best || r->seq > best->seq) best = r;
+  }
+  if (!best) return;
+  // A new total at once; the same one again every 3 s (the game's own share
+  // messages can still move the partner's local purse).
+  if (best->seq == g_purse_applied_seq && now < g_mirror_again_ms) return;
+  const bool fresh = best->seq != g_purse_applied_seq;
+  g_purse_applied_seq = best->seq;
+  g_mirror_again_ms = now + 3000;
+  const std::string t = std::to_string(best->total);
+  fable2::luaconsole::RunChunk("local me = GetPlayerHenchman()\n"
+                               "if me and me:IsAlive() and Money.Get(me) ~= " + t + " then\n"
+                               "  local was = Money.Get(me)\n"
+                               "  Money.Set(me, " + t + ")\n"
+                               "  print('[coop] purse: mirrored the host total " + t + " (was ' .. was .. ')')\n"
+                               "end\n");
+  if (fresh) REXSYS_INFO("[coop] purse: host total {} (seq {})", best->total, best->seq);
+}
 
 inline void purse_tick(int64_t now) {
   if (now < g_next_purse_ms) return;
@@ -767,6 +833,7 @@ if CoopPurseLast == nil then
   CoopPurseLast = H
   if h ~= H then Money.Set(hench, H) end
   print('[coop] purse: shared total ' .. H)
+  print('COOPPURSE:' .. H)
   return
 end
 if H == CoopPurseLast and h == CoopPurseLast then return end
@@ -776,6 +843,7 @@ Money.Set(hench, total)
 print(string.format('[coop] purse: host %d, player 2 %d, was %d -> total %d (now %d / %d)',
   H, h, CoopPurseLast, total, Money.Get(hero), Money.Get(hench)))
 CoopPurseLast = total
+print('COOPPURSE:' .. total)
 )lua";
   fable2::luaconsole::RunChunk(c);
 }
@@ -1004,6 +1072,7 @@ end
         // (QC060 uses AutoSaveGame(true, true)), then, once it has had time
         // to finish, back to the front end to wait in the campaign's lobby.
         REXSYS_INFO("[coop] host: partner {} lost (quiet {} s), saving", s.partner_name, quiet);
+        lobby::PublishData("coop_purse", "");
         s.s = Session::kHostPartnerLost;
         s.since_ms = now;
         s.quit_sent = false;
@@ -1221,11 +1290,13 @@ inline void OnFrame() {
     fable2::cooplobby::InjectPress(static_cast<uint16_t>(fable2::cooplobby::kA), 0, 200);
   }
   session_tick();
+  partner_purse_tick(fable2::f5lua::steady_ms());
 }
 
 inline const bool g_installed = [] {
   fable2::fronthooks::g_press_hook = &OnPress;
   fable2::luaconsole::AddLineHandler("[coop] hero gender ok", [](std::string_view) { g_gender_ok.store(true); });
+  fable2::luaconsole::AddLineHandler("COOPPURSE:", on_purse_line);
   fable2::luaconsole::AddLineHandler("COOPP2W|", [](std::string_view l) { on_p2_line(l, true); });
   fable2::luaconsole::AddLineHandler("COOPP2W-NONE", [](std::string_view) { on_p2_none(true); });
   fable2::luaconsole::AddLineHandler("COOPP2|", [](std::string_view l) { on_p2_line(l, false); });

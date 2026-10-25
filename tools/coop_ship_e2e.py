@@ -61,7 +61,18 @@ class INPUT(ctypes.Structure):
     _fields_ = [("type", wt.DWORD), ("u", _U)]
 
 
-SCAN = {"E": (0x12, False), "B": (0x30, False), "Down": (0x50, True), "Up": (0x48, True)}
+SCAN = {"E": (0x12, False), "B": (0x30, False), "Down": (0x50, True), "Up": (0x48, True),
+        "Grave": (0x29, False), "Enter": (0x1C, False), "Escape": (0x01, False)}
+
+
+def type_text(text):
+    """Unicode key events (WM_CHAR): text for the backtick console."""
+    for ch in text:
+        for up in (False, True):
+            i = INPUT(type=1)
+            i.u.ki = KEYBDINPUT(0, ord(ch), 0x0004 | (0x0002 if up else 0), 0, 0)  # KEYEVENTF_UNICODE
+            _send(i)
+        time.sleep(0.01)
 
 
 def _send(inp):
@@ -112,13 +123,24 @@ def rect(hwnd):
     return r.left, r.top, r.right, r.bottom
 
 
+class FocusLost(Exception):
+    pass
+
+
 def focus(hwnd):
-    user32.ShowWindow(hwnd, 9)  # SW_RESTORE
-    user32.keybd_event(0x12, 0, 0, 0)  # Alt lets SetForegroundWindow through
-    user32.SetForegroundWindow(hwnd)
-    user32.keybd_event(0x12, 0, 2, 0)
-    time.sleep(0.4)
-    return user32.GetForegroundWindow() == hwnd
+    """Brings the game window to the front. Keys are only ever sent to it: if it
+    cannot be brought forward (someone is using the PC), the run stops instead
+    of typing into another window (purse run, 2026-10-25)."""
+    for _ in range(5):
+        user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+        user32.keybd_event(0x12, 0, 0, 0)  # Alt lets SetForegroundWindow through
+        user32.SetForegroundWindow(hwnd)
+        user32.keybd_event(0x12, 0, 2, 0)
+        time.sleep(0.4)
+        if user32.GetForegroundWindow() == hwnd:
+            return True
+        time.sleep(1.0)
+    raise FocusLost("could not bring the game window to the front; is someone using the PC?")
 
 
 # --- one game copy --------------------------------------------------------------
@@ -965,10 +987,96 @@ def run_start():
         relay.kill()
 
 
+def console(g, command):
+    """Runs one console command in g's window (backtick console, Enter, close)."""
+    focus(g.hwnd)
+    key("Grave")
+    time.sleep(0.6)
+    type_text(command)
+    time.sleep(0.2)
+    key("Enter")
+    time.sleep(0.4)
+    key("Grave")
+    time.sleep(0.3)
+
+
+def read_purses(a, b, tag):
+    """Host: its hero and its henchman copy; partner: its own purse (the one its
+    screen shows). Returns (host, host's henchman copy, partner) or None."""
+    na, nb = a.count(r"PURSECHK host"), b.count(r"PURSECHK partner")
+    console(a, "lua print('PURSECHK host '..Money.Get(GetPlayerHero())..' '..Money.Get(GetPlayerHenchman()))")
+    console(b, "lua print('PURSECHK partner '..Money.Get(GetPlayerHenchman()))")
+    if not (a.wait(f"{tag}: host purses read", r"PURSECHK host", na, 15) and
+            b.wait(f"{tag}: partner purse read", r"PURSECHK partner", nb, 15)):
+        return None
+    h = [l for l in a.lines() if "PURSECHK host" in l][-1].split("PURSECHK host ")[1].split()
+    p = [l for l in b.lines() if "PURSECHK partner" in l][-1].split("PURSECHK partner ")[1].split()
+    return int(h[0]), int(h[1]), int(p[0])
+
+
+def check_purse(a, b, tag, expect):
+    time.sleep(6)  # the host's 1 s sync, the partner's mirror (new total at once)
+    v = read_purses(a, b, tag)
+    ok = v is not None and v[0] == v[1] == v[2] == expect
+    note("PASS" if ok else "FAIL", f"{tag}: host {v[0] if v else '?'}, host's player 2 {v[1] if v else '?'}, "
+                                     f"partner's own {v[2] if v else '?'} (expected {expect} on all three)")
+    a.shot(f"{tag}_host.png")
+    b.shot(f"{tag}_partner.png")
+    # What Josh judges by: the gold the game shows (the pause menu).
+    for g in (a, b):
+        focus(g.hwnd)
+        key("Escape")
+        time.sleep(1.5)
+        g.shot(f"{tag}_{g.who}_gold_screen.png")
+        key("Escape")
+        time.sleep(1.0)
+    return ok
+
+
+def run_purse():
+    """The shared purse on both screens: host +150 (the game's own split), a
+    player-2 purchase (-100 on the host's henchman copy), the host spends 100."""
+    setup_tomls()
+    relay_log = open(os.path.join(OUT, "relay_purse.log"), "w")
+    relay = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                           "coop_relay.py")], stdout=relay_log, stderr=relay_log)
+    a, b = Game("mod-a", "host"), Game("mod-b", "partner")
+    a.start()
+    b.start()
+    try:
+        for g in (a, b):
+            g.n_menu = g.count(r"main menu: Co-op entry added")
+            g.past_title()
+        menu_then_coop(a, "purse", a.n_menu)
+        host_new_campaign(a, "purse")
+        menu_then_coop(b, "purse", b.n_menu)
+        wait_row(b, "Join TestA", "purse: the host's lobby is listed")
+        partner_joins(b, "Join TestA", "purse")
+        wait_row(a, "Start", "purse: host lobby shows the partner")
+        if not both_ready_and_start(a, b, "purse") or not join_phase(a, b, "purse"):
+            return
+        time.sleep(8)
+        v = read_purses(a, b, "purse0")
+        if not v:
+            return
+        start = v[0]
+        note("PASS" if v[0] == v[1] == v[2] else "FAIL", f"purse0: after the join all three equal ({v})")
+        console(a, "lua Money.Modify(GetPlayerHero(), 150)")
+        check_purse(a, b, "purse1_host_gains_150", start + 150)
+        console(a, "lua Money.Modify(GetPlayerHenchman(), -100)")
+        check_purse(a, b, "purse2_player2_spends_100", start + 50)
+        console(a, "lua Money.Modify(GetPlayerHero(), -100)")
+        check_purse(a, b, "purse3_host_spends_100", start - 50)
+    finally:
+        for g in (a, b):
+            g.stop()
+        relay.kill()
+
+
 def main():
     os.makedirs(OUT, exist_ok=True)
     mode = sys.argv[1] if len(sys.argv) > 1 else "coop"
-    {"coop": run_coop, "solo": run_solo, "multi": run_multi, "menu": run_menu, "menu2": run_menu2, "err": run_err, "final": run_final, "last": run_last, "start": run_start}[mode]()
+    {"coop": run_coop, "solo": run_solo, "multi": run_multi, "menu": run_menu, "menu2": run_menu2, "err": run_err, "final": run_final, "last": run_last, "start": run_start, "purse": run_purse}[mode]()
     with open(os.path.join(OUT, f"results_{mode}.txt"), "w", encoding="utf-8") as f:
         f.write("\n".join(results) + "\n")
     return 0 if not any(r.startswith("FAIL") for r in results) else 1
