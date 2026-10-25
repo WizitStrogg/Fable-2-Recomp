@@ -173,7 +173,16 @@ def l3_steps(a, b):
     # Wheel rows that are not item pages.
     b_saves = os.path.join(e2e.ROOT, r"wt002-b\saves")
     saves0 = tree_hashes(b_saves)
-    for page, want, tag, backs in (("Save", "henchman quit", "l3s", 1), ("Abilities", "henchman abilities", "l3ab", 1),
+    # Save does nothing on the partner (slice 1: no quit on the partner's wheel, 18:01Z).
+    n = b.count(r"\[coopkit\] pause page '")
+    open_wheel(b, "l3s")  # the cursor ends on Save (row 0)
+    key("E")
+    time.sleep(4)
+    b.shot("l3s_after.png")
+    note("PASS" if b.count(r"\[coopkit\] pause page '") == n else "FAIL",
+         "l3s: Save on the partner opens nothing (no page chosen)")
+    close_menus(b, 0)
+    for page, want, tag, backs in (("Abilities", "henchman abilities", "l3ab", 1),
                                    ("Kick", "ignored", "l3kick", 0), ("Options", "as is", "l3opt", 1)):
         n = b.count(r"\[coopkit\] pause page '")
         open_wheel(b, tag)

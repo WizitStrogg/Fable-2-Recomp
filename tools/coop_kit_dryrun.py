@@ -140,7 +140,10 @@ def key(name, hold_ms=60):
             page = WHEEL[m[1]]
             route = {"Abilities": "henchman abilities", "Kick": "ignored", "Save": "henchman quit"}.get(page, "as is")
             if page == "Save":  # the real line names the Save row's own event
-                partner().say("pause page 'Saving' (Save row) chosen: henchman quit")
+                if os.environ.get("DRYRUN_SAVE_REDIRECT"):
+                    partner().say("pause page 'Saving' (Save row) chosen: henchman quit")
+                else:
+                    return  # redirect off (the default): Save does nothing on the partner
             else:
                 partner().say(f"pause page '{page}' chosen: {route}")
             if page == "Kick":
