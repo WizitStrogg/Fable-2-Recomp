@@ -148,6 +148,7 @@ def focus(hwnd):
 # --- one game copy --------------------------------------------------------------
 class Game:
     def __init__(self, folder, who):
+        self.test_input = False
         self.dir = os.path.join(ROOT, folder)
         self.who = who
         self.proc = None
@@ -155,6 +156,9 @@ class Game:
         self.log = None
 
     def start(self, env_extra=None):
+        self.test_input = bool(env_extra and env_extra.get("FABLE2_TEST_INPUT"))
+        if self.test_input:
+            open(os.path.join(self.dir, "test_input.txt"), "w").close()
         exe = os.path.join(self.dir, "fable_2.exe").lower()
         if any((p.info["exe"] or "").lower() == exe for p in psutil.process_iter(["exe"])):
             raise SystemExit(f"{exe} already runs")
@@ -196,7 +200,24 @@ class Game:
         note("FAIL", f"{self.who}: {what} (no '{pat}' in {timeout} s)")
         return False
 
+    def send(self, line, timeout=10):
+        """One test-input command; waits until the game has read it."""
+        path = os.path.join(self.dir, "test_input.txt")
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+        t = time.time()
+        while time.time() - t < timeout:
+            if os.path.getsize(path) == 0:
+                return True
+            time.sleep(0.05)
+        note("FAIL", f"{self.who}: test input not read: {line}")
+        return False
+
     def press(self, name):
+        if self.test_input:
+            self.send(f"press {dict(E='A').get(name, name)} 120")  # E is A on Josh's keyboard map
+            time.sleep(0.45)
+            return
         focus(self.hwnd)
         if name == "X":
             click(self.hwnd)
@@ -205,7 +226,10 @@ class Game:
         time.sleep(0.3)
 
     def shot(self, name):
-        focus(self.hwnd)
+        try:
+            focus(self.hwnd)
+        except FocusLost:
+            pass
         time.sleep(0.3)
         p = os.path.join(OUT, name)
         try:
@@ -994,6 +1018,10 @@ def run_start():
 
 def console(g, command):
     """Runs one console command in g's window (backtick console, Enter, close)."""
+    if g.test_input and command.startswith("lua "):
+        g.send(command)
+        time.sleep(0.5)
+        return
     focus(g.hwnd)
     key("Grave")
     time.sleep(0.6)
@@ -1029,11 +1057,10 @@ def check_purse(a, b, tag, expect):
     b.shot(f"{tag}_partner.png")
     # What Josh judges by: the gold the game shows (the pause menu).
     for g in (a, b):
-        focus(g.hwnd)
-        key("Escape")
+        g.press("Start") if g.test_input else (focus(g.hwnd), key("Escape"))
         time.sleep(1.5)
         g.shot(f"{tag}_{g.who}_gold_screen.png")
-        key("Escape")
+        g.press("Start") if g.test_input else key("Escape")
         time.sleep(1.0)
     return ok
 
@@ -1132,10 +1159,94 @@ def run_fps():
         relay.kill()
 
 
+def run_combo():
+    """Combined proof (camera build): join, the shared purse, ~2 min in the world
+    with the host's FPS meter, and the partner's camera trace (hand-backs,
+    per-frame camera jump). Input through the game's test input source."""
+    setup_tomls()
+    relay_log = open(os.path.join(OUT, "relay_combo.log"), "w")
+    relay = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                           "coop_relay.py")], stdout=relay_log, stderr=relay_log)
+    a, b = Game("mod-a", "host"), Game("mod-b", "partner")
+    a.start({"FABLE2_FPS_METER": "1", "FABLE2_TEST_INPUT": "1"})
+    b.start({"FABLE2_TEST_INPUT": "1"})
+    try:
+        for g in (a, b):
+            g.n_menu = g.count(r"main menu: Co-op entry added")
+            g.past_title()
+        menu_then_coop(a, "combo", a.n_menu)
+        host_new_campaign(a, "combo")
+        menu_then_coop(b, "combo", b.n_menu)
+        wait_row(b, "Join TestA", "combo: the host's lobby is listed")
+        partner_joins(b, "Join TestA", "combo")
+        wait_row(a, "Start", "combo: host lobby shows the partner")
+        if not both_ready_and_start(a, b, "combo") or not join_phase(a, b, "combo"):
+            return
+        time.sleep(8)
+        v = read_purses(a, b, "combo_purse0")
+        if v:
+            console(a, "lua Money.Modify(GetPlayerHero(), 150)")
+            check_purse(a, b, "combo_purse1_host_gains_150", v[0] + 150)
+        # The partner's camera, traced for 30 s while the host acts (draws a
+        # weapon / attacks / blocks: the host's camera FOV moves).
+        n_trace = b.count(r"\[coopcam\] trace")
+        n_hand = b.count(r"showing the host's camera")
+        b.send("cvar coop_cam_trace true")
+        t0 = time.time()
+        k = 0
+        while time.time() - t0 < 32:
+            for btn in ("X", "Y", "B"):
+                a.press(btn)
+                time.sleep(1.5)
+            for g in (a, b):
+                g.shot(f"combo_cam_{k:02d}_{g.who}.png")
+            k += 1
+        lines = [l for l in b.lines() if "[coopcam] trace" in l][n_trace:]
+        cams = []
+        for l in lines:
+            m = re.search(r"cam (-?[0-9.]+) (-?[0-9.]+) (-?[0-9.]+)", l)
+            if m:
+                cams.append(tuple(float(x) for x in m.groups()))
+        jumps = [((c[0] - p[0]) ** 2 + (c[1] - p[1]) ** 2 + (c[2] - p[2]) ** 2) ** 0.5
+                 for p, c in zip(cams, cams[1:])]
+        hand = b.count(r"showing the host's camera") - n_hand
+        note("PASS" if lines else "FAIL", f"combo: camera trace lines {len(lines)}")
+        note("PASS" if hand == 0 else "FAIL", f"combo: hand-backs to the host's camera in 30 s: {hand}")
+        if jumps:
+            jumps_sorted = sorted(jumps)
+            note("INFO", f"combo: partner camera per-frame move: max {jumps_sorted[-1]:.3f} m, "
+                         f"p99 {jumps_sorted[int(len(jumps_sorted) * 0.99) - 1]:.3f} m, "
+                         f"median {jumps_sorted[len(jumps_sorted) // 2]:.3f} m over {len(jumps)} frames")
+        # ~2 min in the world for the FPS meter.
+        t0 = time.time()
+        while time.time() - t0 < 90:
+            for g in (a, b):
+                g.shot(f"combo_world_{k:02d}_{g.who}.png")
+            k += 1
+            time.sleep(20)
+        for g, who in ((a, "host"), (b, "partner")):
+            note("PASS" if g.proc.is_running() else "FAIL", f"combo: {who} still running (no crash)")
+        meter = os.path.join(a.dir, "fps_meter.log")
+        rates = []
+        if os.path.exists(meter):
+            for l in open(meter, encoding="utf-8", errors="replace"):
+                m = re.search(r"rate=([0-9.]+)", l)
+                if m:
+                    rates.append(float(m.group(1)))
+        tail = [r for r in rates[-30:] if r < 1000]
+        note("INFO", f"combo: host main-loop rate in the world, last {len(tail)} x 5 s: "
+                     f"min {min(tail) if tail else 0:.1f}, avg {sum(tail) / len(tail) if tail else 0:.1f}, "
+                     f"max {max(tail) if tail else 0:.1f}")
+    finally:
+        for g in (a, b):
+            g.stop()
+        relay.kill()
+
+
 def main():
     os.makedirs(OUT, exist_ok=True)
     mode = sys.argv[1] if len(sys.argv) > 1 else "coop"
-    {"coop": run_coop, "solo": run_solo, "multi": run_multi, "menu": run_menu, "menu2": run_menu2, "err": run_err, "final": run_final, "last": run_last, "start": run_start, "purse": run_purse, "fps": run_fps}[mode]()
+    {"coop": run_coop, "solo": run_solo, "multi": run_multi, "menu": run_menu, "menu2": run_menu2, "err": run_err, "final": run_final, "last": run_last, "start": run_start, "purse": run_purse, "fps": run_fps, "combo": run_combo}[mode]()
     with open(os.path.join(OUT, f"results_{mode}.txt"), "w", encoding="utf-8") as f:
         f.write("\n".join(results) + "\n")
     return 0 if not any(r.startswith("FAIL") for r in results) else 1
