@@ -1502,10 +1502,106 @@ def run_luaq_kept():
         relay.kill()
 
 
+def inv_dump(a, tag):
+    """Player 2's inventory on the host (CoopHero.Capture: every item type and
+    its count, plus the total). Returns ({record: count}, total) or None."""
+    n = a.count(r"\[lua\] INVDUMP ")
+    a.send("lua local h = GetPlayerHenchman() if h and h:IsAlive() and CoopHero then "
+           "print('INVDUMP ' .. CoopHero.SerializeV2(CoopHero.Capture(h), 0)) else print('INVDUMP none') end")
+    if not a.wait(f"{tag}: player 2's inventory dumped", r"\[lua\] INVDUMP ", n, 20):
+        return None
+    line = [l for l in a.lines() if "[lua] INVDUMP " in l][-1]
+    m = re.search(r"\|items=([^|]*)", line)
+    if not m:
+        note("FAIL", f"{tag}: inventory dump without items ({line[-120:]})")
+        return None
+    items = {k: int(v) for k, v in (kv.split(":") for kv in m.group(1).split(",") if ":" in kv)}
+    t = re.search(r"\|itemtotal=(\d+)", line)
+    total = int(t.group(1)) if t else sum(items.values())
+    note("INFO", f"{tag}: player 2 holds {len(items)} item types, {total} items")
+    return items, total
+
+
+def run_continue2():
+    """Continuing a co-op save must not duplicate player 2's kit (feature 002's
+    finding: CoopHero.Apply added every worn item and weapon again on each
+    continue, 12 -> 20 items). Join, dump player 2's inventory; then twice: the
+    partner leaves (the host saves and returns to the title), the host continues
+    the co-op save through the hub, the partner rejoins, dump again."""
+    setup_tomls()
+    relay_log = open(os.path.join(OUT, "relay_continue2.log"), "w")
+    relay = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                           "coop_relay.py")], stdout=relay_log, stderr=relay_log)
+    a, b = Game("mod-a", "host"), Game("mod-b", "partner")
+    a.start({"FABLE2_TEST_INPUT": "1"})
+    b.start({"FABLE2_TEST_INPUT": "1"})
+    try:
+        for g in (a, b):
+            g.n_menu = g.count(r"main menu: Co-op entry added")
+            g.past_title()
+        menu_then_coop(a, "c2", a.n_menu)
+        host_new_campaign(a, "c2")
+        menu_then_coop(b, "c2", b.n_menu)
+        wait_row(b, "Join TestA", "c2: the host's lobby is listed")
+        partner_joins(b, "Join TestA", "c2")
+        wait_row(a, "Start", "c2: host lobby shows the partner")
+        if not both_ready_and_start(a, b, "c2") or not join_phase(a, b, "c2"):
+            return
+        time.sleep(10)
+        first = inv_dump(a, "c2_join")
+        b.shot("c2_join_partner_look.png")
+        v = read_purses(a, b, "c2_join_purse")
+        for k in (1, 2):
+            tag = f"c2_continue{k}"
+            # The partner leaves: the host saves (player 2 into the campaign) and
+            # returns to the title.
+            b.stop()
+            n = a.count(r"host: back at the front end")
+            if not a.wait(f"{tag}: host saves and returns to the front end", r"host: back at the front end", n, 240):
+                return
+            n_menu = a.count(r"main menu: Co-op entry added")
+            time.sleep(10)
+            a.past_title()
+            menu_then_coop(a, tag, n_menu)
+            wait_row(a, "Host: continue a co-op save", f"{tag}: the hub offers the co-op saves")
+            a.select("Host: continue a co-op save")
+            n = a.count(r"\[lobby\] open saves")
+            a.press("E")
+            a.wait(f"{tag}: the hub lists the co-op saves", r"\[lobby\] open saves", n, 10)
+            n = a.count(r"\[lobby\] open host kind=continue")
+            a.press("E")  # the newest campaign: the one just played
+            a.wait(f"{tag}: the save's lobby opens", r"\[lobby\] open host kind=continue", n, 10)
+            b = Game("mod-b", "partner")
+            b.start({"FABLE2_TEST_INPUT": "1"})
+            n = b.count(r"main menu: Co-op entry added")
+            b.past_title()
+            menu_then_coop(b, tag, n)
+            wait_row(b, "Continue TestA", f"{tag}: the campaign is listed for the partner")
+            partner_joins(b, "Continue TestA", tag)
+            wait_row(a, "Start", f"{tag}: host lobby shows the partner")
+            if not both_ready_and_start(a, b, tag) or not join_phase(a, b, tag):
+                return
+            time.sleep(10)
+            now = inv_dump(a, tag)
+            b.shot(f"{tag}_partner_look.png")
+            if first and now:
+                grown = {r: (first[0].get(r, 0), c) for r, c in now[0].items() if c != first[0].get(r, 0)}
+                lost = {r: (c, 0) for r, c in first[0].items() if r not in now[0]}
+                note("PASS" if not grown and not lost and now[1] == first[1] else "FAIL",
+                     f"{tag}: player 2's items unchanged ({first[1]} -> {now[1]}; changed: {grown or 'none'}"
+                     f"{'; missing: ' + str(lost) if lost else ''})")
+            v = read_purses(a, b, f"{tag}_purse")
+            note("PASS" if v and v[0] == v[1] == v[2] else "FAIL", f"{tag}: purses equal ({v})")
+    finally:
+        for g in (a, b):
+            g.stop()
+        relay.kill()
+
+
 def main():
     os.makedirs(OUT, exist_ok=True)
     mode = sys.argv[1] if len(sys.argv) > 1 else "coop"
-    {"coop": run_coop, "solo": run_solo, "multi": run_multi, "menu": run_menu, "menu2": run_menu2, "err": run_err, "final": run_final, "last": run_last, "start": run_start, "purse": run_purse, "fps": run_fps, "combo": run_combo, "camera": run_camera, "luaq": run_luaq, "luaq_kept": run_luaq_kept}[mode]()
+    {"coop": run_coop, "solo": run_solo, "multi": run_multi, "menu": run_menu, "menu2": run_menu2, "err": run_err, "final": run_final, "last": run_last, "start": run_start, "purse": run_purse, "fps": run_fps, "combo": run_combo, "camera": run_camera, "luaq": run_luaq, "luaq_kept": run_luaq_kept, "continue2": run_continue2}[mode]()
     with open(os.path.join(OUT, f"results_{mode}.txt"), "w", encoding="utf-8") as f:
         f.write("\n".join(results) + "\n")
     return 0 if not any(r.startswith("FAIL") for r in results) else 1
