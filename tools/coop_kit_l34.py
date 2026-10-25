@@ -142,7 +142,7 @@ def run_l23():
         out_dir("l3")
         l3_steps(a, b)
         e2e.OUT = os.path.join(e2e.ROOT, r"research\002-evidence\l2")
-    l2.run(after=chained)
+    l2.run(chain=chained)
 
 
 def l3_steps(a, b):
