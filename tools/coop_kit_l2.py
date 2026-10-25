@@ -31,7 +31,8 @@ last, lua, snapshot, probe, hex_of = l1.last, l1.lua, l1.snapshot, l1.probe, l1.
 
 # Second sword candidates (record names from the game's scripts); the first one
 # the host's snapshot lists as a weapon is used. "#<hex>" = a record by id.
-SWORDS = ("ObjectWeaponSpecialBarbarian", "ObjectWeaponRoyalSceptre", "ObjectWeaponSpecialGood")
+SWORDS = ("ObjectWeaponSpecialBarbarian", "ObjectWeaponRoyalSceptre", "ObjectWeaponSpecialGood",
+          "ObjectInventoryWeaponSword")
 
 # Wheel rows (L1b): the wheel does not wrap and opens on Quests/Maps.
 ROW = {"Save": 0, "Map": 1, "Abilities": 2, "Items": 3, "Weapons": 4, "Clothing": 5,
