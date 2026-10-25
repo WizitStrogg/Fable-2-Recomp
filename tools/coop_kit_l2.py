@@ -134,8 +134,15 @@ def open_page(b, tag, page, sub_row):
     """Wheel -> page -> sub-page list, cursor on the first entry."""
     open_wheel(b, tag)
     down(ROW[page])
+    n = b.count(r"\[coopkit\] pause page '")
     key("E")
-    time.sleep(2.5)
+    # The page can take over a second to come up (L2 16:27Z: "chosen" 1.1 s after
+    # A; the next A, 2.7 s after the first, was lost): wait for the event, then
+    # give the page 3 s before the next press.
+    t = time.time()
+    while b.count(r"\[coopkit\] pause page '") <= n and time.time() - t < 8:
+        time.sleep(0.25)
+    time.sleep(3)
     down(sub_row)
     key("E")
     time.sleep(2.5)
