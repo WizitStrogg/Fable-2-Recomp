@@ -33,6 +33,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -394,9 +395,20 @@ inline void queue_apply(HostSide& h) {
   const Command& c = *h.running;
   std::string chunk = lib;
   chunk += "local hench = GetPlayerHenchman()\n";
-  chunk += "local res = 'no:busy'\n";
-  chunk += "if hench and hench:IsAlive() then res = CoopKit.Apply(hench, '" + std::string(OpName(c.op)) + "', '" +
+  // Apply once per command even if this chunk runs again (L2 15:44Z: queued
+  // during a pause, one use ran 7 times): a final result is kept and returned.
+  std::string key;  // the sid comes from the network: only letters and digits go into the Lua text
+  for (char ch : c.sid)
+    if (std::isalnum(static_cast<unsigned char>(ch))) key += ch;
+  key += ":" + std::to_string(c.seq);
+  chunk += "CoopKitDone = CoopKitDone or {}\n";
+  chunk += "local res = CoopKitDone['" + key + "']\n";
+  chunk += "if not res then\n";
+  chunk += "  res = 'no:busy'\n";
+  chunk += "  if hench and hench:IsAlive() then res = CoopKit.Apply(hench, '" + std::string(OpName(c.op)) + "', '" +
            c.rec + "') end\n";
+  chunk += "  if res ~= 'no:pending' and res ~= 'no:busy' then CoopKitDone['" + key + "'] = res end\n";
+  chunk += "end\n";
   chunk += "print('COOPKITRES|" + std::to_string(c.seq) + "|' .. tostring(res))\n";
   h.lua_queued = fable2::luaconsole::RunChunk(chunk);
   h.lua_queued_ms = now_ms();
@@ -669,11 +681,34 @@ inline bool worn_on_host(uint32_t id) {
   if (!st) return false;
   return std::find(st->worn.begin(), st->worn.end(), IdToHex(id)) != st->worn.end();
 }
+// The item of a leaf call: r4 = &handle, handle -> stack, stack+4 = record id
+// (the same convention as sub_825A5A40; L2 15:44Z: the Clothing page calls
+// sub_825A71A0 from its own handler, not through sub_825A5A40).
+inline uint32_t item_of(const uint8_t* base, uint32_t r4) {
+  namespace ta = fable2::textappend;
+  if (!ta::rdable2(base, r4, 4)) return 0;
+  const uint32_t stack = ta::load_be(base, r4);
+  return stack && ta::rdable2(base, stack + 4, 4) ? ta::load_be(base, stack + 4) : 0;
+}
+
 // The leaf call on the joiner: send instead of acting. True = skipped. With
 // the action's switch off the stock local change runs (launch 1 behaviour).
-inline bool screen_action(PPCContext& ctx, const char* action, bool enabled) {
-  if (!t_screen_item || !enabled) return false;
-  const uint32_t id = t_screen_item;
+// Only calls from a screen are taken: through sub_825A5A40 (t_screen_item) or
+// from the Clothing page's handler sub_825A7E98 (t_in_screen); other callers
+// (the appearance manager's own sub_8257EC78 / sub_8257F0A0) are logged and
+// left alone.
+inline thread_local bool t_in_screen = false;
+inline std::atomic<int> g_other_logged{0};
+inline bool screen_action(PPCContext& ctx, uint8_t* base, const char* action, bool enabled) {
+  if (!enabled || !joiner_active()) return false;
+  if (!t_screen_item && !t_in_screen) {
+    if (g_other_logged.fetch_add(1) < 20)
+      REXSYS_INFO("[coopkit] partner: {} of {} outside the item screens (lr 0x{:08X}); left local", action,
+                  IdToHex(item_of(base, ctx.r4.u32)), static_cast<uint32_t>(ctx.lr));
+    return false;
+  }
+  const uint32_t id = t_screen_item ? t_screen_item : item_of(base, ctx.r4.u32);
+  if (!id) return false;
   t_screen_item = 0;  // one command per press
   if (const auto op = OpForScreenAction(action, worn_on_host(id))) SendCommand(*op, id);
   ctx.r3.u64 = 0;
@@ -693,19 +728,27 @@ extern "C" void sub_825A5A40(PPCContext& ctx, uint8_t* base) {
   __imp__sub_825A5A40(ctx, base);
   fable2::coopkit::t_screen_item = 0;
 }
+// The Clothing page's item handler (calls sub_825A71A0 with its own handle).
+extern "C" void __imp__sub_825A7E98(PPCContext& ctx, uint8_t* base);
+extern "C" void sub_825A7E98(PPCContext& ctx, uint8_t* base) {
+  const bool was = fable2::coopkit::t_in_screen;
+  fable2::coopkit::t_in_screen = fable2::coopkit::joiner_active();
+  __imp__sub_825A7E98(ctx, base);
+  fable2::coopkit::t_in_screen = was;
+}
 extern "C" void __imp__sub_825A6020(PPCContext& ctx, uint8_t* base);
 extern "C" void sub_825A6020(PPCContext& ctx, uint8_t* base) {
-  if (fable2::coopkit::screen_action(ctx, "equip", REXCVAR_GET(coop_kit_send_equip))) return;
+  if (fable2::coopkit::screen_action(ctx, base, "equip", REXCVAR_GET(coop_kit_send_equip))) return;
   __imp__sub_825A6020(ctx, base);
 }
 extern "C" void __imp__sub_825A60F8(PPCContext& ctx, uint8_t* base);
 extern "C" void sub_825A60F8(PPCContext& ctx, uint8_t* base) {
-  if (fable2::coopkit::screen_action(ctx, "use", REXCVAR_GET(coop_kit_send_use))) return;
+  if (fable2::coopkit::screen_action(ctx, base, "use", REXCVAR_GET(coop_kit_send_use))) return;
   __imp__sub_825A60F8(ctx, base);
 }
 extern "C" void __imp__sub_825A71A0(PPCContext& ctx, uint8_t* base);
 extern "C" void sub_825A71A0(PPCContext& ctx, uint8_t* base) {
-  if (fable2::coopkit::screen_action(ctx, "wear", REXCVAR_GET(coop_kit_send_wear))) return;
+  if (fable2::coopkit::screen_action(ctx, base, "wear", REXCVAR_GET(coop_kit_send_wear))) return;
   __imp__sub_825A71A0(ctx, base);
 }
 
