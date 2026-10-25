@@ -42,6 +42,11 @@ def patch_state(source, patch):
     """Classify the worktree as 'applied', 'clean', or 'conflict' for a patch."""
     if git(source, "apply", "--reverse", "--check", str(patch), check=False).returncode == 0:
         return "applied"
+    # A fork with later commits next to a patched block (rexglue-sdk systemlink
+    # 033523e: the FPS work added cvars beside frame_limit) still has the
+    # patch's lines, with other neighbours: check them with one context line.
+    if git(source, "apply", "--reverse", "--check", "-C1", str(patch), check=False).returncode == 0:
+        return "applied"
     if git(source, "apply", "--check", str(patch), check=False).returncode == 0:
         return "clean"
     return "conflict"
