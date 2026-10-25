@@ -78,8 +78,10 @@ def start_and_join(a, b, tag, host_row="Host: new co-op campaign"):
         a.press("E")
         a.wait(f"{tag}: the campaign save opens its lobby", r"\[lobby\] open host kind=continue", n, 15)
     e2e.menu_then_coop(b, tag, b.n_menu)
-    e2e.wait_row(b, "Join TestA", f"{tag}: the host's lobby is listed")
-    e2e.partner_joins(b, "Join TestA", tag)
+    # A continued campaign is listed to its partner as "Continue TestA's campaign with you" (L4 16:38Z).
+    row = "Join TestA" if host_row.startswith("Host: new") else "Continue TestA"
+    e2e.wait_row(b, row, f"{tag}: the host's lobby is listed")
+    e2e.partner_joins(b, row, tag)
     e2e.wait_row(a, "Start", f"{tag}: host lobby shows the partner")
     return e2e.both_ready_and_start(a, b, tag) and e2e.join_phase(a, b, tag)
 
@@ -215,6 +217,30 @@ def l3_steps(a, b):
 
 # --- L4 -----------------------------------------------------------------------------------
 
+def save_row_quits(b, tag):
+    """The partner's Save row opens the henchman quit question (cancelled with B,
+    A is never pressed), and nothing in wt002-b\\saves changes."""
+    b_saves = os.path.join(e2e.ROOT, r"wt002-b\saves")
+    saves0 = tree_hashes(b_saves)
+    n = b.count(r"\[coopkit\] pause page '")
+    open_wheel(b, tag)  # the cursor ends on Save (row 0)
+    b.shot(f"{tag}_on_save.png")
+    key("E")
+    ok = b.wait(f"{tag}: Save chosen on the partner", r"\[coopkit\] pause page '", n, 8)
+    line = last(b, r"\[coopkit\] pause page '") if ok else ""
+    routed = ok and "chosen: henchman quit" in line
+    note("PASS" if routed else "FAIL", f"{tag}: Save -> {line.split('] ', 1)[-1] if line else 'no event'}")
+    if not routed:
+        key("B")  # a stock save menu may be open: back out at once, never confirm
+        time.sleep(1)
+    time.sleep(2.5)
+    b.shot(f"{tag}_quit_question.png")
+    close_menus(b, 1)
+    saves1 = tree_hashes(b_saves)
+    changed = sorted(p for p in set(saves0) | set(saves1) if saves0.get(p) != saves1.get(p))
+    note("PASS" if not changed else "FAIL", f"{tag}: wt002-b\\saves unchanged (changed: {changed})")
+
+
 def slot_of(a):
     for l in reversed(a.lines()):
         m = re.search(r"starter save: created (.*?) for XUID", l)
@@ -275,6 +301,7 @@ def run_l4():
         note("INFO", f"l4: campaign slot {slot}")
         time.sleep(6)
         give_kit(a, b)
+        save_row_quits(b, "l4q")
         snap = snapshot(a, "l4a")
         items = snap[1] if snap else {}
         potion, hat = hex_of(items, "ITEMS_POTIONS"), hex_of(items, "CLOTHING_HATS")
