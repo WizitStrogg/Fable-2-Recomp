@@ -27,6 +27,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <deque>
+#include <initializer_list>
 #include <map>
 #include <optional>
 #include <string>
@@ -340,6 +341,22 @@ inline std::vector<MirrorChange> MirrorDiff(const KitState& want, const std::map
   return out;
 }
 
+// What the copy's inventory should hold: the host's non-clothing items, plus
+// (with `weapons`) the equipped melee and ranged weapons, which the host keeps
+// in weapon slots outside its inventory list (L1b: the partner's Weapons page
+// was empty). An equipped record also listed as an item keeps the item's count.
+inline KitState WantedInventory(const KitState& k, bool weapons) {
+  KitState w = k;
+  std::erase_if(w.items, [](const Item& i) { return i.category.rfind("CLOTHING", 0) == 0; });
+  if (!weapons) return w;
+  for (const std::string& rec : {k.melee, k.ranged}) {
+    if (rec.empty()) continue;
+    if (std::none_of(w.items.begin(), w.items.end(), [&](const Item& i) { return i.rec == rec; }))
+      w.items.push_back({rec, 1, "WEAPONS_EQUIPPED", ""});
+  }
+  return w;
+}
+
 // Worn-set changes for the appearance manager (component 15): put on what the
 // host wears and the copy does not, take off what the copy wears and the host
 // does not.
@@ -361,6 +378,24 @@ inline std::optional<Op> OpForScreenAction(std::string_view action, bool current
   if (action == "equip") return Op::kEquip;
   if (action == "use") return Op::kUse;
   return std::nullopt;
+}
+
+// The partner's full pause wheel: what a page choice (event type 300) does.
+// Names are the full handler's (sub_82412378): Map, Items, Weapons, Clothing,
+// Abilities, Logbook, Options, Kick. The Save row's name is not compared there
+// (it falls through to the save code) and is never pressed on the rig, so any
+// other name counts as a save row and becomes the henchman quit.
+enum class PageRoute { kPass, kHenchmanAbilities, kHenchmanQuit, kSwallow };
+struct PageSwitches {
+  bool save = true, abilities = true, kick = true;
+};
+inline PageRoute RoutePage(std::string_view name, const PageSwitches& on) {
+  if (name.find("Henchman") != std::string_view::npos) return PageRoute::kPass;
+  for (std::string_view safe : {"Map", "Items", "Weapons", "Clothing", "Logbook", "Options"})
+    if (name == safe) return PageRoute::kPass;
+  if (name == "Abilities") return on.abilities ? PageRoute::kHenchmanAbilities : PageRoute::kPass;
+  if (name == "Kick") return on.kick ? PageRoute::kSwallow : PageRoute::kPass;
+  return on.save ? PageRoute::kHenchmanQuit : PageRoute::kPass;
 }
 
 inline uint32_t HexToId(std::string_view hex) { return static_cast<uint32_t>(std::strtoul(std::string(hex).c_str(), nullptr, 16)); }
