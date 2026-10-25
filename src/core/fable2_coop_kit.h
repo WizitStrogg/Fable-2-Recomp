@@ -412,7 +412,8 @@ constexpr int64_t kChunkLostMs = 5000;
 // queued chunk is waiting, not lost. While paused the give-up and lost-chunk
 // clocks stand still and no new snapshot is queued; commands apply the moment
 // the partner closes the menu (decision A, 2026-10-25).
-constexpr int64_t kStalledAfterMs = 1500;
+// 3 s: console chunks queued in a burst made 0-4 s "pauses" at 1.5 s (L2 of 15:18Z).
+constexpr int64_t kStalledAfterMs = 3000;
 inline bool lua_stalled() {
   return fable2::f5lua::queued_count() > 0 &&
          fable2::f5lua::steady_ms() - fable2::f5lua::g_last_run_ms > kStalledAfterMs;
