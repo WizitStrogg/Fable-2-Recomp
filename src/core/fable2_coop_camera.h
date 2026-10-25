@@ -22,6 +22,8 @@
 #include <rex/logging.h>
 #include <rex/ppc/context.h>
 
+#include "fable2_coop_camera_math.h"
+
 namespace fable2::coopcam {
 
 namespace ta = fable2::textappend;
@@ -106,6 +108,9 @@ inline void watch() {
 // the component's virtual). Verified on the two-copy rig
 // (research/05-client-camera.md, research/v12-evidence).
 
+REXCVAR_DEFINE_BOOL(coop_cam_trace, false, "Network",
+                    "Testing: log the joiner camera every frame for 30 s (frame time, creature, "
+                    "smoothed target, camera, the host's camera, FOV); turns itself off");
 REXCVAR_DEFINE_BOOL(coop_cam_chase, true, "Network",
                     "Joiner camera: swing behind your hero while walking (when you're not "
                     "turning the camera yourself)");
@@ -202,6 +207,9 @@ constexpr float kDistance = 5.5f, kHeight = 2.3f, kLookHeight = 1.5f, kTurnRate 
 constexpr float kOrbitSpeed = 4.0f;          // radians per second at full look input
 constexpr float kDefaultFov = 1.309f;        // the game's normal field of view
 inline int64_t g_last_tick_ms = 0;
+inline Follow g_follow;                 // smoothed creature position (camera_math)
+inline int64_t g_handback_ms = 0;       // when the view went to the host's special camera
+inline int64_t g_trace_until_ms = 0;
 
 inline void follow_tick(bool enabled) {
   uint8_t* base = fable2::f5lua::g_base;
@@ -245,37 +253,63 @@ inline void follow_tick(bool enabled) {
   if (!g_have_yaw) {
     g_yaw = std::atan2(-g_host_fwd.y, -g_host_fwd.x);  // start where the host camera is
     g_last_creature = creature;
+    g_follow = Follow{};
     g_have_yaw = true;
   }
-  // Cutscenes / special cameras: the host camera's field of view differs from
-  // the normal one. Show the host's camera then (we stop writing, so the next
-  // network update shows through) and resume afterwards.
+  const int64_t now = clock_ms();
+  // Cutscenes / special cameras (a FOV far from the normal one): show the
+  // host's camera (we stop writing, so the next network update shows through)
+  // and resume afterwards. The host's small FOV changes (running, aiming) do
+  // not hand the view over (2026-10-25 playtest: 5 of 7 hand-backs were
+  // those); our camera keeps the host's FOV, which we never overwrite.
   const float host_fov = load_be_float(base, view + kViewTarget + 0x30);
-  if (std::fabs(host_fov - kDefaultFov) > 0.05f) {
+  if (HostCameraIsSpecial(host_fov)) {
     if (g_active.exchange(false)) {
+      g_handback_ms = now;
       REXSYS_INFO("[coopcam] host camera FOV {:.3f}: showing the host's camera", host_fov);
     }
     g_written_pos = Vec3{1e9f, 1e9f, 1e9f};
+    g_last_tick_ms = now;
     return;
   }
-  const int64_t now = clock_ms();
+  if (g_handback_ms) {
+    REXSYS_INFO("[coopcam] own camera again after {} ms of the host's camera (FOV {:.3f})", now - g_handback_ms,
+                host_fov);
+    g_handback_ms = 0;
+    g_follow = Follow{};  // the creature may have moved a lot: start from it
+  }
   const float dt = g_last_tick_ms ? std::fmin(0.1f, (now - g_last_tick_ms) / 1000.0f) : 0.0f;
   g_last_tick_ms = now;
   // Orbit with the mouse / right stick.
   g_yaw -= g_look_x.load() * kOrbitSpeed * dt;
+  // The creature's position arrives in network steps: follow it damped, by
+  // elapsed time, so the steps do not shake the camera.
+  const float moved2 = g_follow.Step(creature.x, creature.y, creature.z, dt);
+  const Vec3 target{g_follow.x, g_follow.y, g_follow.z};
+  const Vec3 moved = target - g_last_creature;
+  g_last_creature = target;
   // Chase: ease the camera behind the direction the creature is walking,
-  // unless the player turned the camera in the last 1.5 s.
-  const Vec3 moved = creature - g_last_creature;
-  g_last_creature = creature;
-  if (REXCVAR_GET(coop_cam_chase) && now - g_look_ms.load() > 1500 && moved.x * moved.x + moved.y * moved.y > 0.0004f) {
-    const float behind = std::atan2(-moved.y, -moved.x);
-    float diff = behind - g_yaw;
-    while (diff > 3.14159265f) diff -= 6.2831853f;
-    while (diff < -3.14159265f) diff += 6.2831853f;
-    g_yaw += diff * kTurnRate;
+  // unless the player turned the camera in the last 1.5 s; per second, not per
+  // frame (the same feel at 20 and 60 fps).
+  if (REXCVAR_GET(coop_cam_chase) && now - g_look_ms.load() > 1500 && dt > 0 &&
+      moved2 > 0.25f * dt * dt) {  // walking faster than 0.5 m/s
+    g_yaw = ChaseYaw(g_yaw, std::atan2(-moved.y, -moved.x), dt);
   }
-  const Vec3 pos = creature + Vec3{std::cos(g_yaw) * kDistance, std::sin(g_yaw) * kDistance, kHeight};
-  const Vec3 fwd = normalized(creature + Vec3{0, 0, kLookHeight} - pos);
+  const Vec3 pos = target + Vec3{std::cos(g_yaw) * kDistance, std::sin(g_yaw) * kDistance, kHeight};
+  const Vec3 fwd = normalized(target + Vec3{0, 0, kLookHeight} - pos);
+  // Testing (coop_cam_trace): one line per frame for 30 s.
+  if (REXCVAR_GET(coop_cam_trace)) {
+    if (!g_trace_until_ms) g_trace_until_ms = now + 30000;
+    if (now > g_trace_until_ms) {
+      g_trace_until_ms = 0;
+      rex::cvar::SetFlagByName("coop_cam_trace", "false");
+    } else {
+      REXSYS_INFO("[coopcam] trace dt {:.1f} ms creature {:.3f} {:.3f} {:.3f} target {:.3f} {:.3f} {:.3f} "
+                  "cam {:.3f} {:.3f} {:.3f} host {:.3f} {:.3f} {:.3f} fov {:.3f} net {}",
+                  dt * 1000, creature.x, creature.y, creature.z, target.x, target.y, target.z, pos.x, pos.y,
+                  pos.z, seen.x, seen.y, seen.z, host_fov, dot(d, d) > 1e-4f ? 1 : 0);
+    }
+  }
   const Vec3 up = normalized(Vec3{0, 0, 1} - fwd * fwd.z);
   for (uint32_t block : {kViewCurrent, kViewTarget}) {
     if (!ta::wr2(base, view + block, 0x30)) return;

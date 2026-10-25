@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
+#include <cstdlib>
 #include <cstdio>
 #include <ctime>
 #include <filesystem>
@@ -26,6 +27,7 @@
 #include <optional>
 #include <functional>
 #include <mutex>
+#include <sstream>
 #include <string>
 
 #include <rex/cvar.h>
@@ -1261,6 +1263,66 @@ inline bool OnPress(PPCContext& ctx, uint8_t* base) {
 }
 
 inline void (*g_prev_frame_hook)() = nullptr;
+// Testing only (FABLE2_TEST_INPUT=1 in the environment, set by
+// tools/coop_ship_e2e.py; never by play-coop.cmd): commands from
+// <exe dir>\test_input.txt, read and emptied each frame, so proofs do not depend
+// on which window is in front (2026-10-25: focus loss and key repeat at 60 fps
+// broke two runs).
+//   press <A|B|X|Y|Up|Down|Left|Right|Start|Back> [ms]   one pad press (default 120 ms)
+//   lua <chunk>                                          run Lua in the game
+//   cvar <name> <value>                                  set a setting (e.g. coop_cam_trace true)
+inline void test_input_tick() {
+  static const bool on = std::getenv("FABLE2_TEST_INPUT") != nullptr;
+  if (!on) return;
+  static int64_t next = 0;
+  const int64_t now = fable2::f5lua::steady_ms();
+  if (now < next) return;
+  next = now + 50;
+  const auto path = fable2::cooptemplate::exe_dir() / "test_input.txt";
+  std::error_code ec;
+  if (!std::filesystem::exists(path, ec) || std::filesystem::file_size(path, ec) == 0) return;
+  std::string text;
+  {
+    std::ifstream f(path, std::ios::binary);
+    text.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+  }
+  std::ofstream(path, std::ios::binary | std::ios::trunc).close();
+  namespace cl = fable2::cooplobby;
+  std::istringstream lines(text);
+  std::string line;
+  int64_t delay = 0;
+  while (std::getline(lines, line)) {
+    while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
+    if (line.rfind("cvar ", 0) == 0) {  // cvar <name> <value>
+      std::istringstream w(line.substr(5));
+      std::string name, value;
+      w >> name >> value;
+      rex::cvar::SetFlagByName(name, value);
+      REXSYS_INFO("[test-input] cvar {} = {}", name, value);
+      continue;
+    }
+    if (line.rfind("lua ", 0) == 0) {
+      fable2::luaconsole::RunChunk(line.substr(4));
+      REXSYS_INFO("[test-input] lua {}", line.substr(4));
+      continue;
+    }
+    std::istringstream w(line);
+    std::string cmd, name;
+    int ms = 120;
+    w >> cmd >> name >> ms;
+    if (cmd != "press") continue;
+    static const std::pair<const char*, uint16_t> kNames[] = {
+        {"Up", cl::kUp}, {"Down", cl::kDown}, {"Left", cl::kLeft}, {"Right", cl::kRight},
+        {"Start", 0x0010}, {"Back", 0x0020}, {"A", cl::kA}, {"B", cl::kB}, {"X", cl::kX}, {"Y", 0x8000}};
+    for (const auto& [n, mask] : kNames) {
+      if (name != n) continue;
+      cl::InjectPress(mask, delay, ms);
+      delay += ms + 150;  // several presses in one read: one after the other
+      REXSYS_INFO("[test-input] press {} {} ms", name, ms);
+    }
+  }
+}
+
 inline void OnFrame() {
   if (g_prev_frame_hook) g_prev_frame_hook();
   // Rig only: narrow the save list to one slot so Continue loads it with no
@@ -1291,6 +1353,7 @@ inline void OnFrame() {
   }
   session_tick();
   partner_purse_tick(fable2::f5lua::steady_ms());
+  test_input_tick();
 }
 
 inline const bool g_installed = [] {

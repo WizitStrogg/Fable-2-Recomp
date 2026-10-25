@@ -79,7 +79,9 @@ def _send(inp):
     user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
 
 
-def key(name, hold_ms=150):
+def key(name, hold_ms=60):
+    # 60 ms: at 60 fps (the FPS SDK) a 150 ms hold crossed the menu's own
+    # repeat and moved two rows per press (fps run, 2026-10-25).
     sc, ext = SCAN[name]
     flags = 0x0008 | (0x0001 if ext else 0)  # KEYEVENTF_SCANCODE (| EXTENDEDKEY)
     for up in (False, True):
