@@ -79,8 +79,10 @@ REXCVAR_DEFINE_BOOL(coop_kit_send_use, true, "Network",
                     "Co-op kit (partner): use (potions, food) on the Items page is sent to the host");
 REXCVAR_DEFINE_BOOL(coop_kit_send_equip, true, "Network",
                     "Co-op kit (partner): equip on the Weapons page is sent to the host");
-REXCVAR_DEFINE_BOOL(coop_kit_redirect_save, true, "Network",
-                    "Co-op kit (partner): the wheel's Save row opens the henchman quit instead");
+// Off: L4 of 17:14Z, the henchman quit question opened from the full wheel did
+// not close on B (stuck, host paused). With it off the Save row does nothing.
+REXCVAR_DEFINE_BOOL(coop_kit_redirect_save, false, "Network",
+                    "Co-op kit (partner): the wheel's Save row opens the henchman quit instead (experimental)");
 REXCVAR_DEFINE_BOOL(coop_kit_redirect_abilities, true, "Network",
                     "Co-op kit (partner): the wheel's Abilities row opens the henchman abilities");
 REXCVAR_DEFINE_BOOL(coop_kit_redirect_kick, true, "Network",
