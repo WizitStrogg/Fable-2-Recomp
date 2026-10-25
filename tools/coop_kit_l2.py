@@ -167,7 +167,9 @@ def field(snap, name):
     return m.group(1) if m else ""
 
 
-def run():
+def run(after=None):
+    """L2. `after(a, b)` runs next in the same session when L2 had no FAIL from
+    the kit step on (coop_kit_l34.py l23 chains L3 this way)."""
     os.makedirs(e2e.OUT, exist_ok=True)
     a, b = e2e.Game("wt002-a", "host"), e2e.Game("wt002-b", "partner")
     HOST[0] = a
@@ -186,6 +188,7 @@ def run():
         if not e2e.both_ready_and_start(a, b, "l2") or not e2e.join_phase(a, b, "l2"):
             return
         time.sleep(8)
+        n_results = len(e2e.results)
 
         # --- give player 2 the test kit on the host ------------------------------------------
         for name in (l1.POTION, l1.POTION, l1.FOOD, l1.HAT, l1.KEY_ITEM) + SWORDS:
@@ -304,6 +307,13 @@ def run():
         note("INFO", "pickup: not scripted (needs player 2 walked onto an item); left for the hands-on test")
         a.shot("l2z_host_end.png")
         b.shot("l2z_partner_end.png")
+        if after:
+            fails = [r for r in e2e.results[n_results:] if r.startswith("FAIL")]
+            if fails:
+                note("INFO", f"=== L3 not chained: L2 had {len(fails)} FAIL(s)")
+            else:
+                note("INFO", "=== L2 clean: L3 follows in the same session")
+                after(a, b)
     finally:
         for g in (a, b):
             g.stop()

@@ -130,68 +130,87 @@ def run_l3():
             return
         time.sleep(6)
         give_kit(a, b)
-        snap = snapshot(a, "l3a")
-        items = snap[1] if snap else {}
-        potion, hat = hex_of(items, "ITEMS_POTIONS"), hex_of(items, "CLOTHING_HATS")
-
-        # Pauses (decision A, the stock behaviour): the partner's wheel alone does not
-        # pause the host; an item page does, and the host resumes when it closes.
-        open_wheel(b, "l3m_partner")
-        note("PASS" if moving(a, "l3m_host_while_partner_wheel") else "FAIL",
-             "l3m: the host's game keeps running while only the partner's wheel is open")
-        close_menus(b, 0)
-        open_page(b, "l3m_items", "Items", ITEMS_ROW["Potions"])
-        time.sleep(4)
-        note("INFO", f"l3m: host paused while the partner's Items page is open: "
-                     f"{not moving(a, 'l3m_host_while_partner_items')}")
-        note("PASS" if close_menus(b, 2) else "FAIL", "l3m: the host resumes when the partner's menus close")
-        note("PASS" if moving(a, "l3m_host_after_partner_closed") else "FAIL",
-             "l3m: the host's game runs again after the partner closed the menu")
-
-        # Wheel rows that are not item pages.
-        b_saves = os.path.join(e2e.ROOT, r"wt002-b\saves")
-        saves0 = tree_hashes(b_saves)
-        for page, want, tag, backs in (("Save", "henchman quit", "l3s", 1), ("Abilities", "henchman abilities", "l3ab", 1),
-                                       ("Kick", "ignored", "l3kick", 0), ("Options", "as is", "l3opt", 1)):
-            n = b.count(r"\[coopkit\] pause page '")
-            open_wheel(b, tag)
-            down(ROW[page])
-            b.shot(f"{tag}_on_row.png")
-            key("E")
-            ok = b.wait(f"{tag}: {page} chosen on the partner", r"\[coopkit\] pause page '", n, 8)
-            line = last(b, r"\[coopkit\] pause page '") if ok else ""
-            routed = ok and f"chosen: {want}" in line
-            note("PASS" if routed else "FAIL", f"{tag}: {page} -> {line.split('] ', 1)[-1] if line else 'no event'}")
-            if page == "Save" and not routed:
-                key("B")  # the stock save menu may be open: back out at once, never confirm
-                time.sleep(1)
-            time.sleep(2.5)
-            b.shot(f"{tag}_after.png")  # Save: the henchman quit question; B cancels it, A is never pressed
-            close_menus(b, backs)
-        note("PASS" if not any("[content] close root=Save" in l for l in b.lines()) else "FAIL",
-             "l3s: the partner never wrote a save")
-        saves1 = tree_hashes(b_saves)
-        changed = sorted(p for p in set(saves0) | set(saves1) if saves0.get(p) != saves1.get(p))
-        note("PASS" if not changed else "FAIL", f"l3s: wt002-b\\saves unchanged (changed: {changed})")
-
-        # Item actions by buttons (each applied when the partner's menu closes).
-        before = (items.get(potion) or (0,))[0] if potion else 0
-        open_page(b, "l3p", "Items", ITEMS_ROW["Potions"])
-        _, ack_p = press_entry(a, b, "l3p", 0, "use")
-        open_page(b, "l3h", "Clothing", CLOTHING_ROW["Headgear"])
-        _, ack_h = press_entry(a, b, "l3h", 0, "wear")
-        time.sleep(3)
-        snap = snapshot(a, "l3z")
-        after = (snap[1].get(potion) or (0,))[0] if snap and potion else 0
-        worn = l2.field(snap, "worn").split(",")
-        note("PASS" if ack_p and ": ok" in ack_p and after == before - 1 else "FAIL",
-             f"l3p: potion by buttons: {before} -> {after} ({ack_p and ack_p.split('] ', 1)[-1]})")
-        note("PASS" if ack_h and ": ok" in ack_h and hat in worn else "FAIL",
-             f"l3h: hat by buttons: worn={','.join(worn)} ({ack_h and ack_h.split('] ', 1)[-1]})")
-        a.shot("l3z_host_end.png")
-        b.shot("l3z_partner_end.png")
+        l3_steps(a, b)
     finally:
         stop_and_keep(a, b, "")
+
+
+def run_l23():
+    """L2, then (only when L2 had no FAIL after the join) L3's steps in the same
+    session: one launch instead of two. L3's evidence goes to l3/, the logs to l2/."""
+    def chained(a, b):
+        out_dir("l3")
+        l3_steps(a, b)
+        e2e.OUT = os.path.join(e2e.ROOT, r"research\002-evidence\l2")
+    l2.run(after=chained)
+
+
+def l3_steps(a, b):
+    """L3 on a joined session where player 2 holds the test kit (fresh, or after L2:
+    a potion may be gone and the hat may already be worn)."""
+    snap = snapshot(a, "l3a")
+    items = snap[1] if snap else {}
+    potion, hat = hex_of(items, "ITEMS_POTIONS"), hex_of(items, "CLOTHING_HATS")
+    hat_worn0 = bool(hat) and hat in l2.field(snap, "worn").split(",")
+
+    # Pauses (decision A, the stock behaviour): the partner's wheel alone does not
+    # pause the host; an item page does, and the host resumes when it closes.
+    open_wheel(b, "l3m_partner")
+    note("PASS" if moving(a, "l3m_host_while_partner_wheel") else "FAIL",
+         "l3m: the host's game keeps running while only the partner's wheel is open")
+    close_menus(b, 0)
+    open_page(b, "l3m_items", "Items", ITEMS_ROW["Potions"])
+    time.sleep(4)
+    note("INFO", f"l3m: host paused while the partner's Items page is open: "
+                 f"{not moving(a, 'l3m_host_while_partner_items')}")
+    note("PASS" if close_menus(b, 2) else "FAIL", "l3m: the host resumes when the partner's menus close")
+    note("PASS" if moving(a, "l3m_host_after_partner_closed") else "FAIL",
+         "l3m: the host's game runs again after the partner closed the menu")
+
+    # Wheel rows that are not item pages.
+    b_saves = os.path.join(e2e.ROOT, r"wt002-b\saves")
+    saves0 = tree_hashes(b_saves)
+    for page, want, tag, backs in (("Save", "henchman quit", "l3s", 1), ("Abilities", "henchman abilities", "l3ab", 1),
+                                   ("Kick", "ignored", "l3kick", 0), ("Options", "as is", "l3opt", 1)):
+        n = b.count(r"\[coopkit\] pause page '")
+        open_wheel(b, tag)
+        down(ROW[page])
+        b.shot(f"{tag}_on_row.png")
+        key("E")
+        ok = b.wait(f"{tag}: {page} chosen on the partner", r"\[coopkit\] pause page '", n, 8)
+        line = last(b, r"\[coopkit\] pause page '") if ok else ""
+        routed = ok and f"chosen: {want}" in line
+        note("PASS" if routed else "FAIL", f"{tag}: {page} -> {line.split('] ', 1)[-1] if line else 'no event'}")
+        if page == "Save" and not routed:
+            key("B")  # the stock save menu may be open: back out at once, never confirm
+            time.sleep(1)
+        time.sleep(2.5)
+        b.shot(f"{tag}_after.png")  # Save: the henchman quit question; B cancels it, A is never pressed
+        close_menus(b, backs)
+    note("PASS" if not any("[content] close root=Save" in l for l in b.lines()) else "FAIL",
+         "l3s: the partner never wrote a save")
+    saves1 = tree_hashes(b_saves)
+    changed = sorted(p for p in set(saves0) | set(saves1) if saves0.get(p) != saves1.get(p))
+    note("PASS" if not changed else "FAIL", f"l3s: wt002-b\\saves unchanged (changed: {changed})")
+
+    # Item actions by buttons (each applied when the partner's menu closes).
+    before = (items.get(potion) or (0,))[0] if potion else 0
+    open_page(b, "l3p", "Items", ITEMS_ROW["Potions"])
+    _, ack_p = press_entry(a, b, "l3p", 0, "use")
+    # A on the hat toggles it: take it off when L2 already put it on.
+    open_page(b, "l3h", "Clothing", CLOTHING_ROW["Headgear"])
+    _, ack_h = press_entry(a, b, "l3h", 0, "unwear" if hat_worn0 else "wear")
+    time.sleep(3)
+    snap = snapshot(a, "l3z")
+    after = (snap[1].get(potion) or (0,))[0] if snap and potion else 0
+    worn = l2.field(snap, "worn").split(",")
+    note("PASS" if ack_p and ": ok" in ack_p and after == before - 1 else "FAIL",
+         f"l3p: potion by buttons: {before} -> {after} ({ack_p and ack_p.split('] ', 1)[-1]})")
+    note("PASS" if ack_h and ": ok" in ack_h and (hat in worn) != hat_worn0 else "FAIL",
+         f"l3h: hat by buttons ({'off' if hat_worn0 else 'on'}): worn={','.join(worn)} "
+         f"({ack_h and ack_h.split('] ', 1)[-1]})")
+    a.shot("l3z_host_end.png")
+    b.shot("l3z_partner_end.png")
 
 
 # --- L4 -----------------------------------------------------------------------------------
@@ -341,6 +360,8 @@ if __name__ == "__main__":
     mode = sys.argv[1] if len(sys.argv) > 1 else ""
     if mode == "l3":
         run_l3()
+    elif mode == "l23":
+        run_l23()
     elif mode == "l4":
         run_l4()
     else:
