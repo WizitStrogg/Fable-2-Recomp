@@ -1433,6 +1433,75 @@ def run_luaq():
         relay.kill()
 
 
+def run_luaq_kept():
+    """The kept / retry path (9cace5a): while the partner's pause holds, the host
+    queues 12 numbered markers and a gold change (13 one-shots, 8 console slots):
+    some are refused and kept, then all run once, in order, after the pause."""
+    setup_tomls()
+    relay_log = open(os.path.join(OUT, "relay_luaq_kept.log"), "w")
+    relay = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                           "coop_relay.py")], stdout=relay_log, stderr=relay_log)
+    a, b = Game("mod-a", "host"), Game("mod-b", "partner")
+    a.start({"FABLE2_TEST_INPUT": "1"})
+    b.start({"FABLE2_TEST_INPUT": "1"})
+    try:
+        for g in (a, b):
+            g.n_menu = g.count(r"main menu: Co-op entry added")
+            g.past_title()
+        menu_then_coop(a, "kept", a.n_menu)
+        host_new_campaign(a, "kept")
+        menu_then_coop(b, "kept", b.n_menu)
+        wait_row(b, "Join TestA", "kept: the host's lobby is listed")
+        partner_joins(b, "Join TestA", "kept")
+        wait_row(a, "Start", "kept: host lobby shows the partner")
+        if not both_ready_and_start(a, b, "kept") or not join_phase(a, b, "kept"):
+            return
+        time.sleep(8)
+        v = read_purses(a, b, "kept_purse0")
+        if not v:
+            return
+        start = v[0]
+        n_refused = a.count(r"not queued")
+        n_kept = a.count(r"chunk kept until a console slot is free")
+        n_kq = a.count(r"kept chunk queued")
+        b.press("Start")  # the partner's pause menu: both games pause, queued scripts wait
+        time.sleep(2)
+        b.shot("kept_pause_partner.png")
+        # 13 one-shots in one read: 8 take the console slots, the rest are kept.
+        lines = [f"lua print('LUAQ k{i}')" for i in range(1, 7)]
+        lines.append("lua Money.Modify(GetPlayerHero(), 150) print('LUAQ kgold')")
+        lines += [f"lua print('LUAQ k{i}')" for i in range(7, 13)]
+        with open(os.path.join(a.dir, "test_input.txt"), "a", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+        time.sleep(12)
+        a.shot("kept_pause_host.png")
+        b.press("Start")
+        expect = start + 150
+        time.sleep(15)
+        v = read_purses(a, b, "kept_after_pause")
+        ok = v is not None and v[0] == v[1] == v[2] == expect
+        note("PASS" if ok else "FAIL", f"kept: after the pause host {v[0] if v else '?'}, host's player 2 "
+                                         f"{v[1] if v else '?'}, partner's own {v[2] if v else '?'} (expected {expect})")
+        a.shot("kept_after_pause_host.png")
+        b.shot("kept_after_pause_partner.png")
+        refused = a.count(r"not queued") - n_refused
+        kept = a.count(r"chunk kept until a console slot is free") - n_kept
+        queued = a.count(r"kept chunk queued") - n_kq
+        note("PASS" if refused > 0 and kept > 0 else "FAIL",
+             f"kept: the full queue refused chunks ({refused} refusals) and {kept} were kept")
+        note("PASS" if kept == queued else "FAIL", f"kept: {queued} of {kept} kept chunks queued later ({kept - queued} lost)")
+        # Each marker exactly once, in order (the Lua print itself: "[lua] LUAQ kN").
+        order = [m.group(1) for l in a.lines() for m in [re.search(r"\[lua\] LUAQ (k\d+|kgold)$", l.rstrip())] if m]
+        want = [f"k{i}" for i in range(1, 7)] + ["kgold"] + [f"k{i}" for i in range(7, 13)]
+        once = all(order.count(w) == 1 for w in want)
+        note("PASS" if once else "FAIL", f"kept: every marker ran exactly once ({len(order)} runs for {len(want)} markers)")
+        note("PASS" if order == want else "FAIL", f"kept: in order: {' '.join(order)}")
+    finally:
+        for g in (a, b):
+            g.stop()
+        relay.kill()
+
+
 def main():
     os.makedirs(OUT, exist_ok=True)
     mode = sys.argv[1] if len(sys.argv) > 1 else "coop"
