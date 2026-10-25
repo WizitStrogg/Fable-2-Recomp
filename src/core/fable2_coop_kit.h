@@ -84,6 +84,9 @@ REXCVAR_DEFINE_BOOL(coop_kit_redirect_abilities, true, "Network",
                     "Co-op kit (partner): the wheel's Abilities row opens the henchman abilities");
 REXCVAR_DEFINE_BOOL(coop_kit_redirect_kick, true, "Network",
                     "Co-op kit (partner): the wheel's Kick row does nothing");
+REXCVAR_DEFINE_BOOL(coop_kit_no_host_pause, false, "Network",
+                    "Co-op kit (partner): opening Items/Weapons/Clothing does not pause the host's game "
+                    "(off: the stock pause; untested)");
 
 extern "C" void sub_8261A058(PPCContext& ctx, uint8_t* base);
 extern "C" void sub_8261B1A0(PPCContext& ctx, uint8_t* base);
@@ -329,6 +332,7 @@ struct HostSide {
   bool snapshot_queued = false;
   int64_t snapshot_queued_ms = 0;
   std::string last_state;
+  int64_t last_tick_ms = 0, paused_since_ms = 0;
 };
 struct JoinerSide {
   JoinerQueue queue{std::to_string(std::chrono::duration_cast<std::chrono::seconds>(
@@ -403,8 +407,36 @@ inline void queue_apply(HostSide& h) {
 // given up after this long and queued again.
 constexpr int64_t kChunkLostMs = 5000;
 
+// The host's game is paused (L2: the partner's stock item pages pause both
+// games, "User has paused the game"): the game VM runs no queued Lua, so a
+// queued chunk is waiting, not lost. While paused the give-up and lost-chunk
+// clocks stand still and no new snapshot is queued; commands apply the moment
+// the partner closes the menu (decision A, 2026-10-25).
+constexpr int64_t kStalledAfterMs = 1500;
+inline bool lua_stalled() {
+  return fable2::f5lua::queued_count() > 0 &&
+         fable2::f5lua::steady_ms() - fable2::f5lua::g_last_run_ms > kStalledAfterMs;
+}
+
 inline void host_tick(const lobby::LobbyStatus& s, int64_t now) {
   auto& h = host();
+  const int64_t dt = h.last_tick_ms ? now - h.last_tick_ms : 0;
+  h.last_tick_ms = now;
+  if (lua_stalled()) {
+    if (!h.paused_since_ms) {
+      h.paused_since_ms = now;
+      REXSYS_INFO("[coopkit] host: game paused (Lua waiting); commands wait for the unpause");
+    }
+    h.first_try_ms += dt;
+    h.next_try_ms += dt;
+    h.lua_queued_ms += dt;
+    h.snapshot_queued_ms += dt;
+    return;
+  }
+  if (h.paused_since_ms) {
+    REXSYS_INFO("[coopkit] host: game resumed after {} s", (now - h.paused_since_ms) / 1000);
+    h.paused_since_ms = 0;
+  }
   if (h.snapshot_queued && now - h.snapshot_queued_ms > kChunkLostMs) {
     REXSYS_WARN("[coopkit] host: snapshot rev {} did not come back; queuing a new one", h.rev);
     h.snapshot_queued = false;
@@ -686,7 +718,21 @@ namespace fable2::coopkit {
 constexpr uint32_t kHenchmanAbilitiesStr = 0x820B065C;  // "HenchmanAbilities" (image)
 constexpr uint32_t kHenchmanQuitStr = 0x820B0680;       // "HenchmanQuit" (image)
 constexpr uint32_t kPageChosen = 300;
+inline thread_local bool t_full_page_open = false;
 }  // namespace fable2::coopkit
+
+// sub_82336D70(r3 = screen manager) is the game's PauseGame: every pause page
+// calls it as it opens (sub_82412378 and the henchman sub_824129C0 alike); it
+// raises PAUSE_GAME, which pauses the host too. With coop_kit_no_host_pause the
+// joiner's stock full-wheel pages skip it (option B, kept switchable).
+extern "C" void __imp__sub_82336D70(PPCContext& ctx, uint8_t* base);
+extern "C" void sub_82336D70(PPCContext& ctx, uint8_t* base) {
+  if (fable2::coopkit::t_full_page_open && REXCVAR_GET(coop_kit_no_host_pause) && fable2::coopkit::joiner_active()) {
+    REXSYS_INFO("[coopkit] partner page opened without the game pause (coop_kit_no_host_pause)");
+    return;
+  }
+  __imp__sub_82336D70(ctx, base);
+}
 
 extern "C" void __imp__sub_8240EAA0(PPCContext& ctx, uint8_t* base);
 extern "C" void sub_8240EAA0(PPCContext& ctx, uint8_t* base) {
@@ -710,7 +756,12 @@ extern "C" void sub_8240EAA0(PPCContext& ctx, uint8_t* base) {
   static const char* kRouteNames[] = {"as is", "henchman abilities", "henchman quit", "ignored"};
   REXSYS_INFO("[coopkit] pause page '{}' chosen: {}", name, kRouteNames[static_cast<int>(route)]);
   if (route == ck::PageRoute::kSwallow) return;
-  if (route == ck::PageRoute::kPass) return __imp__sub_8240EAA0(ctx, base);
+  if (route == ck::PageRoute::kPass) {
+    ck::t_full_page_open = true;  // sub_82336D70 below: the stock pause, unless coop_kit_no_host_pause
+    __imp__sub_8240EAA0(ctx, base);
+    ck::t_full_page_open = false;
+    return;
+  }
   // Point the event's name object at the henchman string for this call, then put it back.
   ck::be32(base, obj, route == ck::PageRoute::kHenchmanQuit ? ck::kHenchmanQuitStr : ck::kHenchmanAbilitiesStr);
   __imp__sub_8240EAA0(ctx, base);
