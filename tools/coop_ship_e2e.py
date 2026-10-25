@@ -1360,10 +1360,81 @@ def run_camera():
         relay.kill()
 
 
+def run_luaq():
+    """The Lua console slot fix (b422910 + 9cace5a): the join (start flow), a
+    normal purse step, then the partner pauses for ~20 s while the host gains and
+    spends gold. Pass: the same total on all purses after the pause, each change
+    run exactly once, no chunk lost."""
+    setup_tomls()
+    relay_log = open(os.path.join(OUT, "relay_luaq.log"), "w")
+    relay = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                           "coop_relay.py")], stdout=relay_log, stderr=relay_log)
+    a, b = Game("mod-a", "host"), Game("mod-b", "partner")
+    a.start({"FABLE2_TEST_INPUT": "1"})
+    b.start({"FABLE2_TEST_INPUT": "1"})
+    try:
+        for g in (a, b):
+            g.n_menu = g.count(r"main menu: Co-op entry added")
+            g.past_title()
+        menu_then_coop(a, "luaq", a.n_menu)
+        host_new_campaign(a, "luaq")
+        menu_then_coop(b, "luaq", b.n_menu)
+        wait_row(b, "Join TestA", "luaq: the host's lobby is listed")
+        partner_joins(b, "Join TestA", "luaq")
+        wait_row(a, "Start", "luaq: host lobby shows the partner")
+        nb = b.count(r"started the campaign, waiting")
+        if not both_ready_and_start(a, b, "luaq"):
+            return
+        b.wait("luaq: partner's joining card at the host's Start", r"started the campaign, waiting", nb, 5)
+        if not join_phase(a, b, "luaq"):
+            return
+        time.sleep(8)
+        v = read_purses(a, b, "luaq_purse0")
+        if not v:
+            return
+        start = v[0]
+        # A normal step.
+        a.send("lua Money.Modify(GetPlayerHero(), 150) print('LUAQ gain1')")
+        check_purse(a, b, "luaq_purse1_gain_150", start + 150)
+        # The pause variant: the partner's pause menu (it pauses both games) for
+        # ~20 s while the host gains 150 and spends 100; then it closes.
+        b.press("Start")
+        time.sleep(2)
+        b.shot("luaq_pause_partner.png")
+        a.shot("luaq_pause_host.png")
+        a.send("lua Money.Modify(GetPlayerHero(), 150) print('LUAQ gain2')")
+        time.sleep(8)
+        a.send("lua Money.Modify(GetPlayerHero(), -100) print('LUAQ spend2')")
+        time.sleep(10)
+        b.press("Start")
+        expect = start + 150 + 150 - 100
+        time.sleep(10)  # queued and kept chunks run after the pause; the sync and mirror follow
+        v = read_purses(a, b, "luaq_after_pause")
+        ok = v is not None and v[0] == v[1] == v[2] == expect
+        note("PASS" if ok else "FAIL", f"luaq: after the pause host {v[0] if v else '?'}, host's player 2 "
+                                         f"{v[1] if v else '?'}, partner's own {v[2] if v else '?'} (expected {expect})")
+        a.shot("luaq_after_pause_host.png")
+        b.shot("luaq_after_pause_partner.png")
+        for tag in ("LUAQ gain1", "LUAQ gain2", "LUAQ spend2"):
+            n = a.count(re.escape(tag))
+            note("PASS" if n == 1 else "FAIL", f"luaq: '{tag}' ran {n} time(s) (expected exactly 1)")
+        for g in (a, b):
+            refused = g.count(r"not queued")
+            kept = g.count(r"chunk kept until a console slot is free")
+            queued = g.count(r"kept chunk queued")
+            note("PASS" if kept == queued else "FAIL",
+                 f"luaq: {g.who}: {refused} refused, {kept} kept, {queued} of them queued later "
+                 f"({kept - queued} lost)")
+    finally:
+        for g in (a, b):
+            g.stop()
+        relay.kill()
+
+
 def main():
     os.makedirs(OUT, exist_ok=True)
     mode = sys.argv[1] if len(sys.argv) > 1 else "coop"
-    {"coop": run_coop, "solo": run_solo, "multi": run_multi, "menu": run_menu, "menu2": run_menu2, "err": run_err, "final": run_final, "last": run_last, "start": run_start, "purse": run_purse, "fps": run_fps, "combo": run_combo, "camera": run_camera}[mode]()
+    {"coop": run_coop, "solo": run_solo, "multi": run_multi, "menu": run_menu, "menu2": run_menu2, "err": run_err, "final": run_final, "last": run_last, "start": run_start, "purse": run_purse, "fps": run_fps, "combo": run_combo, "camera": run_camera, "luaq": run_luaq}[mode]()
     with open(os.path.join(OUT, f"results_{mode}.txt"), "w", encoding="utf-8") as f:
         f.write("\n".join(results) + "\n")
     return 0 if not any(r.startswith("FAIL") for r in results) else 1
