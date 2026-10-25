@@ -111,7 +111,12 @@ def close_menus(b, backs):
         t = time.time()
         while time.time() - t < 4:
             if host_resumed_since(h, n_r):
-                note("PASS", f"{b.who}: menus closed and the host resumed ({i + 1} B)")
+                # The host resumes once the partner is back on the wheel; one more B
+                # closes the wheel (dry run 16:11Z: left open, the next step's Start
+                # closed it instead of opening it).
+                key("B")
+                time.sleep(1)
+                note("PASS", f"{b.who}: menus closed and the host resumed ({i + 2} B)")
                 time.sleep(1)
                 return True
             time.sleep(0.25)
@@ -146,7 +151,11 @@ def press_a_on_entry(a, b, tag, row, want_op=None, backs=2):
     down(row)
     b.shot(f"{tag}_on_entry.png")
     key("E")
-    sent = b.wait(f"{tag}: partner's A sent a command", r"\[coopkit\] partner: command \d+ ", nc, 8)
+    if want_op:
+        sent = b.wait(f"{tag}: partner's A sent a command", r"\[coopkit\] partner: command \d+ ", nc, 8)
+    else:  # an entry that may send nothing (the quest key): no PASS/FAIL here, the caller judges
+        time.sleep(4)
+        sent = b.count(r"\[coopkit\] partner: command \d+ ") > nc
     cmd = last(b, r"\[coopkit\] partner: command \d+ ") if sent else None
     if cmd and want_op and f" {want_op} " not in cmd:
         note("FAIL", f"{tag}: sent {cmd.split('] ', 1)[-1]} (want {want_op})")
@@ -174,8 +183,8 @@ def field(snap, name):
     return m.group(1) if m else ""
 
 
-def run(after=None):
-    """L2. `after(a, b)` runs next in the same session when L2 had no FAIL from
+def run(chain=None):
+    """L2. `chain(a, b)` runs next in the same session when L2 had no FAIL from
     the kit step on (coop_kit_l34.py l23 chains L3 this way)."""
     os.makedirs(e2e.OUT, exist_ok=True)
     a, b = e2e.Game("wt002-a", "host"), e2e.Game("wt002-b", "partner")
@@ -298,13 +307,13 @@ def run(after=None):
         note("INFO", "pickup: not scripted (needs player 2 walked onto an item); left for the hands-on test")
         a.shot("l2z_host_end.png")
         b.shot("l2z_partner_end.png")
-        if after:
+        if chain:  # (not "after": the potion step's local `after` shadowed it, 15:31Z)
             fails = [r for r in e2e.results[n_results:] if r.startswith("FAIL")]
             if fails:
                 note("INFO", f"=== L3 not chained: L2 had {len(fails)} FAIL(s)")
             else:
                 note("INFO", "=== L2 clean: L3 follows in the same session")
-                after(a, b)
+                chain(a, b)
     finally:
         for g in (a, b):
             g.stop()
