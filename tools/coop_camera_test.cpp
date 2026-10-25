@@ -51,6 +51,68 @@ int main() {
   CHECK(near(y20, y60, 1e-3f));
   CHECK(near(AngleDiff(3.0f, -3.0f), 0.2831853f, 1e-4f));  // the short way round
 
+  // Camera proof 2026-10-25: noisy per-frame steps (network) while walking at
+  // ~3 m/s along +x. The heading stays close to +x; tiny jitter alone (standing)
+  // stays under the chase speed.
+  {
+    Heading h;
+    unsigned seed = 1;
+    auto rnd = [&]() { seed = seed * 1103515245u + 12345u; return ((seed >> 8) % 1000) / 1000.0f - 0.5f; };
+    for (int i = 0; i < 120; ++i) {  // 3 s at 40 fps: steps of 0 or 0.3 m (packets) plus noise
+      const float dx = (i % 4 == 0 ? 0.3f : 0.0f) + rnd() * 0.02f;
+      const float dy = rnd() * 0.02f;
+      h.Update(dx, dy, 1.0f / 40);
+    }
+    CHECK(h.Speed() > 2.0f && h.Speed() < 4.0f);
+    CHECK(std::fabs(std::atan2(h.vy, h.vx)) < 0.15f);  // direction within ~8 deg of +x
+    Heading still;
+    for (int i = 0; i < 120; ++i) still.Update(rnd() * 0.01f, rnd() * 0.01f, 1.0f / 40);
+    CHECK(still.Speed() < kChaseMinSpeed);  // standing: no chase
+  }
+  // The swing-rate cap: a half-turn target moves the camera at most 2 rad/s.
+  {
+    const float dt = 1.0f / 40;
+    const float y1 = ChaseYawLimited(0.0f, 3.0f, dt);
+    CHECK(y1 > 0 && y1 <= kMaxSwingRate * dt + 1e-6f);
+    // At 5.5 m radius the capped swing is <= 0.28 m a frame at 40 fps.
+    CHECK(5.5f * kMaxSwingRate * dt < 0.3f);
+  }
+
+  // The tracker against the proof's input: reports in 0.3 m steps every 4th
+  // frame at 40 fps (3 m/s), then one 2.5 m step. The estimate moves smoothly:
+  // no frame moves more than the walk would (~0.075 m) plus a bounded
+  // correction, and the big step is spread over several frames.
+  {
+    Tracker t;
+    const float dt = 1.0f / 40;
+    float rep = 0;
+    t.Step(0, 0, 0, dt);
+    float worst = 0, prev = 0;
+    for (int i = 1; i <= 200; ++i) {
+      if (i % 4 == 0) rep += 0.3f;
+      t.Step(rep, 0, 0, dt);
+      if (i > 80) worst = std::fmax(worst, std::fabs(t.ex - prev));  // after it settled
+      prev = t.ex;
+    }
+    CHECK(worst < 0.15f);                 // smooth: no 0.3 m jumps per report
+    CHECK(t.Speed() > 2.5f && t.Speed() < 3.5f);
+    CHECK(std::fabs(t.ex - rep) < 1.0f);  // keeps up with the walk
+    rep += 2.5f;                          // one big network step
+    float big = 0;
+    prev = t.ex;
+    for (int i = 0; i < 20; ++i) {
+      t.Step(rep, 0, 0, dt);
+      big = std::fmax(big, std::fabs(t.ex - prev));
+      prev = t.ex;
+    }
+    CHECK(big <= kMaxCorrection * dt + 1e-4f);  // at most 0.25 m a frame
+    CHECK(std::fabs(t.ex - rep) < 0.9f);         // caught up within half a second
+    Tracker standing;
+    standing.Step(0, 0, 0, dt);
+    for (int i = 0; i < 80; ++i) standing.Step(0, 0, 0, dt);
+    CHECK(standing.Speed() == 0 && standing.ex == 0);  // nothing moves: nothing drifts
+  }
+
   std::printf("%s (%d failed)\n", g_fail ? "FAILED" : "ALL PASSED", g_fail);
   return g_fail ? 1 : 0;
 }

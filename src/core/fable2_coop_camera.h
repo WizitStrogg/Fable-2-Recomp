@@ -207,7 +207,7 @@ constexpr float kDistance = 5.5f, kHeight = 2.3f, kLookHeight = 1.5f, kTurnRate 
 constexpr float kOrbitSpeed = 4.0f;          // radians per second at full look input
 constexpr float kDefaultFov = 1.309f;        // the game's normal field of view
 inline int64_t g_last_tick_ms = 0;
-inline Follow g_follow;                 // smoothed creature position (camera_math)
+inline Tracker g_follow;                // the creature, extrapolated between network steps (camera_math)
 inline int64_t g_handback_ms = 0;       // when the view went to the host's special camera
 inline int64_t g_trace_until_ms = 0;
 
@@ -253,7 +253,7 @@ inline void follow_tick(bool enabled) {
   if (!g_have_yaw) {
     g_yaw = std::atan2(-g_host_fwd.y, -g_host_fwd.x);  // start where the host camera is
     g_last_creature = creature;
-    g_follow = Follow{};
+    g_follow = Tracker{};
     g_have_yaw = true;
   }
   const int64_t now = clock_ms();
@@ -276,7 +276,7 @@ inline void follow_tick(bool enabled) {
     REXSYS_INFO("[coopcam] own camera again after {} ms of the host's camera (FOV {:.3f})", now - g_handback_ms,
                 host_fov);
     g_handback_ms = 0;
-    g_follow = Follow{};  // the creature may have moved a lot: start from it
+    g_follow = Tracker{};  // the creature may have moved a lot: start from it
   }
   const float dt = g_last_tick_ms ? std::fmin(0.1f, (now - g_last_tick_ms) / 1000.0f) : 0.0f;
   g_last_tick_ms = now;
@@ -284,17 +284,21 @@ inline void follow_tick(bool enabled) {
   g_yaw -= g_look_x.load() * kOrbitSpeed * dt;
   // The creature's position arrives in network steps: follow it damped, by
   // elapsed time, so the steps do not shake the camera.
-  const float moved2 = g_follow.Step(creature.x, creature.y, creature.z, dt);
-  const Vec3 target{g_follow.x, g_follow.y, g_follow.z};
+  g_follow.Step(creature.x, creature.y, creature.z, dt);
+  const Vec3 target{g_follow.ex, g_follow.ey, g_follow.ez};
   const Vec3 moved = target - g_last_creature;
   g_last_creature = target;
   // Chase: ease the camera behind the direction the creature is walking,
   // unless the player turned the camera in the last 1.5 s; per second, not per
   // frame (the same feel at 20 and 60 fps).
+  // The walk direction comes from a low-passed velocity, and the chase turns
+  // the camera at most kMaxSwingRate (camera proof: the per-frame direction was
+  // noise and swung the camera up to 1 m a frame).
   if (REXCVAR_GET(coop_cam_chase) && now - g_look_ms.load() > 1500 && dt > 0 &&
-      moved2 > 0.25f * dt * dt) {  // walking faster than 0.5 m/s
-    g_yaw = ChaseYaw(g_yaw, std::atan2(-moved.y, -moved.x), dt);
+      g_follow.Speed() > kChaseMinSpeed) {
+    g_yaw = ChaseYawLimited(g_yaw, std::atan2(-g_follow.vy, -g_follow.vx), dt);
   }
+  (void)moved;
   const Vec3 pos = target + Vec3{std::cos(g_yaw) * kDistance, std::sin(g_yaw) * kDistance, kHeight};
   const Vec3 fwd = normalized(target + Vec3{0, 0, kLookHeight} - pos);
   // Testing (coop_cam_trace): one line per frame for 30 s.
