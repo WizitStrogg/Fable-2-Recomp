@@ -1416,7 +1416,9 @@ def run_luaq():
         a.shot("luaq_after_pause_host.png")
         b.shot("luaq_after_pause_partner.png")
         for tag in ("LUAQ gain1", "LUAQ gain2", "LUAQ spend2"):
-            n = a.count(re.escape(tag))
+            # The Lua print itself ("[lua] <text>"); the log also has the test-input
+            # echo of the command and a "(service trap)" debug copy of the print.
+            n = a.count(r"\[lua\] " + re.escape(tag))
             note("PASS" if n == 1 else "FAIL", f"luaq: '{tag}' ran {n} time(s) (expected exactly 1)")
         for g in (a, b):
             refused = g.count(r"not queued")
