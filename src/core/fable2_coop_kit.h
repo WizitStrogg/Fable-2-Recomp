@@ -333,10 +333,14 @@ struct HostSide {
   int64_t first_try_ms = 0, next_try_ms = 0;
   bool lua_queued = false;
   int64_t lua_queued_ms = 0;
-  // kit_state.rev only increases on the partner, so it starts at the wall
-  // clock: a host that restarts while the partner's game keeps running starts
-  // above its old revs (from 1, the partner ignored every new state).
-  uint32_t rev = static_cast<uint32_t>(
+  // kit_state.rev only increases on the partner, so the published rev is
+  // rev_base (the wall clock at start) + rev: a host that restarts while the
+  // partner's game keeps running publishes above its old revs. rev itself
+  // stays small because it goes through the game's Lua, whose numbers are
+  // floats (a rev of 1.79e9 came back rounded to steps of 128, and the
+  // partner ignored every state in between: 95133ef's proof).
+  uint32_t rev = 0;
+  uint32_t rev_base = static_cast<uint32_t>(
       std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch())
           .count());
   int64_t next_snapshot_ms = 0;
@@ -569,9 +573,9 @@ inline void OnStateLine(std::string_view line) {
   h.snapshot_queued = false;
   auto k = ParseKitState(line);
   if (!k || k->rev == 0) return;  // rev 0 = a console `luafile coop_kit`, not the channel's
-  const std::string melee_raw = k->melee, ranged_raw = k->ranged;
+  k->rev += h.rev_base;
   h.weapon_recs.Translate(*k);
-  const std::string value = (k->melee == melee_raw && k->ranged == ranged_raw) ? std::string(line) : Format(*k);
+  const std::string value = Format(*k);
   if (value != h.last_state) {
     h.last_state = value;
     lobby::PublishData("kit_state", value);
