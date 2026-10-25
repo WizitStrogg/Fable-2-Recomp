@@ -1373,6 +1373,25 @@ def run_camera():
         relay.kill()
 
 
+def unpause(a, b, tag):
+    """Closes the partner's pause menu: Start, then B if the games stay paused
+    (boots, 2026-10-25: with 002's full wheel the second Start left both paused).
+    Resumed = the host's queued Lua runs again or coopkit logs the resume."""
+    resumed = r"\[coopkit\] host: game resumed|\[lua\] ran scripts"
+    for inp in ("Start", "B"):
+        n = a.count(resumed)
+        b.press(inp)
+        time.sleep(3)
+        if a.count(resumed) > n:
+            note("PASS" if inp == "Start" else "INFO", f"{tag}: the partner's {inp} closed the pause")
+            return inp
+        note("INFO", f"{tag}: still paused 3 s after the partner's {inp}")
+    b.shot(f"{tag}_unpause_failed_partner.png")
+    a.shot(f"{tag}_unpause_failed_host.png")
+    note("FAIL", f"{tag}: neither Start nor B closed the partner's pause")
+    return None
+
+
 def run_luaq(host_probe=None):
     """The Lua console slot fix (b422910 + 9cace5a): the join (start flow), a
     normal purse step, then the partner pauses for ~20 s while the host gains and
@@ -1409,6 +1428,7 @@ def run_luaq(host_probe=None):
         # A normal step.
         a.send("lua Money.Modify(GetPlayerHero(), 150) print('LUAQ gain1')")
         check_purse(a, b, "luaq_purse1_gain_150", start + 150)
+        time.sleep(3)  # the gold screens have closed (boots, 2026-10-25)
         # The pause variant: the partner's pause menu (it pauses both games) for
         # ~20 s while the host gains 150 and spends 100; then it closes.
         b.press("Start")
@@ -1419,7 +1439,7 @@ def run_luaq(host_probe=None):
         time.sleep(8)
         a.send("lua Money.Modify(GetPlayerHero(), -100) print('LUAQ spend2')")
         time.sleep(10)
-        b.press("Start")
+        unpause(a, b, "luaq")
         expect = start + 150 + 150 - 100
         time.sleep(10)  # queued and kept chunks run after the pause; the sync and mirror follow
         v = read_purses(a, b, "luaq_after_pause")
@@ -1456,10 +1476,12 @@ def dcall_report(g, tag):
         return
     busy = [r for r in rows if r[1] > 10000]
     note("INFO", f"{tag}: {g.who}: per minute (calls, VM thread, outermost, reads): {rows}")
-    worst = max((r[3] for r in busy), default=0)
-    note("PASS" if busy and worst < 1000 else "FAIL",
-         f"{tag}: {g.who}: nCcalls reads at most {worst}/min over {len(busy)} busy minute(s) "
-         f"(before c405db4: one per VM-thread call, 162k-755k/min)")
+    # 002 queues a COOPKIT chunk every ~0.5 s, so some reads remain: PASS at
+    # <= 1% of the VM-thread calls in every busy minute.
+    worst = max((r[3] / r[1] for r in busy), default=0.0)
+    note("PASS" if busy and worst <= 0.01 else "FAIL",
+         f"{tag}: {g.who}: nCcalls reads at most {worst:.2%} of VM-thread luaD_calls over {len(busy)} "
+         f"busy minute(s) (before c405db4: one per VM-thread call, 162k-755k/min)")
 
 
 def run_boots():
