@@ -23,6 +23,9 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import coop_ship_e2e as e2e  # noqa: E402
+import coop_kit_input  # noqa: E402
+
+coop_kit_input.install()  # before coop_kit_l1 binds e2e.key / e2e.focus
 import coop_kit_l1 as l1  # noqa: E402
 
 e2e.OUT = os.path.join(e2e.ROOT, r"research\002-evidence\l2")
