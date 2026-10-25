@@ -152,12 +152,14 @@ class Game:
         self.hwnd = None
         self.log = None
 
-    def start(self):
+    def start(self, env_extra=None):
         exe = os.path.join(self.dir, "fable_2.exe").lower()
         if any((p.info["exe"] or "").lower() == exe for p in psutil.process_iter(["exe"])):
             raise SystemExit(f"{exe} already runs")
         t0 = time.time()
-        subprocess.Popen(["cmd", "/c", os.path.join(self.dir, "play-coop.cmd")], cwd=self.dir,
+        env = dict(os.environ)
+        env.update(env_extra or {})
+        subprocess.Popen(["cmd", "/c", os.path.join(self.dir, "play-coop.cmd")], cwd=self.dir, env=env,
                          creationflags=subprocess.CREATE_NEW_CONSOLE)
         while time.time() - t0 < 30 and not self.proc:
             for p in psutil.process_iter(["exe", "cmdline"]):
@@ -347,7 +349,8 @@ def setup_tomls():
 
     def make(folder, me, peers, tag, drop):
         over = {"network_interface": f"'{me}'", "lan_peers": f"'{peers}'", "network_isolate": "true",
-                "fullscreen": "false", "window_width": "1270", "window_height": "714", "resolution_scale": "1"}
+                "fullscreen": "false", "window_width": "1270", "window_height": "714",
+                "resolution_scale": "2" if (tag and "--scale2" in sys.argv) else "1"}
         if tag:
             over["profile_gamertag"] = f"'{tag}'"
         out, seen = [], set()
@@ -1073,10 +1076,64 @@ def run_purse():
         relay.kill()
 
 
+def run_fps():
+    """The FPS SDK (rexglue-sdk 033523e) with co-op: join, the shared purse,
+    then ~2 min in the world with the host's FPS meter on (fps_meter.log)."""
+    setup_tomls()
+    relay_log = open(os.path.join(OUT, "relay_fps.log"), "w")
+    relay = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                           "coop_relay.py")], stdout=relay_log, stderr=relay_log)
+    a, b = Game("mod-a", "host"), Game("mod-b", "partner")
+    a.start({"FABLE2_FPS_METER": "1"})
+    b.start()
+    try:
+        for g in (a, b):
+            g.n_menu = g.count(r"main menu: Co-op entry added")
+            g.past_title()
+        menu_then_coop(a, "fps", a.n_menu)
+        host_new_campaign(a, "fps")
+        menu_then_coop(b, "fps", b.n_menu)
+        wait_row(b, "Join TestA", "fps: the host's lobby is listed")
+        partner_joins(b, "Join TestA", "fps")
+        wait_row(a, "Start", "fps: host lobby shows the partner")
+        if not both_ready_and_start(a, b, "fps") or not join_phase(a, b, "fps"):
+            return
+        time.sleep(8)
+        v = read_purses(a, b, "fps_purse0")
+        if v:
+            console(a, "lua Money.Modify(GetPlayerHero(), 150)")
+            check_purse(a, b, "fps_purse1_host_gains_150", v[0] + 150)
+        t0 = time.time()
+        k = 0
+        while time.time() - t0 < 120:
+            for g in (a, b):
+                g.shot(f"fps_world_{k:02d}_{g.who}.png")
+            k += 1
+            time.sleep(20)
+        for g, who in ((a, "host"), (b, "partner")):
+            alive = g.proc.is_running()
+            note("PASS" if alive else "FAIL", f"fps: {who} still running after 2 min in the world")
+        meter = os.path.join(a.dir, "fps_meter.log")
+        rates = []
+        if os.path.exists(meter):
+            for l in open(meter, encoding="utf-8", errors="replace"):
+                m = re.search(r"rate=([0-9.]+)", l)
+                if m:
+                    rates.append(float(m.group(1)))
+        tail = rates[-24:]
+        note("INFO", f"fps: host main-loop rate, last {len(tail)} x 5 s windows: "
+                     f"min {min(tail) if tail else 0:.1f}, avg {sum(tail) / len(tail) if tail else 0:.1f}, "
+                     f"max {max(tail) if tail else 0:.1f} ({meter})")
+    finally:
+        for g in (a, b):
+            g.stop()
+        relay.kill()
+
+
 def main():
     os.makedirs(OUT, exist_ok=True)
     mode = sys.argv[1] if len(sys.argv) > 1 else "coop"
-    {"coop": run_coop, "solo": run_solo, "multi": run_multi, "menu": run_menu, "menu2": run_menu2, "err": run_err, "final": run_final, "last": run_last, "start": run_start, "purse": run_purse}[mode]()
+    {"coop": run_coop, "solo": run_solo, "multi": run_multi, "menu": run_menu, "menu2": run_menu2, "err": run_err, "final": run_final, "last": run_last, "start": run_start, "purse": run_purse, "fps": run_fps}[mode]()
     with open(os.path.join(OUT, f"results_{mode}.txt"), "w", encoding="utf-8") as f:
         f.write("\n".join(results) + "\n")
     return 0 if not any(r.startswith("FAIL") for r in results) else 1
