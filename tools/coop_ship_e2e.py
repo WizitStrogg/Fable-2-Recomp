@@ -20,6 +20,7 @@ Evidence: research/001-evidence/menus/ship-e2e/.
 import ctypes
 import ctypes.wintypes as wt
 import glob
+import math
 import os
 import re
 import subprocess
@@ -79,7 +80,9 @@ def _send(inp):
     user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
 
 
-def key(name, hold_ms=150):
+def key(name, hold_ms=60):
+    # 60 ms: at 60 fps (the FPS SDK) a 150 ms hold crossed the menu's own
+    # repeat and moved two rows per press (fps run, 2026-10-25).
     sc, ext = SCAN[name]
     flags = 0x0008 | (0x0001 if ext else 0)  # KEYEVENTF_SCANCODE (| EXTENDEDKEY)
     for up in (False, True):
@@ -146,18 +149,24 @@ def focus(hwnd):
 # --- one game copy --------------------------------------------------------------
 class Game:
     def __init__(self, folder, who):
+        self.test_input = False
         self.dir = os.path.join(ROOT, folder)
         self.who = who
         self.proc = None
         self.hwnd = None
         self.log = None
 
-    def start(self):
+    def start(self, env_extra=None):
+        self.test_input = bool(env_extra and env_extra.get("FABLE2_TEST_INPUT"))
+        if self.test_input:
+            open(os.path.join(self.dir, "test_input.txt"), "w").close()
         exe = os.path.join(self.dir, "fable_2.exe").lower()
         if any((p.info["exe"] or "").lower() == exe for p in psutil.process_iter(["exe"])):
             raise SystemExit(f"{exe} already runs")
         t0 = time.time()
-        subprocess.Popen(["cmd", "/c", os.path.join(self.dir, "play-coop.cmd")], cwd=self.dir,
+        env = dict(os.environ)
+        env.update(env_extra or {})
+        subprocess.Popen(["cmd", "/c", os.path.join(self.dir, "play-coop.cmd")], cwd=self.dir, env=env,
                          creationflags=subprocess.CREATE_NEW_CONSOLE)
         while time.time() - t0 < 30 and not self.proc:
             for p in psutil.process_iter(["exe", "cmdline"]):
@@ -192,7 +201,24 @@ class Game:
         note("FAIL", f"{self.who}: {what} (no '{pat}' in {timeout} s)")
         return False
 
+    def send(self, line, timeout=10):
+        """One test-input command; waits until the game has read it."""
+        path = os.path.join(self.dir, "test_input.txt")
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+        t = time.time()
+        while time.time() - t < timeout:
+            if os.path.getsize(path) == 0:
+                return True
+            time.sleep(0.05)
+        note("FAIL", f"{self.who}: test input not read: {line}")
+        return False
+
     def press(self, name):
+        if self.test_input:
+            self.send(f"press {dict(E='A').get(name, name)} 120")  # E is A on Josh's keyboard map
+            time.sleep(0.45)
+            return
         focus(self.hwnd)
         if name == "X":
             click(self.hwnd)
@@ -201,7 +227,10 @@ class Game:
         time.sleep(0.3)
 
     def shot(self, name):
-        focus(self.hwnd)
+        try:
+            focus(self.hwnd)
+        except FocusLost:
+            pass
         time.sleep(0.3)
         p = os.path.join(OUT, name)
         try:
@@ -347,7 +376,8 @@ def setup_tomls():
 
     def make(folder, me, peers, tag, drop):
         over = {"network_interface": f"'{me}'", "lan_peers": f"'{peers}'", "network_isolate": "true",
-                "fullscreen": "false", "window_width": "1270", "window_height": "714", "resolution_scale": "1"}
+                "fullscreen": "false", "window_width": "1270", "window_height": "714",
+                "resolution_scale": "2" if (tag and "--scale2" in sys.argv) else "1"}
         if tag:
             over["profile_gamertag"] = f"'{tag}'"
         out, seen = [], set()
@@ -989,6 +1019,10 @@ def run_start():
 
 def console(g, command):
     """Runs one console command in g's window (backtick console, Enter, close)."""
+    if g.test_input and command.startswith("lua "):
+        g.send(command)
+        time.sleep(0.5)
+        return
     focus(g.hwnd)
     key("Grave")
     time.sleep(0.6)
@@ -1024,11 +1058,10 @@ def check_purse(a, b, tag, expect):
     b.shot(f"{tag}_partner.png")
     # What Josh judges by: the gold the game shows (the pause menu).
     for g in (a, b):
-        focus(g.hwnd)
-        key("Escape")
+        g.press("Start") if g.test_input else (focus(g.hwnd), key("Escape"))
         time.sleep(1.5)
         g.shot(f"{tag}_{g.who}_gold_screen.png")
-        key("Escape")
+        g.press("Start") if g.test_input else key("Escape")
         time.sleep(1.0)
     return ok
 
@@ -1073,10 +1106,502 @@ def run_purse():
         relay.kill()
 
 
+def run_fps():
+    """The FPS SDK (rexglue-sdk 033523e) with co-op: join, the shared purse,
+    then ~2 min in the world with the host's FPS meter on (fps_meter.log)."""
+    setup_tomls()
+    relay_log = open(os.path.join(OUT, "relay_fps.log"), "w")
+    relay = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                           "coop_relay.py")], stdout=relay_log, stderr=relay_log)
+    a, b = Game("mod-a", "host"), Game("mod-b", "partner")
+    a.start({"FABLE2_FPS_METER": "1"})
+    b.start()
+    try:
+        for g in (a, b):
+            g.n_menu = g.count(r"main menu: Co-op entry added")
+            g.past_title()
+        menu_then_coop(a, "fps", a.n_menu)
+        host_new_campaign(a, "fps")
+        menu_then_coop(b, "fps", b.n_menu)
+        wait_row(b, "Join TestA", "fps: the host's lobby is listed")
+        partner_joins(b, "Join TestA", "fps")
+        wait_row(a, "Start", "fps: host lobby shows the partner")
+        if not both_ready_and_start(a, b, "fps") or not join_phase(a, b, "fps"):
+            return
+        time.sleep(8)
+        v = read_purses(a, b, "fps_purse0")
+        if v:
+            console(a, "lua Money.Modify(GetPlayerHero(), 150)")
+            check_purse(a, b, "fps_purse1_host_gains_150", v[0] + 150)
+        t0 = time.time()
+        k = 0
+        while time.time() - t0 < 120:
+            for g in (a, b):
+                g.shot(f"fps_world_{k:02d}_{g.who}.png")
+            k += 1
+            time.sleep(20)
+        for g, who in ((a, "host"), (b, "partner")):
+            alive = g.proc.is_running()
+            note("PASS" if alive else "FAIL", f"fps: {who} still running after 2 min in the world")
+        meter = os.path.join(a.dir, "fps_meter.log")
+        rates = []
+        if os.path.exists(meter):
+            for l in open(meter, encoding="utf-8", errors="replace"):
+                m = re.search(r"rate=([0-9.]+)", l)
+                if m:
+                    rates.append(float(m.group(1)))
+        tail = rates[-24:]
+        note("INFO", f"fps: host main-loop rate, last {len(tail)} x 5 s windows: "
+                     f"min {min(tail) if tail else 0:.1f}, avg {sum(tail) / len(tail) if tail else 0:.1f}, "
+                     f"max {max(tail) if tail else 0:.1f} ({meter})")
+    finally:
+        for g in (a, b):
+            g.stop()
+        relay.kill()
+
+
+def run_combo():
+    """Combined proof (camera build): join, the shared purse, ~2 min in the world
+    with the host's FPS meter, and the partner's camera trace (hand-backs,
+    per-frame camera jump). Input through the game's test input source."""
+    setup_tomls()
+    relay_log = open(os.path.join(OUT, "relay_combo.log"), "w")
+    relay = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                           "coop_relay.py")], stdout=relay_log, stderr=relay_log)
+    a, b = Game("mod-a", "host"), Game("mod-b", "partner")
+    a.start({"FABLE2_FPS_METER": "1", "FABLE2_TEST_INPUT": "1"})
+    b.start({"FABLE2_TEST_INPUT": "1"})
+    try:
+        for g in (a, b):
+            g.n_menu = g.count(r"main menu: Co-op entry added")
+            g.past_title()
+        menu_then_coop(a, "combo", a.n_menu)
+        host_new_campaign(a, "combo")
+        menu_then_coop(b, "combo", b.n_menu)
+        wait_row(b, "Join TestA", "combo: the host's lobby is listed")
+        partner_joins(b, "Join TestA", "combo")
+        wait_row(a, "Start", "combo: host lobby shows the partner")
+        if not both_ready_and_start(a, b, "combo") or not join_phase(a, b, "combo"):
+            return
+        time.sleep(8)
+        v = read_purses(a, b, "combo_purse0")
+        if v:
+            console(a, "lua Money.Modify(GetPlayerHero(), 150)")
+            check_purse(a, b, "combo_purse1_host_gains_150", v[0] + 150)
+        # The partner's camera, traced for 30 s while the host acts (draws a
+        # weapon / attacks / blocks: the host's camera FOV moves).
+        n_trace = b.count(r"\[coopcam\] trace")
+        n_hand = b.count(r"showing the host's camera")
+        b.send("cvar coop_cam_trace true")
+        t0 = time.time()
+        k = 0
+        while time.time() - t0 < 32:
+            for btn in ("X", "Y", "B"):
+                a.press(btn)
+                time.sleep(1.5)
+            for g in (a, b):
+                g.shot(f"combo_cam_{k:02d}_{g.who}.png")
+            k += 1
+        lines = [l for l in b.lines() if "[coopcam] trace" in l][n_trace:]
+        cams = []
+        for l in lines:
+            m = re.search(r"cam (-?[0-9.]+) (-?[0-9.]+) (-?[0-9.]+)", l)
+            if m:
+                cams.append(tuple(float(x) for x in m.groups()))
+        jumps = [((c[0] - p[0]) ** 2 + (c[1] - p[1]) ** 2 + (c[2] - p[2]) ** 2) ** 0.5
+                 for p, c in zip(cams, cams[1:])]
+        hand = b.count(r"showing the host's camera") - n_hand
+        note("PASS" if lines else "FAIL", f"combo: camera trace lines {len(lines)}")
+        note("PASS" if hand == 0 else "FAIL", f"combo: hand-backs to the host's camera in 30 s: {hand}")
+        if jumps:
+            jumps_sorted = sorted(jumps)
+            note("INFO", f"combo: partner camera per-frame move: max {jumps_sorted[-1]:.3f} m, "
+                         f"p99 {jumps_sorted[int(len(jumps_sorted) * 0.99) - 1]:.3f} m, "
+                         f"median {jumps_sorted[len(jumps_sorted) // 2]:.3f} m over {len(jumps)} frames")
+        # ~2 min in the world for the FPS meter.
+        t0 = time.time()
+        while time.time() - t0 < 90:
+            for g in (a, b):
+                g.shot(f"combo_world_{k:02d}_{g.who}.png")
+            k += 1
+            time.sleep(20)
+        for g, who in ((a, "host"), (b, "partner")):
+            note("PASS" if g.proc.is_running() else "FAIL", f"combo: {who} still running (no crash)")
+        meter = os.path.join(a.dir, "fps_meter.log")
+        rates = []
+        if os.path.exists(meter):
+            for l in open(meter, encoding="utf-8", errors="replace"):
+                m = re.search(r"rate=([0-9.]+)", l)
+                if m:
+                    rates.append(float(m.group(1)))
+        tail = [r for r in rates[-30:] if r < 1000]
+        note("INFO", f"combo: host main-loop rate in the world, last {len(tail)} x 5 s: "
+                     f"min {min(tail) if tail else 0:.1f}, avg {sum(tail) / len(tail) if tail else 0:.1f}, "
+                     f"max {max(tail) if tail else 0:.1f}")
+    finally:
+        for g in (a, b):
+            g.stop()
+        relay.kill()
+
+
+def pct(values, q):
+    v = sorted(values)
+    return v[min(len(v) - 1, int(len(v) * q))] if v else 0.0
+
+
+def run_camera():
+    """The joiner camera under motion (camera-glitch-notes.md): the partner walks
+    circles, the host sprints, aims and zooms, the partner's camera is traced for
+    60 s. Reports hand-backs, the host FOVs seen, and the per-frame camera move
+    against the partner's own movement."""
+    import threading
+    setup_tomls()
+    relay_log = open(os.path.join(OUT, "relay_camera.log"), "w")
+    relay = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                           "coop_relay.py")], stdout=relay_log, stderr=relay_log)
+    a, b = Game("mod-a", "host"), Game("mod-b", "partner")
+    a.start({"FABLE2_TEST_INPUT": "1"})
+    b.start({"FABLE2_TEST_INPUT": "1"})
+    try:
+        for g in (a, b):
+            g.n_menu = g.count(r"main menu: Co-op entry added")
+            g.past_title()
+        menu_then_coop(a, "cam", a.n_menu)
+        host_new_campaign(a, "cam")
+        menu_then_coop(b, "cam", b.n_menu)
+        wait_row(b, "Join TestA", "cam: the host's lobby is listed")
+        partner_joins(b, "Join TestA", "cam")
+        wait_row(a, "Start", "cam: host lobby shows the partner")
+        if not both_ready_and_start(a, b, "cam") or not join_phase(a, b, "cam"):
+            return
+        time.sleep(8)
+        n_trace = b.count(r"\[coopcam\] trace")
+        n_hand = b.count(r"showing the host's camera")
+        stop = time.time() + 60
+
+        def partner_walks():
+            k = 0
+            while time.time() < stop:
+                ang = k * 0.785398  # 8 directions: a circle every 6 s
+                b.send(f"stick L {math.cos(ang):.3f} {math.sin(ang):.3f} 800")
+                time.sleep(0.75)
+                k += 1
+
+        def host_acts():
+            while time.time() < stop:
+                a.send("stick L 0 1 3000")      # walk forward ...
+                a.send("press A 2500")           # ... holding A (sprint)
+                time.sleep(3.2)
+                a.send("trigger L 1 2500")       # LT
+                time.sleep(2.7)
+                a.send("press Y 2500")           # Y held (ranged aim)
+                a.send("stick R 0 1 1500")       # look while aiming
+                time.sleep(2.7)
+                a.send("trigger R 1 2000")       # RT
+                time.sleep(2.2)
+
+        b.send("cvar coop_cam_trace true")
+        threads = [threading.Thread(target=partner_walks), threading.Thread(target=host_acts)]
+        for t in threads:
+            t.start()
+        time.sleep(31)
+        b.send("cvar coop_cam_trace true")  # the trace stops itself after 30 s: a second 30 s
+        for t in threads:
+            t.join()
+        time.sleep(2)
+        b.shot("cam_partner_after.png")
+        a.shot("cam_host_after.png")
+        lines = [l for l in b.lines() if "[coopcam] trace" in l][n_trace:]
+        rx = re.compile(r"dt ([0-9.]+) ms creature (\S+) (\S+) (\S+) target \S+ \S+ \S+ cam (\S+) (\S+) (\S+) "
+                        r"host \S+ \S+ \S+ fov ([0-9.]+)")
+        rows = []
+        for l in lines:
+            m = rx.search(l)
+            if not m:
+                continue
+            tm = re.search(r"(\d\d):(\d\d):(\d\d)\.(\d{3})\]", l)
+            t = int(tm.group(1)) * 3600 + int(tm.group(2)) * 60 + int(tm.group(3)) + int(tm.group(4)) / 1000
+            if rows and t - rows[-1][0] > 0.5:  # the gap between the two 30 s trace windows: not a frame
+                rows.append(None)
+            rows.append((t,) + tuple(float(x) for x in m.groups()))
+        # Drop the time column for the analysis below; None marks a window gap.
+        rows = [r[1:] if r else None for r in rows]
+        cam_moves, cre_moves, jerks, fovs = [], [], [], set()
+        prev = None
+        prev_move = None
+        for r in rows:
+            if r is None:  # window gap
+                prev, prev_move = None, None
+                continue
+            fovs.add(round(r[7], 2))
+            if prev:
+                cm = math.dist(r[4:7], prev[4:7])
+                cr = math.dist(r[1:4], prev[1:4])
+                cam_moves.append(cm)
+                cre_moves.append(cr)
+                if prev_move is not None:
+                    jerks.append(abs(cm - prev_move))
+                prev_move = cm
+            prev = r
+        hand = b.count(r"showing the host's camera") - n_hand
+        note("PASS" if len(rows) > 600 else "FAIL", f"cam: trace frames {sum(1 for r in rows if r)}")
+        note("PASS" if hand == 0 else "FAIL", f"cam: hand-backs to the host's camera in 60 s: {hand}")
+        note("INFO", f"cam: host FOVs seen by the partner: {sorted(fovs)}")
+        note("INFO", f"cam: partner creature per-frame move p50 {pct(cre_moves, .5):.3f} p99 {pct(cre_moves, .99):.3f} "
+                     f"max {max(cre_moves or [0]):.3f} m")
+        note("INFO", f"cam: partner camera per-frame move p50 {pct(cam_moves, .5):.3f} p99 {pct(cam_moves, .99):.3f} "
+                     f"max {max(cam_moves or [0]):.3f} m; frame-to-frame change p99 {pct(jerks, .99):.3f} "
+                     f"max {max(jerks or [0]):.3f} m")
+        moving = sum(1 for m in cre_moves if m > 0.001)
+        note("PASS" if moving > 100 else "FAIL", f"cam: the partner walked ({moving} frames with movement)")
+    finally:
+        for g in (a, b):
+            g.stop()
+        relay.kill()
+
+
+def run_luaq():
+    """The Lua console slot fix (b422910 + 9cace5a): the join (start flow), a
+    normal purse step, then the partner pauses for ~20 s while the host gains and
+    spends gold. Pass: the same total on all purses after the pause, each change
+    run exactly once, no chunk lost."""
+    setup_tomls()
+    relay_log = open(os.path.join(OUT, "relay_luaq.log"), "w")
+    relay = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                           "coop_relay.py")], stdout=relay_log, stderr=relay_log)
+    a, b = Game("mod-a", "host"), Game("mod-b", "partner")
+    a.start({"FABLE2_TEST_INPUT": "1"})
+    b.start({"FABLE2_TEST_INPUT": "1"})
+    try:
+        for g in (a, b):
+            g.n_menu = g.count(r"main menu: Co-op entry added")
+            g.past_title()
+        menu_then_coop(a, "luaq", a.n_menu)
+        host_new_campaign(a, "luaq")
+        menu_then_coop(b, "luaq", b.n_menu)
+        wait_row(b, "Join TestA", "luaq: the host's lobby is listed")
+        partner_joins(b, "Join TestA", "luaq")
+        wait_row(a, "Start", "luaq: host lobby shows the partner")
+        nb = b.count(r"started the campaign, waiting")
+        if not both_ready_and_start(a, b, "luaq"):
+            return
+        b.wait("luaq: partner's joining card at the host's Start", r"started the campaign, waiting", nb, 5)
+        if not join_phase(a, b, "luaq"):
+            return
+        time.sleep(8)
+        v = read_purses(a, b, "luaq_purse0")
+        if not v:
+            return
+        start = v[0]
+        # A normal step.
+        a.send("lua Money.Modify(GetPlayerHero(), 150) print('LUAQ gain1')")
+        check_purse(a, b, "luaq_purse1_gain_150", start + 150)
+        # The pause variant: the partner's pause menu (it pauses both games) for
+        # ~20 s while the host gains 150 and spends 100; then it closes.
+        b.press("Start")
+        time.sleep(2)
+        b.shot("luaq_pause_partner.png")
+        a.shot("luaq_pause_host.png")
+        a.send("lua Money.Modify(GetPlayerHero(), 150) print('LUAQ gain2')")
+        time.sleep(8)
+        a.send("lua Money.Modify(GetPlayerHero(), -100) print('LUAQ spend2')")
+        time.sleep(10)
+        b.press("Start")
+        expect = start + 150 + 150 - 100
+        time.sleep(10)  # queued and kept chunks run after the pause; the sync and mirror follow
+        v = read_purses(a, b, "luaq_after_pause")
+        ok = v is not None and v[0] == v[1] == v[2] == expect
+        note("PASS" if ok else "FAIL", f"luaq: after the pause host {v[0] if v else '?'}, host's player 2 "
+                                         f"{v[1] if v else '?'}, partner's own {v[2] if v else '?'} (expected {expect})")
+        a.shot("luaq_after_pause_host.png")
+        b.shot("luaq_after_pause_partner.png")
+        for tag in ("LUAQ gain1", "LUAQ gain2", "LUAQ spend2"):
+            # The Lua print itself ("[lua] <text>"); the log also has the test-input
+            # echo of the command and a "(service trap)" debug copy of the print.
+            n = a.count(r"\[lua\] " + re.escape(tag))
+            note("PASS" if n == 1 else "FAIL", f"luaq: '{tag}' ran {n} time(s) (expected exactly 1)")
+        for g in (a, b):
+            refused = g.count(r"not queued")
+            kept = g.count(r"chunk kept until a console slot is free")
+            queued = g.count(r"kept chunk queued")
+            note("PASS" if kept == queued else "FAIL",
+                 f"luaq: {g.who}: {refused} refused, {kept} kept, {queued} of them queued later "
+                 f"({kept - queued} lost)")
+    finally:
+        for g in (a, b):
+            g.stop()
+        relay.kill()
+
+
+def run_luaq_kept():
+    """The kept / retry path (9cace5a): while the partner's pause holds, the host
+    queues 12 numbered markers and a gold change (13 one-shots, 8 console slots):
+    some are refused and kept, then all run once, in order, after the pause."""
+    setup_tomls()
+    relay_log = open(os.path.join(OUT, "relay_luaq_kept.log"), "w")
+    relay = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                           "coop_relay.py")], stdout=relay_log, stderr=relay_log)
+    a, b = Game("mod-a", "host"), Game("mod-b", "partner")
+    a.start({"FABLE2_TEST_INPUT": "1"})
+    b.start({"FABLE2_TEST_INPUT": "1"})
+    try:
+        for g in (a, b):
+            g.n_menu = g.count(r"main menu: Co-op entry added")
+            g.past_title()
+        menu_then_coop(a, "kept", a.n_menu)
+        host_new_campaign(a, "kept")
+        menu_then_coop(b, "kept", b.n_menu)
+        wait_row(b, "Join TestA", "kept: the host's lobby is listed")
+        partner_joins(b, "Join TestA", "kept")
+        wait_row(a, "Start", "kept: host lobby shows the partner")
+        if not both_ready_and_start(a, b, "kept") or not join_phase(a, b, "kept"):
+            return
+        time.sleep(8)
+        v = read_purses(a, b, "kept_purse0")
+        if not v:
+            return
+        start = v[0]
+        n_refused = a.count(r"not queued")
+        n_kept = a.count(r"chunk kept until a console slot is free")
+        n_kq = a.count(r"kept chunk queued")
+        b.press("Start")  # the partner's pause menu: both games pause, queued scripts wait
+        time.sleep(2)
+        b.shot("kept_pause_partner.png")
+        # 13 one-shots in one read: 8 take the console slots, the rest are kept.
+        lines = [f"lua print('LUAQ k{i}')" for i in range(1, 7)]
+        lines.append("lua Money.Modify(GetPlayerHero(), 150) print('LUAQ kgold')")
+        lines += [f"lua print('LUAQ k{i}')" for i in range(7, 13)]
+        with open(os.path.join(a.dir, "test_input.txt"), "a", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+        time.sleep(12)
+        a.shot("kept_pause_host.png")
+        b.press("Start")
+        expect = start + 150
+        time.sleep(15)
+        v = read_purses(a, b, "kept_after_pause")
+        ok = v is not None and v[0] == v[1] == v[2] == expect
+        note("PASS" if ok else "FAIL", f"kept: after the pause host {v[0] if v else '?'}, host's player 2 "
+                                         f"{v[1] if v else '?'}, partner's own {v[2] if v else '?'} (expected {expect})")
+        a.shot("kept_after_pause_host.png")
+        b.shot("kept_after_pause_partner.png")
+        refused = a.count(r"not queued") - n_refused
+        kept = a.count(r"chunk kept until a console slot is free") - n_kept
+        queued = a.count(r"kept chunk queued") - n_kq
+        note("PASS" if refused > 0 and kept > 0 else "FAIL",
+             f"kept: the full queue refused chunks ({refused} refusals) and {kept} were kept")
+        note("PASS" if kept == queued else "FAIL", f"kept: {queued} of {kept} kept chunks queued later ({kept - queued} lost)")
+        # Each marker exactly once, in order (the Lua print itself: "[lua] LUAQ kN").
+        order = [m.group(1) for l in a.lines() for m in [re.search(r"\[lua\] LUAQ (k\d+|kgold)$", l.rstrip())] if m]
+        want = [f"k{i}" for i in range(1, 7)] + ["kgold"] + [f"k{i}" for i in range(7, 13)]
+        once = all(order.count(w) == 1 for w in want)
+        note("PASS" if once else "FAIL", f"kept: every marker ran exactly once ({len(order)} runs for {len(want)} markers)")
+        note("PASS" if order == want else "FAIL", f"kept: in order: {' '.join(order)}")
+    finally:
+        for g in (a, b):
+            g.stop()
+        relay.kill()
+
+
+def inv_dump(a, tag):
+    """Player 2's inventory on the host (CoopHero.Capture: every item type and
+    its count, plus the total). Returns ({record: count}, total) or None."""
+    n = a.count(r"\[lua\] INVDUMP ")
+    a.send("lua local h = GetPlayerHenchman() if h and h:IsAlive() and CoopHero then "
+           "print('INVDUMP ' .. CoopHero.SerializeV2(CoopHero.Capture(h), 0)) else print('INVDUMP none') end")
+    if not a.wait(f"{tag}: player 2's inventory dumped", r"\[lua\] INVDUMP ", n, 20):
+        return None
+    line = [l for l in a.lines() if "[lua] INVDUMP " in l][-1]
+    m = re.search(r"\|items=([^|]*)", line)
+    if not m:
+        note("FAIL", f"{tag}: inventory dump without items ({line[-120:]})")
+        return None
+    items = {k: int(v) for k, v in (kv.split(":") for kv in m.group(1).split(",") if ":" in kv)}
+    t = re.search(r"\|itemtotal=(\d+)", line)
+    total = int(t.group(1)) if t else sum(items.values())
+    note("INFO", f"{tag}: player 2 holds {len(items)} item types, {total} items")
+    return items, total
+
+
+def run_continue2():
+    """Continuing a co-op save must not duplicate player 2's kit (feature 002's
+    finding: CoopHero.Apply added every worn item and weapon again on each
+    continue, 12 -> 20 items). Join, dump player 2's inventory; then twice: the
+    partner leaves (the host saves and returns to the title), the host continues
+    the co-op save through the hub, the partner rejoins, dump again."""
+    setup_tomls()
+    relay_log = open(os.path.join(OUT, "relay_continue2.log"), "w")
+    relay = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                           "coop_relay.py")], stdout=relay_log, stderr=relay_log)
+    a, b = Game("mod-a", "host"), Game("mod-b", "partner")
+    a.start({"FABLE2_TEST_INPUT": "1"})
+    b.start({"FABLE2_TEST_INPUT": "1"})
+    try:
+        for g in (a, b):
+            g.n_menu = g.count(r"main menu: Co-op entry added")
+            g.past_title()
+        menu_then_coop(a, "c2", a.n_menu)
+        host_new_campaign(a, "c2")
+        menu_then_coop(b, "c2", b.n_menu)
+        wait_row(b, "Join TestA", "c2: the host's lobby is listed")
+        partner_joins(b, "Join TestA", "c2")
+        wait_row(a, "Start", "c2: host lobby shows the partner")
+        if not both_ready_and_start(a, b, "c2") or not join_phase(a, b, "c2"):
+            return
+        time.sleep(10)
+        first = inv_dump(a, "c2_join")
+        b.shot("c2_join_partner_look.png")
+        v = read_purses(a, b, "c2_join_purse")
+        for k in (1, 2):
+            tag = f"c2_continue{k}"
+            # The partner leaves: the host saves (player 2 into the campaign) and
+            # returns to the title.
+            b.stop()
+            n = a.count(r"host: back at the front end")
+            if not a.wait(f"{tag}: host saves and returns to the front end", r"host: back at the front end", n, 240):
+                return
+            n_menu = a.count(r"main menu: Co-op entry added")
+            time.sleep(10)
+            a.past_title()
+            menu_then_coop(a, tag, n_menu)
+            wait_row(a, "Host: continue a co-op save", f"{tag}: the hub offers the co-op saves")
+            a.select("Host: continue a co-op save")
+            n = a.count(r"\[lobby\] open saves")
+            a.press("E")
+            a.wait(f"{tag}: the hub lists the co-op saves", r"\[lobby\] open saves", n, 10)
+            n = a.count(r"\[lobby\] open host kind=continue")
+            a.press("E")  # the newest campaign: the one just played
+            a.wait(f"{tag}: the save's lobby opens", r"\[lobby\] open host kind=continue", n, 10)
+            b = Game("mod-b", "partner")
+            b.start({"FABLE2_TEST_INPUT": "1"})
+            n = b.count(r"main menu: Co-op entry added")
+            b.past_title()
+            menu_then_coop(b, tag, n)
+            wait_row(b, "Continue TestA", f"{tag}: the campaign is listed for the partner")
+            partner_joins(b, "Continue TestA", tag)
+            wait_row(a, "Start", f"{tag}: host lobby shows the partner")
+            if not both_ready_and_start(a, b, tag) or not join_phase(a, b, tag):
+                return
+            time.sleep(10)
+            now = inv_dump(a, tag)
+            b.shot(f"{tag}_partner_look.png")
+            if first and now:
+                grown = {r: (first[0].get(r, 0), c) for r, c in now[0].items() if c != first[0].get(r, 0)}
+                lost = {r: (c, 0) for r, c in first[0].items() if r not in now[0]}
+                note("PASS" if not grown and not lost and now[1] == first[1] else "FAIL",
+                     f"{tag}: player 2's items unchanged ({first[1]} -> {now[1]}; changed: {grown or 'none'}"
+                     f"{'; missing: ' + str(lost) if lost else ''})")
+            v = read_purses(a, b, f"{tag}_purse")
+            note("PASS" if v and v[0] == v[1] == v[2] else "FAIL", f"{tag}: purses equal ({v})")
+    finally:
+        for g in (a, b):
+            g.stop()
+        relay.kill()
+
+
 def main():
     os.makedirs(OUT, exist_ok=True)
     mode = sys.argv[1] if len(sys.argv) > 1 else "coop"
-    {"coop": run_coop, "solo": run_solo, "multi": run_multi, "menu": run_menu, "menu2": run_menu2, "err": run_err, "final": run_final, "last": run_last, "start": run_start, "purse": run_purse}[mode]()
+    {"coop": run_coop, "solo": run_solo, "multi": run_multi, "menu": run_menu, "menu2": run_menu2, "err": run_err, "final": run_final, "last": run_last, "start": run_start, "purse": run_purse, "fps": run_fps, "combo": run_combo, "camera": run_camera, "luaq": run_luaq, "luaq_kept": run_luaq_kept, "continue2": run_continue2}[mode]()
     with open(os.path.join(OUT, f"results_{mode}.txt"), "w", encoding="utf-8") as f:
         f.write("\n".join(results) + "\n")
     return 0 if not any(r.startswith("FAIL") for r in results) else 1

@@ -178,6 +178,33 @@ local function move_to(label, getter, modifier, entity, target)
   if current then try(label .. " modify", modifier, entity, target - current) end
 end
 
+-- True when the creature already has the item: in its inventory, or (weapons)
+-- in a hand or sheath slot, where an equipped weapon is not counted as an
+-- inventory item. Continue restores onto a player 2 that may already carry the
+-- saved kit (feature 002 L4, 2026-10-25: every worn item, the sword and the
+-- pistol came back twice, 12 -> 20 items).
+--
+-- Counted by walking the inventory the way Capture does: GetNumberOfItemsOfType
+-- read 0 for worn clothes player 2 held (continue2, 2026-10-25: each continue
+-- gave every worn item once more, 5 -> 10 -> 15).
+local function count_of(entity, hex)
+  local n = 0
+  for i = 0, (try("GetNumberOfItems", Inventory.GetNumberOfItems, entity) or 0) - 1 do
+    local item = try("GetItemByIndex", Inventory.GetItemByIndex, entity, i)
+    if item and record_id(item) == hex then n = n + 1 end
+  end
+  return n
+end
+
+local function owns(entity, hex, id)
+  if count_of(entity, hex) > 0 then return true end
+  for _, slot in ipairs(WEAPON_SLOTS) do
+    local w = try("GetEntityInSlot", Carrying.GetEntityInSlot, entity, slot)
+    if w and w:IsAlive() and record_id(w) == hex then return true end
+  end
+  return false
+end
+
 function CoopHero.Apply(entity, p, opts)
   opts = opts or {}
   if opts.body ~= false then
@@ -195,8 +222,8 @@ function CoopHero.Apply(entity, p, opts)
     for _, hex in ipairs(p.worn) do
       local id = id_from_hex(hex)
       if id then
-        -- Wearing takes an item the creature owns: give it first.
-        try("AddItemOfType " .. hex, Inventory.AddItemOfType, entity, id)
+        -- Wearing takes an item the creature owns: give it first, unless it has one.
+        if not owns(entity, hex, id) then try("AddItemOfType " .. hex, Inventory.AddItemOfType, entity, id) end
         try("AddAndReplaceItemOfRecordID " .. hex,
           AppearanceModifierManager.AddAndReplaceItemOfRecordID, entity, id)
       end
@@ -205,7 +232,7 @@ function CoopHero.Apply(entity, p, opts)
   if opts.weapons ~= false then
     for _, hex in ipairs(p.weap) do
       local id = id_from_hex(hex)
-      if id then try("AddItemOfType " .. hex, Inventory.AddItemOfType, entity, id) end
+      if id and not owns(entity, hex, id) then try("AddItemOfType " .. hex, Inventory.AddItemOfType, entity, id) end
     end
   end
   if p.version == "v2" and opts.v2 ~= false then
@@ -223,7 +250,7 @@ function CoopHero.Apply(entity, p, opts)
     for hex, want in pairs(p.items or {}) do
       local id = id_from_hex(hex)
       if id then
-        local have = try("GetNumberOfItemsOfType", Inventory.GetNumberOfItemsOfType, entity, id) or 0
+        local have = count_of(entity, hex)
         for _ = have + 1, want do try("AddItemOfType " .. hex, Inventory.AddItemOfType, entity, id) end
       else
         print("[coop] item " .. hex .. " unknown in this game; skipped")

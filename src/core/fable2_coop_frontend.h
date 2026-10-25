@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
+#include <cstdlib>
 #include <cstdio>
 #include <ctime>
 #include <filesystem>
@@ -26,6 +27,7 @@
 #include <optional>
 #include <functional>
 #include <mutex>
+#include <sstream>
 #include <string>
 
 #include <rex/cvar.h>
@@ -37,6 +39,7 @@
 #include "fable2_coop_backup.h"
 #include "fable2_coop_p2file.h"
 #include "fable2_coop_template.h"
+#include "fable2_coop_test_input.h"
 #include "fable2_front_hooks.h"
 #include "../diagnostics/fable2_state_probe.h"
 
@@ -631,14 +634,20 @@ inline bool write_p2_file(const std::filesystem::path& slot, const std::string& 
   return ok;
 }
 
-inline void request_p2_capture(const char* tag) {
+// must: the capture after a save (COOPP2W) is kept until a console slot is
+// free; the periodic cache capture just tries again next time.
+inline void request_p2_capture(const char* tag, bool must = false) {
   const std::string lib = fable2::coophero::read_lib();
   if (lib.empty()) return;
-  fable2::luaconsole::RunChunk(
-      lib + "\nlocal h = GetPlayerHenchman()\n"
-            "if h and h:IsAlive() then print('" + tag +
-      "|' .. CoopHero.SerializeV2(CoopHero.Capture(h), 0))\n"
-      "else print('" + tag + "-NONE') end\n");
+  std::string chunk = lib + "\nlocal h = GetPlayerHenchman()\n"
+                            "if h and h:IsAlive() then print('" + tag +
+                      "|' .. CoopHero.SerializeV2(CoopHero.Capture(h), 0))\n"
+                      "else print('" + tag + "-NONE') end\n";
+  if (must) {
+    fable2::luaconsole::RunChunkOrKeep(std::move(chunk));
+  } else {
+    fable2::luaconsole::RunChunk(chunk);
+  }
 }
 
 inline void p2_watch_start(const std::filesystem::path& slot, const std::string& cid,
@@ -683,7 +692,7 @@ inline void p2_watch_tick(int64_t now, bool player2_here) {
   REXSYS_INFO("[coop] campaign saved: recording player 2");
   if (player2_here) {
     l.unlock();
-    request_p2_capture("COOPP2W");  // written by the line handler
+    request_p2_capture("COOPP2W", true);  // written by the line handler
     return;
   }
   if (w.cache.empty()) {
@@ -804,20 +813,25 @@ inline void partner_purse_tick(int64_t now) {
   // messages can still move the partner's local purse).
   if (best->seq == g_purse_applied_seq && now < g_mirror_again_ms) return;
   const bool fresh = best->seq != g_purse_applied_seq;
-  g_purse_applied_seq = best->seq;
-  g_mirror_again_ms = now + 3000;
+  if (fable2::f5lua::g_queued.load() > 0) return;  // paused: queued scripts wait; try next tick
   const std::string t = std::to_string(best->total);
-  fable2::luaconsole::RunChunk("local me = GetPlayerHenchman()\n"
+  if (!fable2::luaconsole::RunChunk("local me = GetPlayerHenchman()\n"
                                "if me and me:IsAlive() and Money.Get(me) ~= " + t + " then\n"
                                "  local was = Money.Get(me)\n"
                                "  Money.Set(me, " + t + ")\n"
                                "  print('[coop] purse: mirrored the host total " + t + " (was ' .. was .. ')')\n"
-                               "end\n");
+                               "end\n"))
+    return;  // no free console slot: the next tick tries again
+  g_purse_applied_seq = best->seq;
+  g_mirror_again_ms = now + 3000;
   if (fresh) REXSYS_INFO("[coop] purse: host total {} (seq {})", best->total, best->seq);
 }
 
 inline void purse_tick(int64_t now) {
   if (now < g_next_purse_ms) return;
+  // Paused, queued scripts wait: do not stack syncs behind each other (they
+  // would take every console slot); the next tick after the pause syncs.
+  if (fable2::f5lua::g_queued.load() > 0) return;
   g_next_purse_ms = now + kPurseEveryMs;
   const uint32_t epoch = fable2::coophero::g_spawn_epoch.load();
   const bool reset = epoch != g_purse_epoch;
@@ -925,7 +939,7 @@ inline void session_tick() {
               REXSYS_INFO("[coop] host start: hero gender {} -> {}", s.template_female ? "F" : "M",
                           s.host_female ? "F" : "M");
             s.gender_try_ms = now;
-            fable2::luaconsole::RunChunk(std::string(R"lua(
+            if (!fable2::luaconsole::RunChunk(std::string(R"lua(
 local h = GetPlayerHero()
 local want = )lua") + (s.host_female ? "EGender.EG_FEMALE" : "EGender.EG_MALE") + R"lua(
 if Gender.Get(h) == want then
@@ -934,7 +948,8 @@ elseif not Action.IsPerformingAnyAction(h) then
   print('[coop] hero gender switching: ' .. tostring(pcall(Player.ChangePlayerEntityType, h, ')lua" +
                 (s.host_female ? "CreatureHeroFemale" : "CreatureHero") + R"lua(')))
 end
-)lua");
+)lua"))
+              s.gender_try_ms = now - 4500;  // no free console slot: again in 0.5 s
           }
         }
         if (!loaded && now - s.since_ms > 180000) {
@@ -1059,7 +1074,7 @@ end
           s.s = Session::kHostPartnerLost;
           s.since_ms = now;
           s.quit_sent = false;
-          fable2::luaconsole::RunChunk(
+          fable2::luaconsole::RunChunkOrKeep(
               "print('[coop] AutoSaveGame: ' .. tostring(pcall(AutoSaveGame, true, true)))");
         }
         break;
@@ -1076,7 +1091,7 @@ end
         s.s = Session::kHostPartnerLost;
         s.since_ms = now;
         s.quit_sent = false;
-        fable2::luaconsole::RunChunk(
+        fable2::luaconsole::RunChunkOrKeep(
             "print('[coop] AutoSaveGame: ' .. tostring(pcall(AutoSaveGame, true, true)))");
       }
       break;
@@ -1086,7 +1101,7 @@ end
       if (!s.quit_sent && now - s.since_ms > 10000) {
         s.quit_sent = true;
         REXSYS_INFO("[coop] host: returning to the front end");
-        fable2::luaconsole::RunChunk(
+        fable2::luaconsole::RunChunkOrKeep(
             "print('[coop] QuitToFrontEnd: ' .. tostring(pcall(Debug.QuitToFrontEnd)))");
       }
       // Back at the front end: the main menu, not a lobby (the proof run of
@@ -1261,6 +1276,58 @@ inline bool OnPress(PPCContext& ctx, uint8_t* base) {
 }
 
 inline void (*g_prev_frame_hook)() = nullptr;
+// Testing only (FABLE2_TEST_INPUT=1 in the environment, set by
+// tools/coop_ship_e2e.py; never by play-coop.cmd): commands from
+// <exe dir>\test_input.txt, read and emptied each frame, so proofs do not depend
+// on which window is in front (2026-10-25: focus loss and key repeat at 60 fps
+// broke two runs). Command language: fable2_coop_test_input.h.
+inline void test_input_tick() {
+  static const bool on = std::getenv("FABLE2_TEST_INPUT") != nullptr;
+  if (!on) return;
+  static int64_t next = 0;
+  const int64_t now = fable2::f5lua::steady_ms();
+  if (now < next) return;
+  next = now + 50;
+  const auto path = fable2::cooptemplate::exe_dir() / "test_input.txt";
+  std::error_code ec;
+  if (!std::filesystem::exists(path, ec) || std::filesystem::file_size(path, ec) == 0) return;
+  std::string text;
+  {
+    std::ifstream f(path, std::ios::binary);
+    text.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+  }
+  std::ofstream(path, std::ios::binary | std::ios::trunc).close();
+  namespace ti = fable2::cooptestinput;
+  std::istringstream lines(text);
+  std::string line;
+  int64_t delay = 0;  // presses in one read run one after the other
+  while (std::getline(lines, line)) {
+    const ti::Command c = ti::Parse(line);
+    switch (c.kind) {
+      case ti::Kind::kLua:
+        fable2::luaconsole::RunChunkOrKeep(c.text);
+        break;
+      case ti::Kind::kCvar:
+        rex::cvar::SetFlagByName(c.text, c.value_text);
+        break;
+      case ti::Kind::kPress:
+        fable2::cooplobby::InjectPress(c.mask, delay, c.ms);
+        delay += c.ms + 150;
+        break;
+      case ti::Kind::kStick:
+        fable2::cooplobby::InjectAnalog(c.side == 'L' ? 'l' : 'r', ti::StickValue(c.x), ti::StickValue(c.y), 0, 0,
+                                        c.ms);
+        break;
+      case ti::Kind::kTrigger:
+        fable2::cooplobby::InjectAnalog(c.side, 0, 0, ti::TriggerValue(c.value), 0, c.ms);
+        break;
+      case ti::Kind::kNone:
+        continue;
+    }
+    REXSYS_INFO("[test-input] {}", line);
+  }
+}
+
 inline void OnFrame() {
   if (g_prev_frame_hook) g_prev_frame_hook();
   // Rig only: narrow the save list to one slot so Continue loads it with no
@@ -1291,6 +1358,7 @@ inline void OnFrame() {
   }
   session_tick();
   partner_purse_tick(fable2::f5lua::steady_ms());
+  test_input_tick();
 }
 
 inline const bool g_installed = [] {

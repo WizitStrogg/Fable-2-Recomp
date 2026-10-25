@@ -14,7 +14,8 @@
 //     one of kSlots fixed files data/scripts/recomp/console_<n>.lua that ship
 //     with the build (so they are in dir.manifest from launch), round robin.
 //     CScriptManager::RunScript may load on a later frame, so a slot is not
-//     reused until kSlots more chunks were queued.
+//     reused until kSlots more chunks were queued, and never while an entry
+//     for it still waits in the run queue (a full queue refuses the chunk).
 //   * The path is queued to the F5 runner (fable2_f5_lua.h), which runs it on
 //     the guest main thread from the MainRenderLoop hook.
 //   * Lua's print() (both of the game's Lua runtimes) ends in CRT
@@ -27,6 +28,7 @@
 
 #include <array>
 #include <atomic>
+#include <deque>
 #include <cctype>
 #include <cstdint>
 #include <cstring>
@@ -168,8 +170,18 @@ inline bool RunChunk(const std::string& chunk) {
     REXSYS_ERROR("lua: game data folder not known yet");
     return false;
   }
-  const int slot = g_next_slot.fetch_add(1) % kSlots;
-  const std::string name = "console_" + std::to_string(slot) + ".lua";
+  // The run queue holds file names, so a slot rewritten while an older entry for
+  // it still waits would run the new text twice (L2 15:44Z: queued while the
+  // game was paused, one co-op kit command ran 7 times). Take a free slot only.
+  std::string name;
+  for (int tries = 0; tries < kSlots && name.empty(); ++tries) {
+    const std::string n = "console_" + std::to_string(g_next_slot.fetch_add(1) % kSlots) + ".lua";
+    if (!fable2::f5lua::is_queued("scripts/recomp/" + n)) name = n;
+  }
+  if (name.empty()) {
+    REXSYS_WARN("lua: all {} console slots are still waiting to run; not queued", kSlots);
+    return false;
+  }
   const auto file = recomp_dir() / name;
   {
     std::ofstream out(file, std::ios::binary | std::ios::trunc);
@@ -196,6 +208,48 @@ inline bool RunFile(const std::string& name) {
   std::ostringstream text;
   text << in.rdbuf();
   return RunChunk(text.str());
+}
+
+// Chunks that must run (one-shots): queued now when a console slot is free,
+// otherwise kept, in order, and queued by RetryKept() on a later frame (all
+// 8 slots wait while the game is paused). Periodic callers just try again on
+// their next tick instead.
+inline std::deque<std::string>& kept() {
+  static std::deque<std::string> q;
+  return q;
+}
+inline std::mutex& kept_mtx() {
+  static std::mutex m;
+  return m;
+}
+inline void RunChunkOrKeep(std::string chunk) {
+  std::lock_guard<std::mutex> l(kept_mtx());
+  if (kept().empty() && RunChunk(chunk)) return;
+  kept().push_back(std::move(chunk));
+  REXSYS_INFO("lua: chunk kept until a console slot is free ({} kept)", kept().size());
+}
+inline void RunFileOrKeep(const std::string& name) {
+  std::ifstream in(recomp_dir() / name, std::ios::binary);
+  if (!in) {
+    REXSYS_ERROR("luafile: cannot read {}", (recomp_dir() / name).string());
+    return;
+  }
+  std::ostringstream text;
+  text << in.rdbuf();
+  RunChunkOrKeep(text.str());
+}
+// Every frame (at most every 250 ms: a full queue logs each refusal): queue
+// the kept chunks, oldest first, while slots are free.
+inline void RetryKept() {
+  static int64_t next_ms = 0;
+  const int64_t now = fable2::f5lua::steady_ms();
+  if (now < next_ms) return;
+  next_ms = now + 250;
+  std::lock_guard<std::mutex> l(kept_mtx());
+  while (!kept().empty() && RunChunk(kept().front())) {
+    kept().pop_front();
+    REXSYS_INFO("lua: kept chunk queued ({} left)", kept().size());
+  }
 }
 
 inline void CmdLua(std::string_view args) {

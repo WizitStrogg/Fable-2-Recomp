@@ -533,17 +533,50 @@ inline uint16_t injected_now() {
   return b;
 }
 
+// Stick and trigger injection (the test input source only): held values for
+// a time window, applied before everything else reads the pad.
+struct InjectedAnalog {
+  char what;  // 'l' left stick, 'r' right stick, 'L' left trigger, 'R' right trigger
+  int16_t x, y;
+  uint8_t value;
+  int64_t from_ms, until_ms;
+};
+inline std::vector<InjectedAnalog> g_injected_analog;
+inline void InjectAnalog(char what, int16_t x, int16_t y, uint8_t value, int64_t delay_ms, int64_t hold_ms) {
+  const int64_t now = fable2::f5lua::steady_ms();
+  std::lock_guard<std::mutex> l(g_inject_mu);
+  g_injected_analog.push_back({what, x, y, value, now + delay_ms, now + delay_ms + hold_ms});
+}
+inline void apply_analog(rex::input::X_INPUT_STATE* state) {
+  const int64_t t = fable2::f5lua::steady_ms();
+  std::lock_guard<std::mutex> l(g_inject_mu);
+  if (g_injected_analog.empty()) return;
+  for (const auto& i : g_injected_analog) {
+    if (t < i.from_ms || t >= i.until_ms) continue;
+    switch (i.what) {
+      case 'l': state->gamepad.thumb_lx.set(i.x); state->gamepad.thumb_ly.set(i.y); break;
+      case 'r': state->gamepad.thumb_rx.set(i.x); state->gamepad.thumb_ry.set(i.y); break;
+      case 'L': state->gamepad.left_trigger = i.value; break;
+      case 'R': state->gamepad.right_trigger = i.value; break;
+    }
+  }
+  std::erase_if(g_injected_analog, [t](const InjectedAnalog& i) { return t >= i.until_ms; });
+}
+
 // Registered with the SDK input filter in place of the camera's, which it
 // calls first. While the lobby is open, presses drive the lobby and the game
 // sees an idle pad.
 inline void input_filter(uint32_t user_index, rex::input::X_INPUT_STATE* state) {
+  if (state && user_index == 0) apply_analog(state);  // test input: before the camera reads the look
   fable2::coopcam::input_filter(user_index, state);
   if (!state || user_index != 0) return;
-  const uint16_t now = state->gamepad.buttons;
+  // Injected presses (our own, and the test input source) count like the pad's,
+  // also for the lobby panel.
+  const uint16_t inj = injected_now();
+  const uint16_t now = static_cast<uint16_t>(state->gamepad.buttons | inj);
   if (!g_open.load()) {
     g_prev_buttons = now;
-    if (const uint16_t inj = injected_now())
-      state->gamepad.buttons.set(static_cast<uint16_t>(now | inj));
+    if (inj) state->gamepad.buttons.set(now);
     return;
   }
   const uint16_t pressed = now & ~g_prev_buttons;
