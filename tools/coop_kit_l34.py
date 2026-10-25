@@ -199,7 +199,7 @@ def l3_steps(a, b):
     _, ack_p = press_entry(a, b, "l3p", 0, "use")
     # A on the hat toggles it: take it off when L2 already put it on.
     open_page(b, "l3h", "Clothing", CLOTHING_ROW["Headgear"])
-    _, ack_h = press_entry(a, b, "l3h", 0, "unwear" if hat_worn0 else "wear")
+    _, ack_h = press_entry(a, b, "l3h", 1, "unwear" if hat_worn0 else "wear")
     time.sleep(3)
     snap = snapshot(a, "l3z")
     after = (snap[1].get(potion) or (0,))[0] if snap and potion else 0
