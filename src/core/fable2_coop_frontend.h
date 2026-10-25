@@ -1359,7 +1359,6 @@ inline void OnFrame() {
   session_tick();
   partner_purse_tick(fable2::f5lua::steady_ms());
   test_input_tick();
-  fable2::luaconsole::RetryKept();
 }
 
 inline const bool g_installed = [] {

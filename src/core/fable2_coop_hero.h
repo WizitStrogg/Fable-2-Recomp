@@ -630,6 +630,9 @@ inline void f5_cleanup_tick(int64_t now) {
 }
 
 inline void OnFrame() {
+  // Kept Lua chunks (no free console slot when they were asked for) are queued
+  // here, every frame, with or without a co-op campaign.
+  fable2::luaconsole::RetryKept();
   fable2::camscan::poke_tick();
   fable2::coopcam::follow_tick(REXCVAR_GET(coop_own_camera));
   if (!g_pending_label_loaded) {

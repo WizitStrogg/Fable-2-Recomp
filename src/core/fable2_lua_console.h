@@ -238,8 +238,13 @@ inline void RunFileOrKeep(const std::string& name) {
   text << in.rdbuf();
   RunChunkOrKeep(text.str());
 }
-// Once a frame: queue the kept chunks, oldest first, while slots are free.
+// Every frame (at most every 250 ms: a full queue logs each refusal): queue
+// the kept chunks, oldest first, while slots are free.
 inline void RetryKept() {
+  static int64_t next_ms = 0;
+  const int64_t now = fable2::f5lua::steady_ms();
+  if (now < next_ms) return;
+  next_ms = now + 250;
   std::lock_guard<std::mutex> l(kept_mtx());
   while (!kept().empty() && RunChunk(kept().front())) {
     kept().pop_front();
