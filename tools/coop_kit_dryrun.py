@@ -227,15 +227,27 @@ def install():
         setattr(e2e, name, lambda *a, **k: True)
     e2e.both_ready_and_start = lambda *a, **k: True
     e2e.join_phase = lambda *a, **k: True
-    l34.start_and_join = lambda *a, **k: True
+    def start_and_join(a, b, tag, host_row=None):
+        if host_row and "continue" in host_row:  # the continue restores player 2 from the file
+            a.say("player 2 restored from coop_player2.txt")
+        return True
+
+    l34.start_and_join = start_and_join
     l34.moving = lambda g, tag: not W.paused
     l34.tree_hashes = lambda root: {}
     l34.out_dir = lambda name: None
     l34.stop_and_keep = lambda *a, **k: None
     l34.host_save = lambda a, tag: True
-    l34.p2file_total = lambda slot: (sum(v[0] for v in W.items.values()), "")
+    l34.p2file_total = lambda slot: (
+        sum(v[0] for v in W.items.values()),
+        "items=" + ",".join(f"{h}:{v[0]}" for h, v in W.items.items() if v[0]) + "|worn=" + ",".join(W.worn))
     os.makedirs = lambda *a, **k: None
     l2.shutil.copy = lambda *a, **k: None
+    l34.shutil.copytree = lambda *a, **k: None  # the L4 save backup: never touched in a dry run
+    l34.shutil.copy = lambda *a, **k: None
+    l34.slot_of = lambda a: r"C:\dryrun\slot"
+    real_exists = os.path.exists
+    os.path.exists = lambda p: False if "saves-before" in str(p) else real_exists(p)
     e2e.OUT = os.path.join(os.environ.get("TEMP", "."), "coop_kit_dryrun")
     os.environ["FABLE2_DRYRUN"] = "1"
 
@@ -247,7 +259,8 @@ def main():
     real_open = builtins.open
 
     def fake_open(p, *a, **k):  # results.txt and copies go nowhere
-        if "002-evidence" in str(p) and ("w" in (a[0] if a else k.get("mode", "r"))):
+        writing = "w" in (a[0] if a else k.get("mode", "r"))
+        if writing and ("002-evidence" in str(p) or "coop_kit_dryrun" in str(p)):
             return real_open(os.devnull, *a, **k)
         return real_open(p, *a, **k)
 

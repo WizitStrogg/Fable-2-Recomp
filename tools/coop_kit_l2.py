@@ -242,10 +242,21 @@ def run(chain=None):
         cmd, ack = press_a_on_entry(a, b, "l2w", 1, "equip")
         if rec_of(cmd) == melee0:
             note("FAIL", f"l2w: row 1 is the sword already in hand ({melee0})")
+        # The console snapshot names the weapon in the hand by its own record (the DLC
+        # sword E150911F reads 78C9099B once equipped; one of the two Lua VMs reads no
+        # weapon at all), so: the host said ok and the hand changed; the channel's
+        # kit_state, translated on the host, must give the copy the inventory record.
         snap = snapshot(a, "l2w")
         melee1 = field(snap, "melee")
-        note("PASS" if ack and ": ok" in ack and melee1 == rec_of(cmd) and melee1 != melee0 else "FAIL",
+        if not melee1:
+            snap = snapshot(a, "l2w_again")
+            melee1 = field(snap, "melee")
+        note("PASS" if ack and ": ok" in ack and melee1 and melee1 != melee0 else "FAIL",
              f"l2w: swap from the stock Weapons page: melee {melee0} -> {melee1} (sent {rec_of(cmd)})")
+        time.sleep(5)
+        have_w = probe(b, "l2w") or {}
+        note("PASS" if rec_of(cmd) and have_w.get(rec_of(cmd), 0) >= 1 else "FAIL",
+             f"l2w: the partner's copy holds the sword now in the hand ({rec_of(cmd)} x{have_w.get(rec_of(cmd), 0)})")
         a.shot("l2w_host_after.png")
         b.shot("l2w_partner_after.png")
 

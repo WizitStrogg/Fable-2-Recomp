@@ -109,6 +109,31 @@ int main() {
   CHECK(WantedInventory(eq, false).items.size() == 2);
   CHECK(MirrorDiff(wi, {{"00000050", 2}, {"11111111", 1}, {"98F97077", 1}}).empty());
 
+  // The equipped weapon's hand record is translated back to its inventory record.
+  WeaponRecMap wm;
+  KitState s1;
+  s1.melee = "98F97077";
+  wm.Translate(s1);
+  CHECK(s1.melee == "98F97077");
+  wm.OnEquipOk("E150911F");
+  KitState s2;
+  s2.melee = "";  // the other VM's snapshot: no weapons, teaches nothing
+  wm.Translate(s2);
+  CHECK(!wm.pending_rec.empty());
+  KitState s3;
+  s3.melee = "78C9099B";
+  wm.Translate(s3);
+  CHECK(s3.melee == "E150911F" && wm.pending_rec.empty());
+  KitState s4;
+  s4.melee = "78C9099B";
+  wm.Translate(s4);
+  CHECK(s4.melee == "E150911F");
+  wm.OnEquipOk("98F97077");  // back to the starting sword: hand record = inventory record
+  KitState s5;
+  s5.melee = "98F97077";
+  wm.Translate(s5);
+  CHECK(s5.melee == "98F97077" && wm.hand_to_inv.size() == 1);
+
   // The partner's wheel: stock pages pass, unsafe ones are rerouted, each switch on its own.
   const PageSwitches all{};
   CHECK(RoutePage("Items", all) == PageRoute::kPass);

@@ -341,6 +341,38 @@ inline std::vector<MirrorChange> MirrorDiff(const KitState& want, const std::map
   return out;
 }
 
+// The host's snapshot names an equipped weapon by the record of the object in
+// the hand, which can differ from its inventory item's record (L2 16:2xZ: the
+// DLC sword E150911F reads back as 78C9099B once equipped). After an equip
+// answered ok, the first snapshot whose melee or ranged changed teaches the
+// pair; every snapshot is then translated back to the inventory record, which
+// is what the partner's Weapons page lists. Kept on the C++ side: the console
+// chunks run in two Lua VMs, so a Lua global does not reach every snapshot.
+struct WeaponRecMap {
+  std::map<std::string, std::string> hand_to_inv;
+  std::string pending_rec, melee_before, ranged_before;
+  std::string last_melee, last_ranged;  // raw, from the last snapshot that named a melee weapon
+
+  void OnEquipOk(const std::string& rec) {
+    pending_rec = rec;
+    melee_before = last_melee;
+    ranged_before = last_ranged;
+  }
+  void Translate(KitState& k) {
+    if (!k.melee.empty()) {  // one VM's snapshots read no weapons: they teach nothing
+      if (!pending_rec.empty() && (k.melee != melee_before || k.ranged != ranged_before)) {
+        const std::string& hand = k.melee != melee_before ? k.melee : k.ranged;
+        if (!hand.empty() && hand != pending_rec) hand_to_inv[hand] = pending_rec;
+        pending_rec.clear();
+      }
+      last_melee = k.melee;
+      last_ranged = k.ranged;
+    }
+    if (auto it = hand_to_inv.find(k.melee); it != hand_to_inv.end()) k.melee = it->second;
+    if (auto it = hand_to_inv.find(k.ranged); it != hand_to_inv.end()) k.ranged = it->second;
+  }
+};
+
 // What the copy's inventory should hold: the host's non-clothing items, plus
 // (with `weapons`) the equipped melee and ranged weapons, which the host keeps
 // in weapon slots outside its inventory list (L1b: the partner's Weapons page
