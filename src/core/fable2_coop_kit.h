@@ -334,6 +334,7 @@ struct HostSide {
   int64_t snapshot_queued_ms = 0;
   std::string last_state;
   int64_t last_tick_ms = 0, paused_since_ms = 0;
+  WeaponRecMap weapon_recs;
 };
 struct JoinerSide {
   JoinerQueue queue{std::to_string(std::chrono::duration_cast<std::chrono::seconds>(
@@ -517,6 +518,7 @@ inline void OnResultLine(std::string_view line) {
     return;
   }
   REXSYS_INFO("[coopkit] host: command {} -> {}", h.running->seq, res == "no:pending" ? "no:busy" : res);
+  if (res == "ok" && h.running->op == Op::kEquip) h.weapon_recs.OnEquipOk(h.running->rec);
   h.applier.Done(h.running->seq, res == "no:pending" ? "no:busy" : res);
   h.running.reset();
   h.next_snapshot_ms = 0;  // a fresh kit_state with the result
@@ -527,9 +529,11 @@ inline void OnStateLine(std::string_view line) {
   std::lock_guard<std::mutex> l(mtx());
   auto& h = host();
   h.snapshot_queued = false;
-  const auto k = ParseKitState(line);
+  auto k = ParseKitState(line);
   if (!k || k->rev == 0) return;  // rev 0 = a console `luafile coop_kit`, not the channel's
-  const std::string value(line);
+  const std::string melee_raw = k->melee, ranged_raw = k->ranged;
+  h.weapon_recs.Translate(*k);
+  const std::string value = (k->melee == melee_raw && k->ranged == ranged_raw) ? std::string(line) : Format(*k);
   if (value != h.last_state) {
     h.last_state = value;
     lobby::PublishData("kit_state", value);

@@ -282,7 +282,7 @@ def run_l4():
         open_page(b, "l4p", "Items", ITEMS_ROW["Potions"])
         press_entry(a, b, "l4p", 0, "use")
         open_page(b, "l4h", "Clothing", CLOTHING_ROW["Headgear"])
-        press_entry(a, b, "l4h", 0, "wear")
+        press_entry(a, b, "l4h", 1, "wear")
         time.sleep(3)
         before = snapshot(a, "l4b")
         n0 = host_count(a, "l4b")
