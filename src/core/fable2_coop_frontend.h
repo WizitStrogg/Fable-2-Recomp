@@ -98,12 +98,37 @@ inline int64_t g_swallow_a_until = 0;
 inline int64_t g_pass_deadline = 0;
 constexpr int64_t kLeakWindowMs = 600;
 
+// The main menu was built (OnMenuBuilt, from the Co-op entry's AddEntry) at
+// this luaD_call count. The game's Lua is all but idle in the front end (0-19
+// calls a minute) and runs thousands a second in the world.
+inline std::atomic<bool> g_menu_built{false};
+inline std::atomic<uint32_t> g_menu_built_dcalls{0};
+inline std::atomic<bool> g_menu_fallback_logged{false};
+constexpr uint32_t kMenuIdleDcalls = 2000;
+inline void OnMenuBuilt() {
+  g_menu_built_dcalls.store(fable2::f5lua::g_dcall_hits.load(std::memory_order_relaxed));
+  g_menu_built.store(true);
+  g_menu_fallback_logged.store(false);
+}
+
 // The front end: title prompt, menu movie or main menu. The state probe
 // reports the title as PressAScreen or already as MainMenu, so both count.
+// If the probe has no state ("?") but the menu was built and the game's Lua
+// has stayed idle since, it is still the front end (a blind probe made the
+// host's Start do nothing: wt002-b fable_2_026.log, 2026-10-25).
 inline bool in_main_menu() {
   const int s = fable2::stateprobe::CurrentState();
-  return s == fable2::stateprobe::kMainMenu || s == fable2::stateprobe::kMainMenuMovie ||
-         s == fable2::stateprobe::kPressAScreen;
+  if (s == fable2::stateprobe::kMainMenu || s == fable2::stateprobe::kMainMenuMovie ||
+      s == fable2::stateprobe::kPressAScreen)
+    return true;
+  if (s != fable2::stateprobe::kUnknown || !g_menu_built.load()) return false;
+  const uint32_t ran = fable2::f5lua::g_dcall_hits.load(std::memory_order_relaxed) - g_menu_built_dcalls.load();
+  if (ran >= kMenuIdleDcalls) return false;
+  if (!g_menu_fallback_logged.exchange(true)) {
+    REXSYS_WARN("[coop] state probe has no state; the main menu was built and the game's Lua is idle "
+                "({} calls since): treating it as the main menu", ran);
+  }
+  return true;
 }
 
 inline std::optional<std::string> restore_player2_chunk(const std::filesystem::path& slot);

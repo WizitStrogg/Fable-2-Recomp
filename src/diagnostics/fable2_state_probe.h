@@ -421,6 +421,7 @@ struct FrontEndFlag {
   uint32_t value_addr = 0;  // heap copy of the GUI_FRONT_END value string
   bool value_found = false;
   char value[64] = {};
+  int hunts = 0;  // heap passes made (a stale copy restarts the count)
 };
 inline FrontEndFlag& fe_flag() {
   static FrontEndFlag* f = new FrontEndFlag;  // leaked on purpose
@@ -445,11 +446,34 @@ inline std::string CurrentFrontEndValue() {
   return std::string(f.value);
 }
 
+// A scenario name: letters, digits and '_' ("DefaultScenario",
+// "QC010_ChildhoodStart"), NUL-terminated within the buffer.
+inline bool looks_like_value(const uint8_t* b, size_t cap) {
+  size_t n = 0;
+  for (; n < cap && b[n]; ++n) {
+    if (!std::isalnum(b[n]) && b[n] != '_') return false;
+  }
+  return n < cap;
+}
+
+// The first copy the hunt finds can be a temporary one that is freed and
+// reused at boot (wt002-b fable_2_026.log, 2026-10-25: the latched address
+// then read as something else, front_end went false and the state stayed "?"
+// for ten minutes on the title screen). A copy that no longer reads as a
+// value is dropped and the hunt starts again.
 inline void fe_flag_read() {
   FrontEndFlag& f = fe_flag();
   if (!f.value_found) return;
   uint8_t b[64] = {};
   if (aread(f.value_addr, b, sizeof b)) {
+    if (!looks_like_value(b, sizeof b)) {
+      REXSYS_INFO("[state] front-end value copy at 0x{:08X} went stale; hunting again", f.value_addr);
+      f.value_found = false;
+      f.value_addr = 0;
+      f.value[0] = 0;
+      f.hunts = 0;
+      return;
+    }
     size_t n = 0;
     while (n < 63 && b[n]) ++n;
     std::memcpy(f.value, b, n);
@@ -461,11 +485,10 @@ inline void fe_flag_read() {
 // table entries that point at the static constants above.
 inline void fe_flag_hunt() {
   FrontEndFlag& f = fe_flag();
-  static int hunts = 0;
   // The value copy is present from early boot; stop the full-heap scan once
   // it is found (and the flag-name context is logged), or after ~5 min.
-  if (f.value_found && hunts > 20) return;
-  if (++hunts > 300) return;
+  if (f.value_found && f.hunts > 20) return;
+  if (++f.hunts > 300) return;
   const uint32_t search_base = 0x40000000u;
   const uint32_t kEnd = 0x50000000u;
   const size_t chunk = 65536;

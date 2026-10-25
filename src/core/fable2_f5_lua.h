@@ -652,16 +652,20 @@ inline ThreadCount& my_thread_count() {
   return *tc;
 }
 
-// Entries into the game VM's luaD_call (any thread / on the VM thread /
-// outermost on the VM thread, among those checked / L->nCcalls reads, each a
-// VirtualQuery). Counted at entry only, so longjmp-safe.
+// Entries into the game VM's luaD_call (any thread, never reset: the front
+// end reads it, see in_main_menu / on the VM thread / outermost on the VM
+// thread, among those checked / L->nCcalls reads, each a VirtualQuery).
+// Counted at entry only, so longjmp-safe.
 inline std::atomic<uint32_t> g_dcall_hits{0}, g_dcall_vm{0}, g_dcall_outer{0}, g_dcall_reads{0};
 
 std::string vm_report() {
-  std::string out = "luaD_call " + std::to_string(g_dcall_hits.exchange(0)) + " (VM thread " +
+  static uint32_t s_reported_hits = 0;
+  const uint32_t hits = g_dcall_hits.load(std::memory_order_relaxed);
+  std::string out = "luaD_call " + std::to_string(hits - s_reported_hits) + " (VM thread " +
                     std::to_string(g_dcall_vm.exchange(0)) + ", outermost " +
                     std::to_string(g_dcall_outer.exchange(0)) + ", nCcalls reads " +
                     std::to_string(g_dcall_reads.exchange(0)) + "), ";
+  s_reported_hits = hits;
   for (auto& vm : g_vm_entries) {
     for (auto& e : vm) {
       out += std::string(e.via) + " " + std::to_string(e.hits.exchange(0)) + " (VM thread " +
