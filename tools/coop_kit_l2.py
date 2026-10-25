@@ -222,33 +222,9 @@ def run(after=None):
             if h:
                 note("PASS" if have.get(h, 0) >= 1 else "FAIL", f"l2a: the partner's copy holds the {what} {h}")
 
-        # --- probe: does the STOCK henchman wheel pause the host too? ----------------------
-        # coop_kit off on the partner = the stock henchman wheel; its first row
-        # is HenchmanAbilities. The host's coop_kit stays on (it logs pause/resume).
-        console(b, "coop_kit false")
-        time.sleep(1)
-        n_p, n_r = a.count(r"\[coopkit\] host: game paused"), a.count(r"\[coopkit\] host: game resumed")
-        focus(b.hwnd)
-        key("Escape")
-        time.sleep(2)
-        b.shot("l2probe_partner_henchman_wheel.png")
-        key("E")
-        time.sleep(6)
-        b.shot("l2probe_partner_henchman_abilities.png")
-        a.shot("l2probe_host.png")
-        stock_pauses = a.count(r"\[coopkit\] host: game paused") > n_p
-        note("INFO", f"probe: the stock henchman Abilities page {'PAUSES' if stock_pauses else 'does NOT pause'} "
-                     f"the host (screenshot l2probe_host.png)")
-        for _ in range(4):
-            key("B")
-            time.sleep(3)
-            if not stock_pauses or host_resumed_since(a, n_r):
-                break
-        if stock_pauses:
-            note("PASS" if host_resumed_since(a, n_r) else "FAIL",
-                 "probe: the host resumed when the stock henchman menu closed")
-        console(b, "coop_kit true")
-        time.sleep(3)
+        # The probe (coop_kit off on the partner, stock henchman Abilities) answered in the
+        # runs of 15:31Z and 15:44Z: the stock henchman pages pause the host too. It is no
+        # longer run: toggling coop_kit mid-session left the next steps on the stock wheel.
 
         # --- Weapons > Melee lists both swords; A swaps to another --------------------------
         # L2 14:56Z: row 0 is the sword in hand (Rusty Longsword), row 1 the next one.
@@ -290,10 +266,11 @@ def run(after=None):
         note("PASS" if copy == after else "FAIL", f"l2p: the partner's copy follows: potion x{copy} (host x{after})")
 
         # --- Items > Miscellaneous; A on the silver key is refused ------------------------------
-        open_page(b, "l2k", "Items", ITEMS_ROW["Miscellaneous"])
         # The stock screen offers no action on a quest item (L2 15:31Z): A sends
         # nothing and the key stays. A command, if one is sent, must be refused.
+        # The count is read before the page opens (an open page pauses the host).
         key_before = (snapshot(a, "l2k0") or (None, {}))[1].get(keyitem, (0,))[0]
+        open_page(b, "l2k", "Items", ITEMS_ROW["Miscellaneous"])
         cmd, ack = press_a_on_entry(a, b, "l2k", 0)
         key_after = (snapshot(a, "l2k") or (None, {}))[1].get(keyitem, (0,))[0]
         ok = key_after == key_before >= 1 and (cmd is None or (ack and "no:questitem" in ack))
