@@ -87,6 +87,8 @@ REXCVAR_DEFINE_BOOL(coop_kit_redirect_abilities, true, "Network",
                     "Co-op kit (partner): the wheel's Abilities row opens the henchman abilities");
 REXCVAR_DEFINE_BOOL(coop_kit_redirect_kick, true, "Network",
                     "Co-op kit (partner): the wheel's Kick row does nothing");
+REXCVAR_DEFINE_BOOL(coop_kit_log_events, false, "Network",
+                    "Co-op kit test (partner): log every pause-menu event (type, name) at info level");
 REXCVAR_DEFINE_BOOL(coop_kit_no_host_pause, false, "Network",
                     "Co-op kit (partner): opening Items/Weapons/Clothing does not pause the host's game "
                     "(off: the stock pause; untested)");
@@ -832,7 +834,10 @@ extern "C" void sub_8240EAA0(PPCContext& ctx, uint8_t* base) {
     return;
   }
   if (type != ck::kPageChosen || !str) {
-    REXSYS_DEBUG("[coopkit] pause page event type {} name '{}'", type, name);
+    if (REXCVAR_GET(coop_kit_log_events))
+      REXSYS_INFO("[coopkit] pause page event type {} name '{}'", type, name);
+    else
+      REXSYS_DEBUG("[coopkit] pause page event type {} name '{}'", type, name);
     return __imp__sub_8240EAA0(ctx, base);
   }
   const ck::PageRoute route = ck::RoutePage(

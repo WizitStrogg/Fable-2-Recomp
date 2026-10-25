@@ -3,6 +3,7 @@
 
   python tools/coop_kit_l34.py l3   end to end, the actions by buttons only
   python tools/coop_kit_l34.py l4   host saves, both restart, continue: kit kept
+  python tools/coop_kit_l34.py quit the partner's Save row -> the henchman quit question (No, then Yes)
 
 L3 (evidence research/002-evidence/l3/): the console is used only to give player 2
 the test kit and to read the host's snapshot; every action is a button press.
@@ -259,6 +260,77 @@ def p2file_total(slot):
     return total, text
 
 
+def run_quit():
+    """The partner's Save row -> the henchman quit question (coordinator 17:44Z):
+    a) No: B (twice), then Start, each judged by the host resuming; b) Yes: the
+    partner leaves to its main menu, the host takes the partner's leaving (001's
+    partner-loss path); c) every pause-menu event logged. The partner never saves:
+    wt002-b\\saves must not change."""
+    out_dir("lq")
+    a, b = e2e.Game("wt002-a", "host"), e2e.Game("wt002-b", "partner")
+    l2.HOST[0] = a
+    a.start()
+    b.start()
+    try:
+        if not start_and_join(a, b, "lq"):
+            return
+        time.sleep(6)
+        console(b, "coop_kit_redirect_save true")
+        console(b, "coop_kit_log_events true")
+        b_saves = os.path.join(e2e.ROOT, r"wt002-b\saves")
+        saves0 = tree_hashes(b_saves)
+
+        def open_question(tag):
+            n = b.count(r"\[coopkit\] pause page 'Saving' \(Save row\) chosen: henchman quit")
+            open_wheel(b, tag)  # the cursor ends on Save (row 0)
+            key("E")
+            ok = b.wait(f"{tag}: Save opens the henchman quit question",
+                        r"\[coopkit\] pause page 'Saving' \(Save row\) chosen: henchman quit", n, 8)
+            time.sleep(2.5)
+            b.shot(f"{tag}_question.png")
+            a.shot(f"{tag}_host.png")
+            return ok
+
+        # a) No.
+        closed_by = None
+        if open_question("lqa"):
+            for i, k in enumerate(("B", "B", "Escape")):
+                n_r = a.count(r"\[coopkit\] host: game resumed")
+                key(k)
+                time.sleep(4)
+                b.shot(f"lqa_after_{i}_{k}.png")
+                if l2.host_resumed_since(a, n_r):
+                    closed_by = f"{k} (press {i + 1})"
+                    if k == "B":  # back on the wheel: one more B closes it (Start closed it all)
+                        key("B")
+                        time.sleep(1.5)
+                    break
+        note("PASS" if closed_by else "FAIL",
+             f"lqa: the quit question closes on No ({closed_by or 'not by B, B or Start'}); the host resumed")
+        if closed_by and closed_by.startswith("Escape"):
+            note("INFO", "lqa: B did not close it; Start did (the whole pause menu)")
+
+        # b) Yes (the end of this session for the partner).
+        if closed_by:
+            open_question("lqb")
+        n_state = b.count(r"\[state\].*-> (PressAScreen|MainMenu)")
+        n_lost = a.count(r"host: partner .* lost")
+        key("E")
+        b.wait("lqb: Yes takes the partner to its main menu", r"\[state\].*-> (PressAScreen|MainMenu)", n_state, 60)
+        b.shot("lqb_partner_after_yes.png")
+        a.wait("lqb: the host takes the partner's leaving", r"host: partner .* lost", n_lost, 120)
+        a.shot("lqb_host_after_yes.png")
+        saves1 = tree_hashes(b_saves)
+        changed = sorted(p for p in set(saves0) | set(saves1) if saves0.get(p) != saves1.get(p))
+        note("PASS" if not changed else "FAIL", f"lq: wt002-b\\saves unchanged (changed: {changed})")
+        events = sorted({re.search(r"type (\d+) name '([^']*)'", l).groups()
+                         for l in b.lines() if "[coopkit] pause page event type" in l
+                         and "MenuScroll" not in l})
+        note("INFO", f"lq: pause-menu events seen on the partner (type, name): {events}")
+    finally:
+        stop_and_keep(a, b, "")
+
+
 def host_save(a, tag):
     """The host's own pause menu: Save row (row 0) -> Save -> confirm."""
     n = a.count(r"\[content\] close root=Save")
@@ -393,6 +465,8 @@ if __name__ == "__main__":
         run_l23()
     elif mode == "l4":
         run_l4()
+    elif mode == "quit":
+        run_quit()
     else:
         print(__doc__)
         sys.exit(2)

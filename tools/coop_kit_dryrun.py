@@ -139,7 +139,10 @@ def key(name, hold_ms=60):
         elif name == "E":
             page = WHEEL[m[1]]
             route = {"Abilities": "henchman abilities", "Kick": "ignored", "Save": "henchman quit"}.get(page, "as is")
-            partner().say(f"pause page '{page}' chosen: {route}")
+            if page == "Save":  # the real line names the Save row's own event
+                partner().say("pause page 'Saving' (Save row) chosen: henchman quit")
+            else:
+                partner().say(f"pause page '{page}' chosen: {route}")
             if page == "Kick":
                 return
             W.menu = ["list", page, 0] if page in LISTS else ["page", page]
@@ -167,6 +170,14 @@ def key(name, hold_ms=60):
                 partner().say(f"partner: command {W.seq} {op} {rec}")
                 W.queue.append((W.seq, op, rec))
     elif kind == "page":
+        if name == "E" and m[1] == "Save":  # Yes on the quit question: the partner leaves
+            W.menu = []
+            W.paused = False
+            partner().log_lines.append("[info] [sys] [state] boot=1: InGame -> MainMenu")
+            host().say("host: partner User lost (quiet 5 s), saving")
+            return
+        if name == "B" and m[1] == "Save" and os.environ.get("DRYRUN_QUIT_B_DEAD"):
+            return  # the 17:14Z behaviour: B does nothing on the quit question
         if name == "B":
             W.menu = ["wheel", WHEEL.index(m[1]) if m[1] in WHEEL else 1]
             set_pause(False)
@@ -265,7 +276,8 @@ def main():
         return real_open(p, *a, **k)
 
     builtins.open = fake_open
-    {"l2": lambda: l2.run(), "l23": l34.run_l23, "l3": l34.run_l3, "l4": l34.run_l4}[mode]()
+    {"l2": lambda: l2.run(), "l23": l34.run_l23, "l3": l34.run_l3, "l4": l34.run_l4,
+     "quit": l34.run_quit}[mode]()
     fails = [r for r in e2e.results if r.startswith("FAIL")]
     print(f"\n=== dry run {mode}: {len(fails)} FAIL(s); partner menu at the end: {W.menu or 'closed'}; "
           f"host paused: {W.paused}")
