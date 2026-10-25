@@ -61,7 +61,7 @@ def moving(g, tag):
 def start_and_join(a, b, tag, host_row="Host: new co-op campaign"):
     for g in (a, b):
         g.n_menu = g.count(r"main menu: Co-op entry added")
-        g.past_title()
+        l2.past_title(g)
     e2e.menu_then_coop(a, tag, a.n_menu)
     if host_row.startswith("Host: new"):
         e2e.host_new_campaign(a, tag)

@@ -48,6 +48,26 @@ def key(name, hold_ms=60):
     e2e.key(name, hold_ms)
 
 
+def past_title(g, tries=3):
+    """e2e's past_title, retried only while the log shows the title was NOT passed
+    (a press after it passed would start the stock New Game). L2 of 14:45Z: the
+    partner's one press was lost while it idled into the attract movie."""
+    g.past_title()
+    for i in range(tries):
+        if g.count(r"title passed"):
+            return True
+        # Wait for the menu (not the movie), then one more press.
+        t = time.time()
+        while time.time() - t < 60 and not re.search(r"-> MainMenu \(", (last(g, r"\[state\]") or "")):
+            time.sleep(1)
+        time.sleep(2)
+        focus(g.hwnd)
+        note("INFO", f"{g.who}: title not passed; press {i + 2}")
+        g.press("E")
+        g.wait("title A passes to the menu (retry)", r"title passed", 0, 8)
+    return bool(g.count(r"title passed"))
+
+
 def down(n, pause=0.5):
     for _ in range(n):
         key("Down")
@@ -123,7 +143,7 @@ def run():
     try:
         for g in (a, b):
             g.n_menu = g.count(r"main menu: Co-op entry added")
-            g.past_title()
+            past_title(g)
         e2e.menu_then_coop(a, "l2", a.n_menu)
         e2e.host_new_campaign(a, "l2")
         e2e.menu_then_coop(b, "l2", b.n_menu)
