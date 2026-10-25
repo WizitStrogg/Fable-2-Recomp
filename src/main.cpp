@@ -20,6 +20,8 @@
 #include "fable2_coop_joinscreen.h"
 // Native "Co-op" main-menu entry (the only way into co-op).
 #include "fable2_coop_mainmenu.h"
+// Co-op kit (feature 002): player 2's own inventory from the pause menu.
+#include "fable2_coop_kit.h"
 
 #include "fable_2_app.h"
 #include "fps_meter.h"
