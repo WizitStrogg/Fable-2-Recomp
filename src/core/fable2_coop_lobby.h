@@ -539,11 +539,13 @@ inline uint16_t injected_now() {
 inline void input_filter(uint32_t user_index, rex::input::X_INPUT_STATE* state) {
   fable2::coopcam::input_filter(user_index, state);
   if (!state || user_index != 0) return;
-  const uint16_t now = state->gamepad.buttons;
+  // Injected presses (our own, and the test input source) count like the pad's,
+  // also for the lobby panel.
+  const uint16_t inj = injected_now();
+  const uint16_t now = static_cast<uint16_t>(state->gamepad.buttons | inj);
   if (!g_open.load()) {
     g_prev_buttons = now;
-    if (const uint16_t inj = injected_now())
-      state->gamepad.buttons.set(static_cast<uint16_t>(now | inj));
+    if (inj) state->gamepad.buttons.set(now);
     return;
   }
   const uint16_t pressed = now & ~g_prev_buttons;

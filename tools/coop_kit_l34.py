@@ -31,8 +31,8 @@ from PIL import Image, ImageChops
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import coop_ship_e2e as e2e  # noqa: E402
+import coop_kit_l2 as l2  # noqa: E402  (installs the test input source first)
 import coop_kit_l1 as l1  # noqa: E402
-import coop_kit_l2 as l2  # noqa: E402
 
 note, console, focus = e2e.note, e2e.console, e2e.focus
 key, down, open_wheel, close_menus, open_page = l2.key, l2.down, l2.open_wheel, l2.close_menus, l2.open_page
