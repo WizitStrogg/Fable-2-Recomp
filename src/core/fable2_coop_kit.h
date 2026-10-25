@@ -304,9 +304,11 @@ struct HostSide {
   std::optional<Command> running;  // the command whose Lua is queued or retried
   int64_t first_try_ms = 0, next_try_ms = 0;
   bool lua_queued = false;
+  int64_t lua_queued_ms = 0;
   uint32_t rev = 0;
   int64_t next_snapshot_ms = 0;
   bool snapshot_queued = false;
+  int64_t snapshot_queued_ms = 0;
   std::string last_state;
 };
 struct JoinerSide {
@@ -356,7 +358,10 @@ inline void queue_snapshot(HostSide& h) {
   std::string chunk = lib;
   chunk += "local hench = GetPlayerHenchman()\n";
   chunk += "if hench and hench:IsAlive() then print(CoopKit.Snapshot(hench, " + std::to_string(h.rev) + ")) end\n";
-  if (fable2::luaconsole::RunChunk(chunk)) h.snapshot_queued = true;
+  if (fable2::luaconsole::RunChunk(chunk)) {
+    h.snapshot_queued = true;
+    h.snapshot_queued_ms = now_ms();
+  }
 }
 
 // Host: queue CoopKit.Apply for the running command (result via OnResultLine).
@@ -371,10 +376,35 @@ inline void queue_apply(HostSide& h) {
            c.rec + "') end\n";
   chunk += "print('COOPKITRES|" + std::to_string(c.seq) + "|' .. tostring(res))\n";
   h.lua_queued = fable2::luaconsole::RunChunk(chunk);
+  h.lua_queued_ms = now_ms();
 }
+
+// A queued chunk whose line never came back (launch 1: one snapshot was lost
+// while console chunks were queued, which held the acks for 2 minutes) is
+// given up after this long and queued again.
+constexpr int64_t kChunkLostMs = 5000;
 
 inline void host_tick(const lobby::LobbyStatus& s, int64_t now) {
   auto& h = host();
+  if (h.snapshot_queued && now - h.snapshot_queued_ms > kChunkLostMs) {
+    REXSYS_WARN("[coopkit] host: snapshot rev {} did not come back; queuing a new one", h.rev);
+    h.snapshot_queued = false;
+    h.next_snapshot_ms = 0;
+  }
+  if (h.lua_queued && now - h.lua_queued_ms > kChunkLostMs) {
+    h.lua_queued = false;
+    if (h.running && h.running->op == Op::kUse) {
+      // Using is not idempotent (a second run drinks a second potion): never re-run it.
+      REXSYS_WARN("[coopkit] host: command {} (use) result did not come back; not retried", h.running->seq);
+      h.applier.Done(h.running->seq, "no:fail");
+      h.running.reset();
+      h.next_snapshot_ms = 0;
+    } else {
+      REXSYS_WARN("[coopkit] host: command {} result did not come back; trying again",
+                  h.running ? h.running->seq : 0);
+      h.next_try_ms = now;
+    }
+  }
   // The partner's newest command list.
   const lobby::PeerData* best = nullptr;
   const auto cmds = lobby::GetPeerData("kit_cmd");
@@ -434,7 +464,7 @@ inline void OnStateLine(std::string_view line) {
   auto& h = host();
   h.snapshot_queued = false;
   const auto k = ParseKitState(line);
-  if (!k) return;
+  if (!k || k->rev == 0) return;  // rev 0 = a console `luafile coop_kit`, not the channel's
   const std::string value(line);
   if (value != h.last_state) {
     h.last_state = value;
@@ -486,7 +516,7 @@ inline void joiner_tick(int64_t /*now*/) {
       for (const auto& r : j.queue.OnAck(*a)) REXSYS_INFO("[coopkit] command {}: {} ({})", r.seq, r.res, ReasonText(r.res));
   for (const auto& d : lobby::GetPeerData("kit_state")) {
     auto k = ParseKitState(d.value);
-    if (!k || (j.state && k->rev <= j.state->rev && k->rev != 0)) continue;
+    if (!k || k->rev == 0 || (j.state && k->rev <= j.state->rev)) continue;
     j.state = *k;
   }
   if (j.state && j.state->rev != j.mirrored_rev && REXCVAR_GET(coop_kit_mirror)) {
@@ -639,6 +669,19 @@ extern "C" void sub_8240EAA0(PPCContext& ctx, uint8_t* base) {
     REXSYS_INFO("[coopkit] pause page event type {} name '{}'", type, name);
   }
   __imp__sub_8240EAA0(ctx, base);
+}
+
+// Wheel builder (r3 = pause menu, r4 = 1 full / 0 henchman). Launch 1: the
+// partner's Start does not go through sub_82583340 (its caller
+// sub_82846078 always passes 0), so the partner's choice is made here.
+extern "C" void __imp__sub_8240F040(PPCContext& ctx, uint8_t* base);
+extern "C" void sub_8240F040(PPCContext& ctx, uint8_t* base) {
+  if ((ctx.r4.u32 & 0xFF) == 0 && fable2::coopkit::joiner_active()) {
+    if (fable2::coopkit::g_wheel_logged.fetch_add(1) < 20)
+      REXSYS_INFO("[coopkit] pause menu: full wheel for player 2 (builder)");
+    ctx.r4.u64 = 1;
+  }
+  __imp__sub_8240F040(ctx, base);
 }
 
 // r3 = player manager; returns 1 when multiplayer is active and the local
