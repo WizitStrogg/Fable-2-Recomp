@@ -216,7 +216,9 @@ class Game:
 
     def press(self, name):
         if self.test_input:
-            self.send(f"press {dict(E='A').get(name, name)} 120")  # E is A on Josh's keyboard map
+            # 60 ms: a 120 ms hold sometimes moved the menu two rows (boots,
+            # 2026-10-25: Down, Down landed on Language, past Co-op).
+            self.send(f"press {dict(E='A').get(name, name)} 60")  # E is A on Josh's keyboard map
             time.sleep(0.45)
             return
         focus(self.hwnd)
@@ -1045,14 +1047,17 @@ def console(g, command):
 def read_purses(a, b, tag):
     """Host: its hero and its henchman copy; partner: its own purse (the one its
     screen shows). Returns (host, host's henchman copy, partner) or None."""
-    na, nb = a.count(r"PURSECHK host"), b.count(r"PURSECHK partner")
+    # The print itself ("[lua] PURSECHK host 150 150"), not the test-input echo
+    # of the command, which arrives first (boots, 2026-10-25: int('..Money...')).
+    ph, pp = r"\[lua\] PURSECHK host -?\d", r"\[lua\] PURSECHK partner -?\d"
+    na, nb = a.count(ph), b.count(pp)
     console(a, "lua print('PURSECHK host '..Money.Get(GetPlayerHero())..' '..Money.Get(GetPlayerHenchman()))")
     console(b, "lua print('PURSECHK partner '..Money.Get(GetPlayerHenchman()))")
-    if not (a.wait(f"{tag}: host purses read", r"PURSECHK host", na, 15) and
-            b.wait(f"{tag}: partner purse read", r"PURSECHK partner", nb, 15)):
+    if not (a.wait(f"{tag}: host purses read", ph, na, 15) and
+            b.wait(f"{tag}: partner purse read", pp, nb, 15)):
         return None
-    h = [l for l in a.lines() if "PURSECHK host" in l][-1].split("PURSECHK host ")[1].split()
-    p = [l for l in b.lines() if "PURSECHK partner" in l][-1].split("PURSECHK partner ")[1].split()
+    h = [l for l in a.lines() if re.search(ph, l)][-1].split("PURSECHK host ")[1].split()
+    p = [l for l in b.lines() if re.search(pp, l)][-1].split("PURSECHK partner ")[1].split()
     return int(h[0]), int(h[1]), int(p[0])
 
 
