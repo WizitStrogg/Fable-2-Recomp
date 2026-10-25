@@ -125,11 +125,16 @@ def key(name, hold_ms=60):
         if name == "Escape":
             W.menu = ["wheel", 1]
             partner().say("pause menu: full wheel for player 2 (builder)")
+            partner().say("partner menu: full wheel built (sub_8240F040)")
         return
     kind = m[0]
-    if name == "Escape":  # Start closes the whole menu
+    if name == "Escape":  # Start closes the whole menu (002 fix: B until the pause screen exits)
+        if os.environ.get("DRYRUN_START_BROKEN"):
+            return  # the 16:13 bug: Start does nothing on the open full wheel
+        partner().say("partner: Start on the open full wheel -> B until it closes")
         W.menu = []
         set_pause(False)
+        partner().say("partner: full wheel closed by Start (2 B)")
         return
     if kind == "wheel":
         if name in ("Up", "Down"):

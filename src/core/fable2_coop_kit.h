@@ -88,6 +88,8 @@ REXCVAR_DEFINE_BOOL(coop_kit_redirect_abilities, true, "Network",
                     "Co-op kit (partner): the wheel's Abilities row opens the henchman abilities");
 REXCVAR_DEFINE_BOOL(coop_kit_redirect_kick, true, "Network",
                     "Co-op kit (partner): the wheel's Kick row does nothing");
+REXCVAR_DEFINE_BOOL(coop_kit_start_closes, true, "Network",
+                    "Co-op kit (partner): Start closes the full pause wheel (B is pressed until it closes)");
 REXCVAR_DEFINE_BOOL(coop_kit_log_events, false, "Network",
                     "Co-op kit test (partner): log every pause-menu event (type, name) at info level");
 REXCVAR_DEFINE_BOOL(coop_kit_no_host_pause, false, "Network",
@@ -651,11 +653,76 @@ inline void SendCommand(Op op, uint32_t id) {
   REXSYS_INFO("[coopkit] partner: command {} {} {}", seq, OpName(op), IdToHex(id));
 }
 
+// --- Start closes the partner's full wheel ------------------------------------------------
+// The partner's Start opens the wheel (sub_82846078 -> the builder), but a second
+// Start does not close our full wheel the way it closes the stock henchman wheel
+// (perf thread 16:13: the host stayed paused; l2_try2 10:00:36: it rebuilt the
+// wheel). B closes it at every level, so while the wheel is up a new Start is
+// kept from the game and B is pressed until the pause screen exits.
+//   up:   the forced full wheel (builder), the pause screen entered (sub_82583340),
+//         a page's PauseGame (sub_82336D70);
+//   down: the pause screen's exit (sub_825832B0, which calls UnpauseGame).
+// A B that brings no menu event within 1.2 s means the wheel was not up after
+// all: the flag drops and the Start is given back.
+constexpr uint16_t kPadStart = 0x0010, kPadB = 0x2000;
+constexpr int kStartBs = 6;
+inline std::atomic<bool> g_menu_up{false}, g_mask_start{false};
+inline std::atomic<int> g_b_left{0};
+inline std::atomic<int64_t> g_menu_event_ms{0}, g_next_b_ms{0}, g_close_from_ms{0};
+inline uint16_t g_prev_pad = 0;
+inline void menu_event(bool up, const char* what) {
+  if (up) g_menu_up = true;
+  else g_menu_up = false;
+  g_menu_event_ms = fable2::f5lua::steady_ms();
+  REXSYS_INFO("[coopkit] partner menu: {}", what);  // once per menu action: not capped
+}
+// Input thread: pad 0 as the game will see it (fable2_coop_lobby.h).
+inline uint16_t pad_hook(uint16_t buttons) {
+  const uint16_t pressed = buttons & ~g_prev_pad;
+  g_prev_pad = buttons;
+  if (!(buttons & kPadStart)) g_mask_start = false;  // kept away until released
+  if (!REXCVAR_GET(coop_kit_start_closes) || !joiner_active()) return buttons;
+  if ((pressed & kPadStart) && g_menu_up.load() && g_b_left.load() == 0) {
+    g_mask_start = true;
+    g_close_from_ms = fable2::f5lua::steady_ms();
+    g_next_b_ms = 0;
+    g_b_left = kStartBs;
+    REXSYS_INFO("[coopkit] partner: Start on the open full wheel -> B until it closes");
+  }
+  if (g_mask_start.load()) buttons &= ~kPadStart;
+  return buttons;
+}
+// Render thread, every frame.
+inline void start_close_tick() {
+  if (g_b_left.load() <= 0) return;
+  const int64_t now = fable2::f5lua::steady_ms();
+  if (!g_menu_up.load()) {
+    REXSYS_INFO("[coopkit] partner: full wheel closed by Start ({} B)", kStartBs - g_b_left.load());
+    g_b_left = 0;
+    return;
+  }
+  if (g_b_left.load() < kStartBs && now - g_close_from_ms.load() > 1200 &&
+      g_menu_event_ms.load() < g_close_from_ms.load()) {
+    REXSYS_WARN("[coopkit] partner: B brought no menu event; the wheel was not up: Start given back");
+    g_menu_up = false;
+    g_b_left = 0;
+    fable2::cooplobby::InjectPress(kPadStart, 0, 80);
+    return;
+  }
+  if (now < g_next_b_ms.load()) return;
+  if (g_b_left.fetch_sub(1) <= 0) return;
+  if (g_b_left.load() == 0 && g_menu_up.load())
+    REXSYS_WARN("[coopkit] partner: {} B and the full wheel is still up", kStartBs);
+  fable2::cooplobby::InjectPress(kPadB, 0, 80);
+  g_next_b_ms = now + 400;
+}
+
 inline int64_t g_next_tick_ms = 0;
 inline void (*g_prev_frame_hook)() = nullptr;
 inline void OnFrame() {
   if (g_prev_frame_hook) g_prev_frame_hook();
   if (!REXCVAR_GET(coop_kit)) return;
+  start_close_tick();
   const int64_t now = now_ms();
   if (now < g_next_tick_ms) return;
   g_next_tick_ms = now + kTickMs;
@@ -688,6 +755,7 @@ inline bool Install() {
   fable2::luaconsole::AddLineHandler("COOPKIT:v1", OnStateLine);
   g_prev_frame_hook = fable2::f5lua::g_frame_hook;
   fable2::f5lua::g_frame_hook = &OnFrame;
+  fable2::cooplobby::g_game_pad_hook = &pad_hook;
   return true;
 }
 inline const bool g_installed = Install();
@@ -713,6 +781,7 @@ extern "C" void sub_82583340(PPCContext& ctx, uint8_t* base) {
   fable2::coopkit::t_in_pause_open = on;
   if (on && fable2::coopkit::g_wheel_logged.fetch_add(1) < 20)
     REXSYS_INFO("[coopkit] pause menu: full wheel for player 2");
+  if (on) fable2::coopkit::menu_event(true, "pause screen entered (sub_82583340)");
   __imp__sub_82583340(ctx, base);
   fable2::coopkit::t_in_pause_open = false;
   if (on) fable2::f5lua::request_native([](PPCContext& c, uint8_t* b) { fable2::coopkit::log_probe(c, b, "pause"); });
@@ -850,7 +919,22 @@ extern "C" void sub_82336D70(PPCContext& ctx, uint8_t* base) {
     REXSYS_INFO("[coopkit] partner page opened without the game pause (coop_kit_no_host_pause)");
     return;
   }
+  if (fable2::coopkit::joiner_active()) fable2::coopkit::menu_event(true, "PauseGame (sub_82336D70)");
   __imp__sub_82336D70(ctx, base);
+}
+
+// sub_82336F98(r3 = screen manager) is the game's UnpauseGame (GUI:OnExit());
+// logged only. sub_825832B0 is the pause screen's exit: it calls UnpauseGame and
+// is the "down" signal of the partner's wheel (Start closes it, above).
+extern "C" void __imp__sub_82336F98(PPCContext& ctx, uint8_t* base);
+extern "C" void sub_82336F98(PPCContext& ctx, uint8_t* base) {
+  if (fable2::coopkit::joiner_active()) REXSYS_INFO("[coopkit] partner menu: UnpauseGame (sub_82336F98)");
+  __imp__sub_82336F98(ctx, base);
+}
+extern "C" void __imp__sub_825832B0(PPCContext& ctx, uint8_t* base);
+extern "C" void sub_825832B0(PPCContext& ctx, uint8_t* base) {
+  __imp__sub_825832B0(ctx, base);
+  if (fable2::coopkit::joiner_active()) fable2::coopkit::menu_event(false, "pause screen exit (sub_825832B0)");
 }
 
 extern "C" void __imp__sub_8240EAA0(PPCContext& ctx, uint8_t* base);
@@ -910,6 +994,7 @@ extern "C" void sub_8240F040(PPCContext& ctx, uint8_t* base) {
   if ((ctx.r4.u32 & 0xFF) == 0 && fable2::coopkit::joiner_active()) {
     if (fable2::coopkit::g_wheel_logged.fetch_add(1) < 20)
       REXSYS_INFO("[coopkit] pause menu: full wheel for player 2 (builder)");
+    fable2::coopkit::menu_event(true, "full wheel built (sub_8240F040)");
     ctx.r4.u64 = 1;
   }
   __imp__sub_8240F040(ctx, base);

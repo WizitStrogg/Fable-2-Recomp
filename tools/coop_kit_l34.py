@@ -223,6 +223,45 @@ def l3_steps(a, b):
          f"({ack_h and ack_h.split('] ', 1)[-1]})")
     a.shot("l3z_host_end.png")
     b.shot("l3z_partner_end.png")
+    start_closes(a, b)
+
+
+def start_closes(a, b):
+    """Start closes the partner's full wheel (perf thread 16:13: it stayed up and the
+    host stayed paused): from the wheel itself, then from inside the Items page,
+    where the host must also resume. Then Start opens it again and B closes it."""
+    closed = r"\[coopkit\] partner: full wheel closed by Start"
+    # From the wheel.
+    n = b.count(closed)
+    open_wheel(b, "l3st_wheel")
+    time.sleep(1)
+    key("Escape")
+    ok = b.wait("l3st: Start closes the full wheel", closed, n, 10)
+    time.sleep(1.5)
+    b.shot("l3st_wheel_after_start.png")
+    note("PASS" if ok else "FAIL", "l3st: Start on the partner's full wheel closes it")
+    # From inside a page: the host is paused while the page is up and must resume.
+    n = b.count(closed)
+    n_r = a.count(r"\[coopkit\] host: game resumed")
+    open_page(b, "l3st_items", "Items", ITEMS_ROW["Potions"])
+    time.sleep(2)
+    key("Escape")
+    ok = b.wait("l3st: Start closes the wheel from the Items page", closed, n, 12)
+    t = time.time()
+    while time.time() - t < 10 and not l2.host_resumed_since(a, n_r):
+        time.sleep(0.5)
+    resumed = l2.host_resumed_since(a, n_r)
+    b.shot("l3st_items_after_start.png")
+    a.shot("l3st_host_after_start.png")
+    note("PASS" if ok and resumed else "FAIL",
+         f"l3st: Start closes the wheel from inside the Items page (closed={ok}, host resumed={resumed})")
+    # Start still opens it afterwards, and B still closes it.
+    built = r"\[coopkit\] partner menu: full wheel built"
+    n_w = b.count(built)
+    open_wheel(b, "l3st_reopen")
+    note("PASS" if b.count(built) > n_w else "FAIL",
+         "l3st: Start opens the wheel again after a Start close")
+    close_menus(b, 0)
 
 
 # --- L4 -----------------------------------------------------------------------------------
