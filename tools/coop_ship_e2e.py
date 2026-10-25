@@ -266,7 +266,13 @@ class Game:
             self.proc.terminate()
             self.proc.wait(15)
 
-    def past_title(self):
+    def past_title(self, blind=False):
+        if blind:  # FABLE2_TEST_PROBE=blind: no state line will come; the stock title takes the A
+            time.sleep(20)
+            self.press("E")
+            note("INFO", f"{self.who}: probe kept blind; title A pressed after 20 s")
+            time.sleep(4)
+            return
         # 30 s, then A regardless: a blind state probe (wt002-b fable_2_026.log,
         # 2026-10-25) left the title waiting for minutes; the FAIL line stays.
         self.wait("menu detected in the ship build ([state] -> PressAScreen/MainMenu)",
@@ -1362,22 +1368,22 @@ def run_camera():
         relay.kill()
 
 
-def run_luaq():
+def run_luaq(host_probe=None):
     """The Lua console slot fix (b422910 + 9cace5a): the join (start flow), a
     normal purse step, then the partner pauses for ~20 s while the host gains and
     spends gold. Pass: the same total on all purses after the pause, each change
-    run exactly once, no chunk lost."""
+    run exactly once, no chunk lost. host_probe: FABLE2_TEST_PROBE for the host."""
     setup_tomls()
     relay_log = open(os.path.join(OUT, "relay_luaq.log"), "w")
     relay = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                                            "coop_relay.py")], stdout=relay_log, stderr=relay_log)
     a, b = Game("mod-a", "host"), Game("mod-b", "partner")
-    a.start({"FABLE2_TEST_INPUT": "1"})
+    a.start(dict({"FABLE2_TEST_INPUT": "1"}, **({"FABLE2_TEST_PROBE": host_probe} if host_probe else {})))
     b.start({"FABLE2_TEST_INPUT": "1"})
     try:
         for g in (a, b):
             g.n_menu = g.count(r"main menu: Co-op entry added")
-            g.past_title()
+            g.past_title(blind=g is a and host_probe == "blind")
         menu_then_coop(a, "luaq", a.n_menu)
         host_new_campaign(a, "luaq")
         menu_then_coop(b, "luaq", b.n_menu)
@@ -1460,9 +1466,11 @@ def run_boots():
     setup_tomls()
     for i in range(1, 5):
         tag = f"boot{i}"
+        # Boot 2 forces the stale latch on both copies (the 026 failure).
+        env = dict({"FABLE2_TEST_INPUT": "1"}, **({"FABLE2_TEST_PROBE": "stale"} if i == 2 else {}))
         a, b = Game("mod-a", "host"), Game("mod-b", "partner")
-        a.start({"FABLE2_TEST_INPUT": "1"})
-        b.start({"FABLE2_TEST_INPUT": "1"})
+        a.start(env)
+        b.start(env)
         try:
             for g in (a, b):
                 g.n_menu = g.count(r"main menu: Co-op entry added")
@@ -1472,15 +1480,36 @@ def run_boots():
                 stale = g.count(r"front-end value copy at .* went stale")
                 blind = g.count(r"state probe has no state")
                 note("INFO", f"{tag}: {g.who}: probe stale copies {stale}, menu fallback used {blind}")
+                if i == 2:
+                    forced = g.count(r"\[state\] test: the value copy at")
+                    note("PASS" if forced and stale else "FAIL",
+                         f"{tag}: {g.who}: forced stale copy re-hunted (forced {forced}, re-hunts {stale})")
         finally:
             for g in (a, b):
                 g.stop()
         time.sleep(5)
-    run_luaq()
+    # The host's probe kept blind for the whole front end: the in_main_menu
+    # fallback must still turn the host's Start into the game's Load Game.
+    run_luaq(host_probe="blind")
+    hosts = []
     for g in (Game("mod-a", "host"), Game("mod-b", "partner")):
         logs = sorted(glob.glob(os.path.join(g.dir, "logs", "*.log")), key=os.path.getmtime)
         g.log = logs[-1]
+        hosts.append(g)
         dcall_report(g, "boots_luaq")
+    a = hosts[0]
+    checks = [("probe kept blind", r"\[state\] test: probe kept blind"),
+              ("no state line after boot", None),
+              ("menu fallback warning", r"state probe has no state"),
+              ("Start loaded through Load Game", r"main menu: Load Game"),
+              ("player 2 spawned", r"player 2 spawned|campaign player 2 queued")]
+    for what, pat in checks:
+        if pat is None:
+            n = len([l for l in a.lines() if "[state]" in l and "boot=0ms" not in l and "test:" not in l])
+            note("PASS" if n == 0 else "FAIL", f"boots_blind: host: {what} ({n} state change(s))")
+        else:
+            n = a.count(pat)
+            note("PASS" if n else "FAIL", f"boots_blind: host: {what} ({n})")
 
 
 def run_luaq_kept():
