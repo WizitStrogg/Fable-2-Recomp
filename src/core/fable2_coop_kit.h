@@ -709,6 +709,19 @@ inline bool screen_action(PPCContext& ctx, uint8_t* base, const char* action, bo
   }
   const uint32_t id = t_screen_item ? t_screen_item : item_of(base, ctx.r4.u32);
   if (!id) return false;
+  // One press can reach the leaf twice (L2 16:00Z: sub_8257F0A0 wore the hat
+  // twice per A): the same action on the same item within 500 ms is one command.
+  static std::string last_action;
+  static uint32_t last_id = 0;
+  static int64_t last_ms = 0;
+  const int64_t now = now_ms();
+  if (id == last_id && last_action == action && now - last_ms < 500) {
+    ctx.r3.u64 = 0;
+    return true;
+  }
+  last_action = action;
+  last_id = id;
+  last_ms = now;
   t_screen_item = 0;  // one command per press
   if (const auto op = OpForScreenAction(action, worn_on_host(id))) SendCommand(*op, id);
   ctx.r3.u64 = 0;
@@ -728,12 +741,21 @@ extern "C" void sub_825A5A40(PPCContext& ctx, uint8_t* base) {
   __imp__sub_825A5A40(ctx, base);
   fable2::coopkit::t_screen_item = 0;
 }
-// The Clothing page's item handler (calls sub_825A71A0 with its own handle).
+// Callers of sub_825A71A0 with their own handle. L2 16:00Z: A on the hat on the
+// Clothing page wears it through sub_8257F0A0 (lr 0x8257F29C / 0x8257F468).
+// On the joiner its wear is player 2's, which the host owns either way.
 extern "C" void __imp__sub_825A7E98(PPCContext& ctx, uint8_t* base);
 extern "C" void sub_825A7E98(PPCContext& ctx, uint8_t* base) {
   const bool was = fable2::coopkit::t_in_screen;
   fable2::coopkit::t_in_screen = fable2::coopkit::joiner_active();
   __imp__sub_825A7E98(ctx, base);
+  fable2::coopkit::t_in_screen = was;
+}
+extern "C" void __imp__sub_8257F0A0(PPCContext& ctx, uint8_t* base);
+extern "C" void sub_8257F0A0(PPCContext& ctx, uint8_t* base) {
+  const bool was = fable2::coopkit::t_in_screen;
+  fable2::coopkit::t_in_screen = fable2::coopkit::joiner_active();
+  __imp__sub_8257F0A0(ctx, base);
   fable2::coopkit::t_in_screen = was;
 }
 extern "C" void __imp__sub_825A6020(PPCContext& ctx, uint8_t* base);
