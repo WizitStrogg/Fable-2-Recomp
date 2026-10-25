@@ -150,6 +150,11 @@ inline void request_run(std::string path) {
   g_queue.push_back(std::move(path));
   g_queued.store(g_queue.size());
 }
+// True while an entry for `path` still waits in the queue.
+inline bool is_queued(const std::string& path) {
+  std::lock_guard<std::mutex> l(g_queue_mtx);
+  return std::find(g_queue.begin(), g_queue.end(), path) != g_queue.end();
+}
 
 // Host directory that holds data/ (set from Fable2App::OnLoadXexImage), so
 // host code can write script files the game VFS reads.

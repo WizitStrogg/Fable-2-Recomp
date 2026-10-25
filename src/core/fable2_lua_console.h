@@ -14,7 +14,8 @@
 //     one of kSlots fixed files data/scripts/recomp/console_<n>.lua that ship
 //     with the build (so they are in dir.manifest from launch), round robin.
 //     CScriptManager::RunScript may load on a later frame, so a slot is not
-//     reused until kSlots more chunks were queued.
+//     reused until kSlots more chunks were queued, and never while an entry
+//     for it still waits in the run queue (a full queue refuses the chunk).
 //   * The path is queued to the F5 runner (fable2_f5_lua.h), which runs it on
 //     the guest main thread from the MainRenderLoop hook.
 //   * Lua's print() (both of the game's Lua runtimes) ends in CRT
@@ -168,8 +169,18 @@ inline bool RunChunk(const std::string& chunk) {
     REXSYS_ERROR("lua: game data folder not known yet");
     return false;
   }
-  const int slot = g_next_slot.fetch_add(1) % kSlots;
-  const std::string name = "console_" + std::to_string(slot) + ".lua";
+  // The run queue holds file names, so a slot rewritten while an older entry for
+  // it still waits would run the new text twice (L2 15:44Z: queued while the
+  // game was paused, one co-op kit command ran 7 times). Take a free slot only.
+  std::string name;
+  for (int tries = 0; tries < kSlots && name.empty(); ++tries) {
+    const std::string n = "console_" + std::to_string(g_next_slot.fetch_add(1) % kSlots) + ".lua";
+    if (!fable2::f5lua::is_queued("scripts/recomp/" + n)) name = n;
+  }
+  if (name.empty()) {
+    REXSYS_WARN("lua: all {} console slots are still waiting to run; not queued", kSlots);
+    return false;
+  }
   const auto file = recomp_dir() / name;
   {
     std::ofstream out(file, std::ios::binary | std::ios::trunc);
