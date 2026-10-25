@@ -106,16 +106,23 @@ def close_menus(b, backs):
         time.sleep(1)
         return True
     for i in range(backs + 4):
+        n_r = h.count(r"\[coopkit\] host: game resumed")
         key("B")
         t = time.time()
-        while time.time() - t < 3:
-            if h.count(r"\[coopkit\] host: game resumed") > b.n_resumed:
+        while time.time() - t < 4:
+            if host_resumed_since(h, n_r):
                 note("PASS", f"{b.who}: menus closed and the host resumed ({i + 1} B)")
                 time.sleep(1)
                 return True
             time.sleep(0.25)
     note("FAIL", f"{b.who}: the host did not resume after {backs + 4} B presses")
     return False
+
+
+def host_resumed_since(h, n_resumed):
+    """A resume newer than `n_resumed` lines, and the host's latest pause/resume line is that resume."""
+    lines = [l for l in h.lines() if "[coopkit] host: game paused" in l or "[coopkit] host: game resumed" in l]
+    return bool(lines) and "game resumed" in lines[-1] and sum("game resumed" in l for l in lines) > n_resumed
 
 
 def open_page(b, tag, page, sub_row):
@@ -234,11 +241,11 @@ def run(after=None):
                      f"the host (screenshot l2probe_host.png)")
         for _ in range(4):
             key("B")
-            time.sleep(2)
-            if not stock_pauses or a.count(r"\[coopkit\] host: game resumed") > n_r:
+            time.sleep(3)
+            if not stock_pauses or host_resumed_since(a, n_r):
                 break
         if stock_pauses:
-            note("PASS" if a.count(r"\[coopkit\] host: game resumed") > n_r else "FAIL",
+            note("PASS" if host_resumed_since(a, n_r) else "FAIL",
                  "probe: the host resumed when the stock henchman menu closed")
         console(b, "coop_kit true")
         time.sleep(3)

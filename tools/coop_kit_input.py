@@ -23,6 +23,7 @@ _games = {}  # hwnd -> folder
 _target = [None]
 _fallback = [False]
 _orig_key, _orig_focus, _orig_start, _orig_press = e2e.key, e2e.focus, e2e.Game.start, e2e.Game.press
+_orig_shot = e2e.Game.shot
 
 
 def _send(folder, name, hold_ms):
@@ -59,6 +60,16 @@ def _start(self):
     _games[self.hwnd] = self.dir
 
 
+def _shot(self, name):
+    # A screenshot focuses its window but must not move the press target
+    # (L2 of 15:18Z: after a.shot() the partner's B presses went to the host).
+    keep = _target[0]
+    try:
+        return _orig_shot(self, name)
+    finally:
+        _target[0] = keep
+
+
 def _press(self, name, *args):
     _target[0] = self.dir
     if not _send(self.dir, name, 60):
@@ -68,4 +79,4 @@ def _press(self, name, *args):
 def install():
     os.environ["FABLE2_TEST_INPUT"] = "1"
     e2e.key, e2e.focus = _key, _focus
-    e2e.Game.start, e2e.Game.press = _start, _press
+    e2e.Game.start, e2e.Game.press, e2e.Game.shot = _start, _press, _shot
