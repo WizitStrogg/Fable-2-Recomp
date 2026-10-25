@@ -788,6 +788,7 @@ namespace fable2::coopkit {
 constexpr uint32_t kHenchmanAbilitiesStr = 0x820B065C;  // "HenchmanAbilities" (image)
 constexpr uint32_t kHenchmanQuitStr = 0x820B0680;       // "HenchmanQuit" (image)
 constexpr uint32_t kPageChosen = 300;
+constexpr uint32_t kSaveRow = 301;  // the Save row's event, name "Saving"
 inline thread_local bool t_full_page_open = false;
 }  // namespace fable2::coopkit
 
@@ -816,6 +817,18 @@ extern "C" void sub_8240EAA0(PPCContext& ctx, uint8_t* base) {
     std::memcpy(name, reinterpret_cast<const void*>(ta::host_addr(base, str)), sizeof(name) - 1);
   for (char& c : name)
     if (c && (c < 32 || c > 126)) c = '?';
+  // The Save row sends type 301 "Saving", which the dispatcher ignores (L3 of
+  // 16:38Z: A on Save did nothing on the partner, so its full wheel had no way
+  // to quit). It becomes a page choice of "HenchmanQuit" for this call.
+  if (type == ck::kSaveRow && str && std::strcmp(name, "Saving") == 0 && REXCVAR_GET(coop_kit_redirect_save)) {
+    REXSYS_INFO("[coopkit] pause page 'Saving' (Save row) chosen: henchman quit");
+    ck::be32(base, ev + 4, ck::kPageChosen);
+    ck::be32(base, obj, ck::kHenchmanQuitStr);
+    __imp__sub_8240EAA0(ctx, base);
+    ck::be32(base, obj, str);
+    ck::be32(base, ev + 4, type);
+    return;
+  }
   if (type != ck::kPageChosen || !str) {
     REXSYS_DEBUG("[coopkit] pause page event type {} name '{}'", type, name);
     return __imp__sub_8240EAA0(ctx, base);
