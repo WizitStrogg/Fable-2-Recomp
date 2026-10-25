@@ -146,7 +146,8 @@ function CoopKit.Apply(entity, op, hex)
     end
     return (has(worn_list(entity), hex) == (op == "wear")) and "ok" or "no:pending"
   elseif op == "use" then
-    if item.cat == "ITEMS_KEY_ITEMS" then return "no:questitem" end
+    -- Launch 1: the silver key's category reads back as QUEST_ITEM.
+    if item.cat == "ITEMS_KEY_ITEMS" or item.cat:match("^QUEST") then return "no:questitem" end
     if item.cat ~= "ITEMS_POTIONS" and item.cat ~= "ITEMS_FOOD_AND_DRINK" then return "no:notyet" end
     if not OnCarriedActionUseBonusEffects then return "no:fail" end
     local before = item.count
