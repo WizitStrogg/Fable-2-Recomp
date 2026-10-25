@@ -101,6 +101,18 @@ def host_count(a, tag):
     return int(m.group(1)) if m else None
 
 
+def tree_hashes(root):
+    """Relative path -> sha256 for every file under root."""
+    import hashlib
+    out = {}
+    for d, _, files in os.walk(root):
+        for f in files:
+            p = os.path.join(d, f)
+            with open(p, "rb") as fh:
+                out[os.path.relpath(p, root)] = hashlib.sha256(fh.read()).hexdigest()
+    return out
+
+
 def press_entry(a, b, tag, row, op):
     return l2.press_a_on_entry(a, b, tag, row, op)
 
@@ -136,6 +148,8 @@ def run_l3():
         time.sleep(2)
 
         # Wheel rows that are not item pages.
+        b_saves = os.path.join(e2e.ROOT, r"wt002-b\saves")
+        saves0 = tree_hashes(b_saves)
         for page, want, tag, backs in (("Save", "henchman quit", "l3s", 1), ("Abilities", "henchman abilities", "l3ab", 1),
                                        ("Kick", "ignored", "l3kick", 0), ("Options", "as is", "l3opt", 1)):
             n = b.count(r"\[coopkit\] pause page '")
@@ -145,13 +159,19 @@ def run_l3():
             key("E")
             ok = b.wait(f"{tag}: {page} chosen on the partner", r"\[coopkit\] pause page '", n, 8)
             line = last(b, r"\[coopkit\] pause page '") if ok else ""
-            note("PASS" if ok and f"chosen: {want}" in line else "FAIL",
-                 f"{tag}: {page} -> {line.split('] ', 1)[-1] if line else 'no event'}")
+            routed = ok and f"chosen: {want}" in line
+            note("PASS" if routed else "FAIL", f"{tag}: {page} -> {line.split('] ', 1)[-1] if line else 'no event'}")
+            if page == "Save" and not routed:
+                key("B")  # the stock save menu may be open: back out at once, never confirm
+                time.sleep(1)
             time.sleep(2.5)
             b.shot(f"{tag}_after.png")  # Save: the henchman quit question; B cancels it, A is never pressed
             close_menus(b, backs)
         note("PASS" if not any("[content] close root=Save" in l for l in b.lines()) else "FAIL",
              "l3s: the partner never wrote a save")
+        saves1 = tree_hashes(b_saves)
+        changed = sorted(p for p in set(saves0) | set(saves1) if saves0.get(p) != saves1.get(p))
+        note("PASS" if not changed else "FAIL", f"l3s: wt002-b\\saves unchanged (changed: {changed})")
 
         # Item actions by buttons, with the host's own menu open at the same time.
         focus(a.hwnd)
@@ -224,6 +244,13 @@ def host_save(a, tag):
 
 def run_l4():
     out_dir("l4")
+    backup = os.path.join(e2e.OUT, "saves-before")
+    for side in ("wt002-a", "wt002-b"):
+        dst = os.path.join(backup, side)
+        if os.path.exists(dst):
+            sys.exit(f"{dst} already exists: keep the earlier backup, move it away first")
+        shutil.copytree(os.path.join(e2e.ROOT, side, "saves"), dst)
+    note("INFO", f"l4: saves backed up to {backup}")
     a, b = e2e.Game("wt002-a", "host"), e2e.Game("wt002-b", "partner")
     a.start()
     b.start()
