@@ -383,13 +383,6 @@ inline void run_native(PPCContext& ctx, uint8_t* base) {
   g_running = false;
 }
 
-// True when run_pending has something to do (a native task, a queued script
-// or the F5 file); without it run_pending returns at once.
-inline bool has_pending() {
-  return g_native_count.load(std::memory_order_relaxed) != 0 ||
-         g_queued.load(std::memory_order_relaxed) != 0 || g_f5_pending.load(std::memory_order_relaxed);
-}
-
 // Called by the dispatcher probe after the game's own call returned, at
 // dispatch depth 0. Runs the F5 file when latched, otherwise one queued script.
 inline void run_pending(PPCContext& ctx, uint8_t* base, const std::string& via) {
@@ -652,16 +645,14 @@ inline ThreadCount& my_thread_count() {
   return *tc;
 }
 
-// Entries into the game VM's luaD_call (any thread / on the VM thread /
-// outermost on the VM thread, among those checked / L->nCcalls reads, each a
-// VirtualQuery). Counted at entry only, so longjmp-safe.
-inline std::atomic<uint32_t> g_dcall_hits{0}, g_dcall_vm{0}, g_dcall_outer{0}, g_dcall_reads{0};
+// Entries into the game VM's luaD_call (any thread / outermost on the VM
+// thread / on the VM thread). Counted at entry only, so longjmp-safe.
+inline std::atomic<uint32_t> g_dcall_hits{0}, g_dcall_vm{0}, g_dcall_outer{0};
 
 std::string vm_report() {
   std::string out = "luaD_call " + std::to_string(g_dcall_hits.exchange(0)) + " (VM thread " +
                     std::to_string(g_dcall_vm.exchange(0)) + ", outermost " +
-                    std::to_string(g_dcall_outer.exchange(0)) + ", nCcalls reads " +
-                    std::to_string(g_dcall_reads.exchange(0)) + "), ";
+                    std::to_string(g_dcall_outer.exchange(0)) + "), ";
   for (auto& vm : g_vm_entries) {
     for (auto& e : vm) {
       out += std::string(e.via) + " " + std::to_string(e.hits.exchange(0)) + " (VM thread " +
@@ -715,24 +706,19 @@ extern "C" void sub_822DDF38(PPCContext& ctx, uint8_t* base) {  // other VM lua_
 // thread, outside any lua_pcall/lua_resume and LuaBind dispatch, no Lua is
 // running: the engine is about to start an outermost call, so drain there,
 // before it. Nothing is counted on the way out, so a longjmp cannot unbalance
-// anything. nCcalls is read (rdable2 is a VirtualQuery; every call took 13.8%
-// of the game thread) only when a drain could follow: nothing pending, or
-// inside a pcall/resume/dispatch, run_pending would do nothing.
+// anything.
 extern "C" void ProcessAndIncrementAndProcess3_82228C70(PPCContext& ctx, uint8_t* base) {
   using namespace fable2::f5lua;
   g_dcall_hits.fetch_add(1, std::memory_order_relaxed);
   if (current_thread_id() == g_lua_thread.load(std::memory_order_relaxed)) {
     g_dcall_vm.fetch_add(1, std::memory_order_relaxed);
     const uint32_t L = ctx.r3.u32;
-    if (L != 0 && g_vm_depth == 0 && g_dispatch_depth == 0 && has_pending()) {
-      g_dcall_reads.fetch_add(1, std::memory_order_relaxed);
-      if (ta::rdable2(base, L + 52, 2)) {
-        const uint8_t* p = reinterpret_cast<const uint8_t*>(ta::host_addr(base, L + 52));
-        const uint16_t n_ccalls = static_cast<uint16_t>((p[0] << 8) | p[1]);
-        if (n_ccalls == 0) {
-          g_dcall_outer.fetch_add(1, std::memory_order_relaxed);
-          run_pending(ctx, base, "luaD_call entry");
-        }
+    if (L != 0 && ta::rdable2(base, L + 52, 2)) {
+      const uint8_t* p = reinterpret_cast<const uint8_t*>(ta::host_addr(base, L + 52));
+      const uint16_t n_ccalls = static_cast<uint16_t>((p[0] << 8) | p[1]);
+      if (n_ccalls == 0) {
+        g_dcall_outer.fetch_add(1, std::memory_order_relaxed);
+        if (g_vm_depth == 0 && g_dispatch_depth == 0) run_pending(ctx, base, "luaD_call entry");
       }
     }
   }
