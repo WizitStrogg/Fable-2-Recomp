@@ -267,7 +267,8 @@ def run(after=None):
         # --- Clothing > Headgear lists the hat; A wears it -----------------------------------
         open_page(b, "l2h", "Clothing", CLOTHING_ROW["Headgear"])
         note("INFO", "l2h: Headgear list screenshot l2h_list.png (the hat must be listed)")
-        cmd, ack = press_a_on_entry(a, b, "l2h", 0, "wear")
+        # Headgear: row 0 is "No Head Gear", row 1 the hat (L2 15:31Z, l2h_after_a.png).
+        cmd, ack = press_a_on_entry(a, b, "l2h", 1, "wear")
         snap = snapshot(a, "l2h")
         note("PASS" if hat and hat in field(snap, "worn").split(",") else "FAIL",
              f"l2h: the host's player 2 wears the hat {hat} (worn={field(snap, 'worn')})")
@@ -290,9 +291,15 @@ def run(after=None):
 
         # --- Items > Miscellaneous; A on the silver key is refused ------------------------------
         open_page(b, "l2k", "Items", ITEMS_ROW["Miscellaneous"])
-        cmd, ack = press_a_on_entry(a, b, "l2k", 0, "use")
-        note("PASS" if ack and "no:questitem" in ack else "FAIL",
-             f"l2k: the host refused the quest item ({ack and ack.split('] ', 1)[-1]})")
+        # The stock screen offers no action on a quest item (L2 15:31Z): A sends
+        # nothing and the key stays. A command, if one is sent, must be refused.
+        key_before = (snapshot(a, "l2k0") or (None, {}))[1].get(keyitem, (0,))[0]
+        cmd, ack = press_a_on_entry(a, b, "l2k", 0)
+        key_after = (snapshot(a, "l2k") or (None, {}))[1].get(keyitem, (0,))[0]
+        ok = key_after == key_before >= 1 and (cmd is None or (ack and "no:questitem" in ack))
+        note("PASS" if ok else "FAIL",
+             f"l2k: the quest item stays: key x{key_before} -> x{key_after}, "
+             f"{'no command sent (stock screen)' if cmd is None else 'host answered ' + str(ack and ack.split('] ', 1)[-1])}")
 
         # --- Abilities -> henchman abilities; Kick ignored -----------------------------------
         for page, want, tag in (("Abilities", "henchman abilities", "l2ab"), ("Kick", "ignored", "l2kick")):
@@ -327,6 +334,10 @@ def run(after=None):
         for g in (a, b):
             if g.log:
                 shutil.copy(g.log, os.path.join(e2e.OUT, f"{g.who}.log"))
+        # Every result line also in a file (the 15:31Z run's captured output lost its last line).
+        with open(os.path.join(e2e.ROOT, "research", "002-evidence", "l2", "results.txt"), "w",
+                  encoding="utf-8") as f:
+            f.writelines(r + "\n" for r in e2e.results)
 
 
 if __name__ == "__main__":

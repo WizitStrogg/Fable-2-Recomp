@@ -134,7 +134,17 @@ function CoopKit.Apply(entity, op, hex)
   local name = "#" .. hex
   if op == "equip" then
     if item.cat ~= "WEAPONS" and not item.cat:match("^WEAPONS") then return "no:cannotuse" end
-    try("EquipWeaponOfType", WeaponSetManager.EquipWeaponOfType, entity, name)
+    -- L2 15:31Z: EquipWeaponOfType(entity, "#<id>") never took (the DLC sword
+    -- stayed in the bag for 30 s); the game's own scripts equip an inventory
+    -- weapon by its entity (WeaponSetManager.EquipWeapon(hero, weapon_entity)).
+    local melee0, ranged0 = weapons(entity)
+    if melee0 ~= hex and ranged0 ~= hex then
+      if WeaponSetManager.EquipWeapon then
+        try("EquipWeapon", WeaponSetManager.EquipWeapon, entity, item.entity)
+      else
+        try("EquipWeaponOfType", WeaponSetManager.EquipWeaponOfType, entity, name)
+      end
+    end
     local melee, ranged = weapons(entity)
     return (melee == hex or ranged == hex) and "ok" or "no:pending"
   elseif op == "wear" or op == "unwear" then
@@ -154,8 +164,13 @@ function CoopKit.Apply(entity, op, hex)
     local user = try("Create", function() return OnCarriedActionUseBonusEffects:Create(item.entity, entity) end)
     if not user then return "no:fail" end
     try("ApplyBonusEffects", function() user:ApplyBonusEffects() end)
-    try("RemoveItem", Inventory.RemoveItem, entity, item.entity)
+    -- L2 15:31Z: one use took two potions (2 -> 0): the effects already
+    -- consume the item, so it is removed here only if it is still there.
     local after = (collect(entity)[hex] or {count = 0}).count
+    if after >= before then
+      try("RemoveItem", Inventory.RemoveItem, entity, item.entity)
+      after = (collect(entity)[hex] or {count = 0}).count
+    end
     return after < before and "ok" or "no:fail"
   end
   return "no:fail"
