@@ -120,6 +120,7 @@ inline void add_coop_entry(PPCContext& ctx, uint8_t* base, const PPCContext& in)
     DestructRefCounted_82214F08(ctx, base);
   }
   ctx = saved;
+  fable2::coopfrontend::OnMenuBuilt();
   REXSYS_INFO("[coop] main menu: Co-op entry added");
 }
 

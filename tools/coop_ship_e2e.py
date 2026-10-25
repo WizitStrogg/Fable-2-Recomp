@@ -267,8 +267,10 @@ class Game:
             self.proc.wait(15)
 
     def past_title(self):
+        # 30 s, then A regardless: a blind state probe (wt002-b fable_2_026.log,
+        # 2026-10-25) left the title waiting for minutes; the FAIL line stays.
         self.wait("menu detected in the ship build ([state] -> PressAScreen/MainMenu)",
-                  r"\[state\].*-> (PressAScreen|MainMenu)", 0, 240)
+                  r"\[state\].*-> (PressAScreen|MainMenu)", 0, 30)
         time.sleep(5)
         # One press only: a retry that lands on the menu starts the stock New Game
         # (launch of 2026-10-24, the error path).
@@ -1433,6 +1435,54 @@ def run_luaq():
         relay.kill()
 
 
+def dcall_report(g, tag):
+    """The luaD_call minute lines: calls, nCcalls reads (each a VirtualQuery)."""
+    rows = [re.search(r"luaD_call (\d+) \(VM thread (\d+), outermost (\d+), nCcalls reads (\d+)\)", l)
+            for l in g.lines() if "last minute: luaD_call" in l]
+    rows = [tuple(int(x) for x in m.groups()) for m in rows if m]
+    if not rows:
+        note("FAIL", f"{tag}: {g.who}: no luaD_call minute lines with nCcalls reads")
+        return
+    busy = [r for r in rows if r[1] > 10000]
+    note("INFO", f"{tag}: {g.who}: per minute (calls, VM thread, outermost, reads): {rows}")
+    worst = max((r[3] for r in busy), default=0)
+    note("PASS" if busy and worst < 1000 else "FAIL",
+         f"{tag}: {g.who}: nCcalls reads at most {worst}/min over {len(busy)} busy minute(s) "
+         f"(before c405db4: one per VM-thread call, 162k-755k/min)")
+
+
+def run_boots():
+    """Boot-hang check (wt002-b fable_2_026.log): both copies cold-boot 4 times;
+    each boot must reach a menu state on the probe, pass the title, build the
+    menu with the Co-op entry and open the hub through the real menu. Then one
+    luaq run (it includes the host's Start and the partner's join) with the
+    luaD_call minute lines (nCcalls reads)."""
+    setup_tomls()
+    for i in range(1, 5):
+        tag = f"boot{i}"
+        a, b = Game("mod-a", "host"), Game("mod-b", "partner")
+        a.start({"FABLE2_TEST_INPUT": "1"})
+        b.start({"FABLE2_TEST_INPUT": "1"})
+        try:
+            for g in (a, b):
+                g.n_menu = g.count(r"main menu: Co-op entry added")
+                g.past_title()
+            for g in (a, b):
+                menu_then_coop(g, tag, g.n_menu)
+                stale = g.count(r"front-end value copy at .* went stale")
+                blind = g.count(r"state probe has no state")
+                note("INFO", f"{tag}: {g.who}: probe stale copies {stale}, menu fallback used {blind}")
+        finally:
+            for g in (a, b):
+                g.stop()
+        time.sleep(5)
+    run_luaq()
+    for g in (Game("mod-a", "host"), Game("mod-b", "partner")):
+        logs = sorted(glob.glob(os.path.join(g.dir, "logs", "*.log")), key=os.path.getmtime)
+        g.log = logs[-1]
+        dcall_report(g, "boots_luaq")
+
+
 def run_luaq_kept():
     """The kept / retry path (9cace5a): while the partner's pause holds, the host
     queues 12 numbered markers and a gold change (13 one-shots, 8 console slots):
@@ -1601,7 +1651,7 @@ def run_continue2():
 def main():
     os.makedirs(OUT, exist_ok=True)
     mode = sys.argv[1] if len(sys.argv) > 1 else "coop"
-    {"coop": run_coop, "solo": run_solo, "multi": run_multi, "menu": run_menu, "menu2": run_menu2, "err": run_err, "final": run_final, "last": run_last, "start": run_start, "purse": run_purse, "fps": run_fps, "combo": run_combo, "camera": run_camera, "luaq": run_luaq, "luaq_kept": run_luaq_kept, "continue2": run_continue2}[mode]()
+    {"coop": run_coop, "solo": run_solo, "multi": run_multi, "menu": run_menu, "menu2": run_menu2, "err": run_err, "final": run_final, "last": run_last, "start": run_start, "purse": run_purse, "fps": run_fps, "combo": run_combo, "camera": run_camera, "luaq": run_luaq, "luaq_kept": run_luaq_kept, "continue2": run_continue2, "boots": run_boots}[mode]()
     with open(os.path.join(OUT, f"results_{mode}.txt"), "w", encoding="utf-8") as f:
         f.write("\n".join(results) + "\n")
     return 0 if not any(r.startswith("FAIL") for r in results) else 1
