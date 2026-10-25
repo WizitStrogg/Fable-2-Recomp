@@ -354,6 +354,8 @@ def stop_and_keep(a, b, suffix):
     for g in (a, b):
         if g.log:
             shutil.copy(g.log, os.path.join(e2e.OUT, f"{g.who}{suffix}.log"))
+    with open(os.path.join(e2e.OUT, "results.txt"), "w", encoding="utf-8") as f:
+        f.writelines(r + "\n" for r in e2e.results)
 
 
 if __name__ == "__main__":
