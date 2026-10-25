@@ -48,9 +48,7 @@ int main() {
 
   // Host: in order, once, gap stops, new session restarts.
   HostApplier h;
-  std::vector<Command> list = {{"s1", 2, Op::kUse, "00000002"}};
-  CHECK(!h.Next(list));  // gap: seq 1 missing
-  list.insert(list.begin(), {"s1", 1, Op::kEquip, "00000001"});
+  std::vector<Command> list = {{"s1", 1, Op::kEquip, "00000001"}, {"s1", 2, Op::kUse, "00000002"}};
   auto n = h.Next(list);
   CHECK(n && n->seq == 1);
   CHECK(!h.Next(list));  // one in flight at a time
@@ -66,6 +64,19 @@ int main() {
   CHECK(n && n->sid == "s2" && n->seq == 1);
   h.Done(1, "ok");
   CHECK(h.MakeAck(6).sid == "s2" && h.MakeAck(6).upto == 1 && h.MakeAck(6).res.size() == 1);
+  CHECK(!h.Next({{"s2", 3, Op::kUse, "00000004"}}));  // gap inside a session: seq 2 missing
+  // A host that restarted while the partner's game kept running: the partner
+  // still lists seq 5 and 6 of its session (1-4 were acknowledged by the old
+  // host), so the fresh host starts there instead of waiting for seq 1.
+  HostApplier restarted;
+  const std::vector<Command> later = {{"s3", 6, Op::kUse, "00000006"}, {"s3", 5, Op::kWear, "00000005"}};
+  n = restarted.Next(later);
+  CHECK(n && n->sid == "s3" && n->seq == 5);
+  restarted.Done(5, "ok");
+  n = restarted.Next(later);
+  CHECK(n && n->seq == 6);
+  restarted.Done(6, "ok");
+  CHECK(!restarted.Next(later) && restarted.MakeAck(1).upto == 6);
 
   // Kit state round-trips; bad item entries are dropped.
   KitState k;

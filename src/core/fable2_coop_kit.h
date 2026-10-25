@@ -56,6 +56,7 @@
 #include "fable2_coop_busy.h"
 #include "fable2_coop_camera.h"
 #include "fable2_coop_campaign.h"
+#include "fable2_coop_frontend.h"
 #include "fable2_coop_kit_proto.h"
 #include "fable2_f5_lua.h"
 #include "fable2_lua_console.h"
@@ -332,7 +333,12 @@ struct HostSide {
   int64_t first_try_ms = 0, next_try_ms = 0;
   bool lua_queued = false;
   int64_t lua_queued_ms = 0;
-  uint32_t rev = 0;
+  // kit_state.rev only increases on the partner, so it starts at the wall
+  // clock: a host that restarts while the partner's game keeps running starts
+  // above its old revs (from 1, the partner ignored every new state).
+  uint32_t rev = static_cast<uint32_t>(
+      std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch())
+          .count());
   int64_t next_snapshot_ms = 0;
   bool snapshot_queued = false;
   int64_t snapshot_queued_ms = 0;
@@ -436,7 +442,33 @@ inline bool lua_stalled() {
          fable2::f5lua::steady_ms() - fable2::f5lua::g_last_run_ms > kStalledAfterMs;
 }
 
-inline void host_tick(const lobby::LobbyStatus& s, int64_t now) {
+// The other PC of this campaign: the host listens only to its partner and the
+// partner only to its host (two co-op pairs on one network would otherwise
+// apply each other's commands). Matched by XUID or address, as 001's purse and
+// go records are: the host is heard once per shared network, with one address
+// each. Neither known yet = everyone, as before.
+struct Peer {
+  uint64_t xuid = 0;
+  uint32_t ip = 0;
+};
+inline bool from_peer(const lobby::PeerData& d, const Peer& p) {
+  if (!p.xuid && !p.ip) return true;
+  return (p.xuid && d.xuid == p.xuid) || (p.ip && d.ip == p.ip);
+}
+inline Peer campaign_partner() {
+  namespace cf = fable2::coopfrontend;
+  Peer p;
+  p.xuid = cf::g_partner_xuid.load();
+  std::lock_guard<std::mutex> l(cf::S().m);
+  p.ip = cf::S().partner_ip;
+  return p;
+}
+inline Peer campaign_host(const lobby::LobbyStatus& s) {
+  const uint64_t x = fable2::coopfrontend::g_purse_host_xuid.load();
+  return {x > 1 ? x : 0, s.joined_host_ip};  // 1 = joined, host XUID not known
+}
+
+inline void host_tick(const lobby::LobbyStatus& s, const Peer& partner, int64_t now) {
   auto& h = host();
   const int64_t dt = h.last_tick_ms ? now - h.last_tick_ms : 0;
   h.last_tick_ms = now;
@@ -476,7 +508,9 @@ inline void host_tick(const lobby::LobbyStatus& s, int64_t now) {
   }
   // The partner's newest command list.
   const lobby::PeerData* best = nullptr;
-  const auto cmds = lobby::GetPeerData("kit_cmd");
+  std::vector<lobby::PeerData> cmds;
+  for (auto& d : lobby::GetPeerData("kit_cmd"))
+    if (from_peer(d, partner)) cmds.push_back(std::move(d));
   for (const auto& d : cmds)
     if (!best || d.seconds_since_received < best->seconds_since_received) best = &d;
   if (!h.running && best) {
@@ -581,17 +615,20 @@ inline void mirror_now(PPCContext& ctx, uint8_t* base, const KitState& want) {
     REXSYS_INFO("[coopkit] mirror rev {}: +{} -{} on the copy's inventory", want.rev, adds, removes);
 }
 
-inline void joiner_tick(int64_t /*now*/) {
+inline void joiner_tick(const Peer& host_pc, int64_t /*now*/) {
   auto& j = joiner();
   const std::string pub = j.queue.Published();
   if (pub != j.published) {
     j.published = pub;
     lobby::PublishData("kit_cmd", pub);
   }
-  for (const auto& d : lobby::GetPeerData("kit_ack"))
+  for (const auto& d : lobby::GetPeerData("kit_ack")) {
+    if (!from_peer(d, host_pc)) continue;
     if (auto a = ParseAck(d.value))
       for (const auto& r : j.queue.OnAck(*a)) REXSYS_INFO("[coopkit] command {}: {} ({})", r.seq, r.res, ReasonText(r.res));
+  }
   for (const auto& d : lobby::GetPeerData("kit_state")) {
+    if (!from_peer(d, host_pc)) continue;
     auto k = ParseKitState(d.value);
     if (!k || k->rev == 0 || (j.state && k->rev <= j.state->rev)) continue;
     j.state = *k;
@@ -620,9 +657,12 @@ inline void OnFrame() {
   g_next_tick_ms = now + kTickMs;
   const lobby::LobbyStatus s = lobby::GetLobbyStatus();
   if (!s.networking_enabled) return;
+  const bool as_host = host_active(s), as_joiner = !as_host && joiner_active();
+  if (!as_host && !as_joiner) return;
+  const Peer peer = as_host ? campaign_partner() : campaign_host(s);  // before mtx(): S().m is the front end's
   std::lock_guard<std::mutex> l(mtx());
-  if (host_active(s)) host_tick(s, now);
-  else if (joiner_active()) joiner_tick(now);
+  if (as_host) host_tick(s, peer, now);
+  else joiner_tick(peer, now);
 }
 
 inline void CmdSend(std::string_view args) {

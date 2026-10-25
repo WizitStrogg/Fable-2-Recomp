@@ -110,7 +110,27 @@ local function weapons(entity)
   return melee, ranged
 end
 
+-- Item effects still running: the effects script yields (see "use" below), so
+-- a use resumes it once and each later snapshot or command (every 2 s, never
+-- while the host is paused) resumes it again until it ends. Chunks run in
+-- either of the game's two Lua VMs (fable2_coop_kit_proto.h): each VM keeps
+-- and resumes its own.
+CoopKitEffects = CoopKitEffects or {}
+
+function CoopKit.Tick()
+  local running = {}
+  for _, co in ipairs(CoopKitEffects) do
+    if coroutine.status(co) == "suspended" then
+      local ok, err = coroutine.resume(co)
+      if not ok then print("[coopkit] ApplyBonusEffects failed: " .. tostring(err)) end
+    end
+    if coroutine.status(co) == "suspended" then running[#running + 1] = co end
+  end
+  CoopKitEffects = running
+end
+
 function CoopKit.Snapshot(entity, rev)
+  CoopKit.Tick()
   local items, order = collect(entity)
   local list = {}
   for _, hex in ipairs(order) do
@@ -152,6 +172,7 @@ end
 -- Applies one command to the entity and reads it back. Queued game actions may
 -- take a moment (001 T021a): "no:pending" asks the caller to read again later.
 function CoopKit.Apply(entity, op, hex)
+  CoopKit.Tick()
   if not entity or not entity:IsAlive() then return "no:busy" end
   local items = collect(entity)
   local item = items[hex]
@@ -199,12 +220,17 @@ function CoopKit.Apply(entity, op, hex)
     if not user then return "no:fail" end
     -- In a coroutine: the effects script yields (L2 15:44Z, "attempt to yield
     -- across metamethod/C-call boundary" when called straight from the chunk).
+    -- What runs after its first yield continues from CoopKit.Tick.
     local co = coroutine.create(function() user:ApplyBonusEffects() end)
     local ok, err = coroutine.resume(co)
-    if not ok then print("[coopkit] ApplyBonusEffects failed: " .. tostring(err)) end
+    if coroutine.status(co) == "suspended" then CoopKitEffects[#CoopKitEffects + 1] = co end
+    local after = (collect(entity)[hex] or {count = 0}).count
+    if not ok then
+      print("[coopkit] ApplyBonusEffects failed: " .. tostring(err))
+      if after >= before then return "no:fail" end  -- nothing took effect: keep the item
+    end
     -- Removed here only if the effects did not take it already. (The 2 -> 0 of
     -- L2 15:31Z/15:44Z was this chunk running several times; see queue_apply.)
-    local after = (collect(entity)[hex] or {count = 0}).count
     if after >= before then
       try("RemoveItem", Inventory.RemoveItem, entity, item.entity)
       after = (collect(entity)[hex] or {count = 0}).count

@@ -234,13 +234,19 @@ class JoinerQueue {
 class HostApplier {
  public:
   // The next command to run from the joiner's published list, if any: seq
-  // upto+1 of the current session. A new sid starts a new session.
+  // upto+1 of the current session. A new sid starts a new session at the
+  // lowest seq listed: the joiner lists every command not yet acknowledged, so
+  // lower seqs were applied by an earlier host (a host that restarted while
+  // the partner's game kept running would otherwise wait for seq 1 forever).
   std::optional<Command> Next(const std::vector<Command>& cmds) {
     for (const auto& c : cmds) {
       if (c.sid != sid_) {
         if (in_flight_) continue;  // finish the old session's command first
         sid_ = c.sid;
-        upto_ = 0;
+        uint32_t lowest = c.seq;
+        for (const auto& o : cmds)
+          if (o.sid == sid_ && o.seq < lowest) lowest = o.seq;
+        upto_ = lowest - 1;
         results_.clear();
       }
     }
