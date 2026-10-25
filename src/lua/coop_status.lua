@@ -183,9 +183,21 @@ end
 -- inventory item. Continue restores onto a player 2 that may already carry the
 -- saved kit (feature 002 L4, 2026-10-25: every worn item, the sword and the
 -- pistol came back twice, 12 -> 20 items).
+--
+-- Counted by walking the inventory the way Capture does: GetNumberOfItemsOfType
+-- read 0 for worn clothes player 2 held (continue2, 2026-10-25: each continue
+-- gave every worn item once more, 5 -> 10 -> 15).
+local function count_of(entity, hex)
+  local n = 0
+  for i = 0, (try("GetNumberOfItems", Inventory.GetNumberOfItems, entity) or 0) - 1 do
+    local item = try("GetItemByIndex", Inventory.GetItemByIndex, entity, i)
+    if item and record_id(item) == hex then n = n + 1 end
+  end
+  return n
+end
+
 local function owns(entity, hex, id)
-  local n = try("GetNumberOfItemsOfType " .. hex, Inventory.GetNumberOfItemsOfType, entity, id) or 0
-  if n > 0 then return true end
+  if count_of(entity, hex) > 0 then return true end
   for _, slot in ipairs(WEAPON_SLOTS) do
     local w = try("GetEntityInSlot", Carrying.GetEntityInSlot, entity, slot)
     if w and w:IsAlive() and record_id(w) == hex then return true end
@@ -238,7 +250,7 @@ function CoopHero.Apply(entity, p, opts)
     for hex, want in pairs(p.items or {}) do
       local id = id_from_hex(hex)
       if id then
-        local have = try("GetNumberOfItemsOfType", Inventory.GetNumberOfItemsOfType, entity, id) or 0
+        local have = count_of(entity, hex)
         for _ = have + 1, want do try("AddItemOfType " .. hex, Inventory.AddItemOfType, entity, id) end
       else
         print("[coop] item " .. hex .. " unknown in this game; skipped")
