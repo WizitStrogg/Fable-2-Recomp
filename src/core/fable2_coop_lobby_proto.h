@@ -194,6 +194,38 @@ inline std::optional<GoRecord> ParseGo(std::string_view line) {
   return r;
 }
 
+// --- the shared purse (host-authoritative) --------------------------------------
+//
+// The world runs on the host, so every gold change of either hero lands in the
+// host's purses (its hero's and the henchman copy). The host sums both changes
+// into one total (a split pickup +75/+75 counts +150; a purchase counts once)
+// and publishes it; the partner only mirrors it into its own purse (its local
+// purse is the game's mirror of the host's henchman copy and never independent).
+//   coop_purse (host)  COOPPURSE:v1|hxuid=<host xuid>|total=<gold>|seq=<n>
+struct PurseRecord {
+  std::string hxuid;
+  int64_t total = 0;
+  uint32_t seq = 0;
+};
+inline std::string Format(const PurseRecord& r) {
+  return "COOPPURSE:v1|hxuid=" + Clean(r.hxuid) + "|total=" + std::to_string(r.total) + "|seq=" +
+         std::to_string(r.seq);
+}
+inline std::optional<PurseRecord> ParsePurse(std::string_view line) {
+  auto f = ParseRecord(line, "COOPPURSE");
+  if (!f || (*f)["total"].empty()) return std::nullopt;
+  PurseRecord r;
+  r.hxuid = (*f)["hxuid"];
+  r.total = std::strtoll((*f)["total"].c_str(), nullptr, 10);
+  r.seq = static_cast<uint32_t>(std::strtoul((*f)["seq"].c_str(), nullptr, 10));
+  return r;
+}
+// The host's new total from the last synced total and both purses now (the
+// same sum the host's Lua makes).
+inline int64_t PurseTotal(int64_t last, int64_t host, int64_t hench) {
+  return last + (host - last) + (hench - last);
+}
+
 // --- state machine -------------------------------------------------------------
 
 // A peer's latest record as seen through the LAN lobby keyed data.

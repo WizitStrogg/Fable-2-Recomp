@@ -210,3 +210,5 @@ switches to its fallback; only a failed fallback is raised to Josh.
 - [x] T053 Co-op hub: lobbies to join, "Host: continue a co-op save" (save list), "Host: new co-op campaign", Back; New Game and Continue stock again; the host loads through the menu's own "Load Game" - built, proof launch pending
 - [ ] T054 Ship-build proof (tools/coop_ship_e2e.py menu, two networks): menu screenshot, new campaign join, partner leaves, continue the co-op save, rejoin, host-left message, stock New Game
 - [ ] T055 Reinstall v14 into D:\Fable2-LAN\mod (backup) and rebuild the friend zip after T054 passes
+- [x] T056 Shared purse on the partner's screen: the host publishes its total (coop_purse), the partner mirrors it (tools/coop_lobby_test.cpp purse checks pass); proof launch pending
+- [ ] T057 Joiner camera felt buggy/glitchy in Josh's 2026-10-25 one-PC playtest; needs further testing on two PCs
