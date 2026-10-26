@@ -1843,7 +1843,14 @@ def run_batch1():
     world gold (T012); the partner killed mid-session x3: the host saves and
     returns to the menu, the partner rejoins through the hub (T013 P6, T029);
     the host alone cannot start; a third copy cannot take the seat (T029); the
-    host killed right after a save x3, then continued (T032)."""
+    host killed right after a save x3, then continued (T032).
+    `batch1 --from p6|t032` skips the finished phases after a fresh join."""
+    phases = ["gold", "p6", "t032"]
+    first = sys.argv[sys.argv.index("--from") + 1] if "--from" in sys.argv else "gold"
+    if first not in phases:
+        raise SystemExit(f"--from must be one of {phases}")
+    run = set(phases[phases.index(first):])
+    note("INFO", f"batch1: phases {[p for p in phases if p in run]}")
     setup_tomls(third=True)
     relay_log = open(os.path.join(OUT, "relay_batch1.log"), "w")
     relay = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -1866,12 +1873,16 @@ def run_batch1():
             return
         time.sleep(8)
         # 1. World gold (T012).
-        total = worldgold_events(a, b)
+        if "gold" in run:
+            total = worldgold_events(a, b)
+        else:
+            v = read_purses(a, b, "b1_purse0")
+            total = v[0] if v and v[0] == v[1] == v[2] else None
         if total is None:
             return
         ref = inv_dump(a, "b1_ref")
         # 2. The partner killed mid-session, three times (T013 P6, T029).
-        for k in (1, 2, 3):
+        for k in ((1, 2, 3) if "p6" in run else ()):
             tag = f"p6_{k}"
             b.stop()  # a kill, not a quit
             n = a.count(r"host: back at the front end")
