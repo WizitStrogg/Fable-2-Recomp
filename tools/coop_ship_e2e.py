@@ -1629,6 +1629,143 @@ def run_boots():
             note("PASS" if n else "FAIL", f"boots_blind: host: {what} ({n})")
 
 
+def lua_lines(g, chunk, marker, timeout=15):
+    """Runs one Lua line in g's game (test input) and returns the new
+    "[lua] <marker> ..." lines it printed (text after the marker)."""
+    pat = r"\[lua\] " + re.escape(marker)
+    n = g.count(pat)
+    g.send("lua " + chunk)
+    t = time.time()
+    while time.time() - t < timeout and g.count(pat) <= n:
+        time.sleep(0.3)
+    return [l.split("[lua] " + marker, 1)[1].strip() for l in g.lines() if re.search(pat, l)][n:]
+
+
+# Chests in the host's region: the game's own search (as AIManager does it).
+# WG keeps them for the next chunks (console chunks share the game's globals).
+WG_FIND = ("local ok, e = pcall(function() local h = GetPlayerHero(); local hp = h:GetPosition(); "
+           "WG = SearchTools.GetSearchResults(SearchTools.FilterWithEC(SearchTools.StartNewSearch('object'), "
+           "Chest.GetECType())); print('WGN ' .. #WG); for i, c in pairs(WG) do local p = c:GetPosition(); "
+           "print(string.format('WGCHEST %d x=%.1f y=%.1f z=%.1f d=%.1f gold=%d open=%s locked=%s keys=%d', i, "
+           "p:GetX(), p:GetY(), p:GetZ(), (p - hp):GetLength(), Money.IsAvailable(c) and Money.Get(c) or -1, "
+           "tostring(Chest.IsOpen(c)), tostring(Chest.IsLocked(c)), Chest.GetNumberOfSilverKeysNeeded(c) or 0)) "
+           "end end); if not ok then print('WGN error ' .. tostring(e)) end")
+
+
+def wg_teleport(a, idx, actor, side):
+    """Host Lua: put the host's hero or player 2 1.2 m from chest idx on one of
+    four sides, facing it (Physics.TeleportToPosition / SetFacingVector, as the
+    game's own behaviours do)."""
+    who = "GetPlayerHero()" if actor == "hero" else "GetPlayerHenchman()"
+    off = [(1.2, 0), (-1.2, 0), (0, 1.2), (0, -1.2)][side]
+    return lua_lines(a, (
+        f"local ok, e = pcall(function() local c = WG[{idx}]; local e = {who}; local p = c:GetPosition(); "
+        f"local st = CVector3(p:GetX() + {off[0]}, p:GetY() + {off[1]}, p:GetZ()); "
+        f"Physics.TeleportToPosition(e, st); local f = p - st; f:Normalise(); Physics.SetFacingVector(e, f); "
+        f"print('WGTP {actor} chest {idx} side {side}') end); if not ok then print('WGTP error ' .. tostring(e)) end"),
+        "WGTP")
+
+
+def wg_chest_state(a, idx):
+    out = lua_lines(a, f"local c = WG[{idx}]; print('WGSTATE open=' .. tostring(Chest.IsOpen(c)) .. "
+                       f"' gold=' .. tostring(Money.Get(c)))", "WGSTATE")
+    return out[-1] if out else "?"
+
+
+def wg_open_chest(a, b, g, idx, actor, tag, start):
+    """g (host or partner) opens chest idx with its own A, from the side where
+    the open works; then all three purses must hold start + the chest's gold."""
+    gold = int(re.search(r"gold=(-?\d+)", wg_chest_state(a, idx)).group(1))
+    for side in range(4):
+        wg_teleport(a, idx, actor, side)
+        time.sleep(1.5)
+        g.shot(f"{tag}_{g.who}_at_chest_side{side}.png")
+        g.press("E")
+        time.sleep(6)  # the open animation, the take-items script, the reward box
+        st = wg_chest_state(a, idx)
+        if "open=true" in st:
+            note("PASS", f"{tag}: {g.who} opened chest {idx} with A (side {side}; {st})")
+            g.shot(f"{tag}_{g.who}_chest_open.png")
+            for _ in range(2):  # the "received" boxes
+                g.press("E")
+                time.sleep(1.0)
+            return check_purse(a, b, tag, start + gold), start + gold
+    note("FAIL", f"{tag}: {g.who} could not open chest {idx} from any side")
+    return False, start
+
+
+def run_worldgold():
+    """Spec 001 open item (T012/P5): one gold purse when gold comes from the
+    world. The host and then the partner open a real chest with A (the game's
+    OnActionUseTakeItems moves the gold: Money.Modify(the opener, gold)); then a
+    quest reward through QuestTracker.GiveRewards, the call the game's own quest
+    completion sequence makes. Pass: all three purses equal the expected total
+    after each event (so each change counted once)."""
+    setup_tomls()
+    relay_log = open(os.path.join(OUT, "relay_worldgold.log"), "w")
+    relay = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                           "coop_relay.py")], stdout=relay_log, stderr=relay_log)
+    a, b = Game("mod-a", "host"), Game("mod-b", "partner")
+    a.start({"FABLE2_TEST_INPUT": "1"})
+    b.start({"FABLE2_TEST_INPUT": "1"})
+    try:
+        for g in (a, b):
+            g.n_menu = g.count(r"main menu: Co-op entry added")
+            g.past_title()
+        menu_then_coop(a, "worldgold", a.n_menu)
+        host_new_campaign(a, "worldgold")
+        menu_then_coop(b, "worldgold", b.n_menu)
+        wait_row(b, "Join TestA", "worldgold: the host's lobby is listed")
+        partner_joins(b, "Join TestA", "worldgold")
+        wait_row(a, "Start", "worldgold: host lobby shows the partner")
+        if not both_ready_and_start(a, b, "worldgold") or not join_phase(a, b, "worldgold"):
+            return
+        time.sleep(8)
+        v = read_purses(a, b, "worldgold_purse0")
+        if not v:
+            return
+        total = v[0]
+        chests = lua_lines(a, WG_FIND, "WGCHEST", 20)
+        for c in chests:
+            note("INFO", f"worldgold: chest {c}")
+        cand = []
+        for c in chests:
+            m = re.match(r"(\d+) .*d=([\d.]+) gold=(-?\d+) open=(\w+) locked=(\w+) keys=(\d+)", c)
+            if m and m.group(4) == "false" and m.group(5) == "false" and m.group(6) == "0":
+                cand.append((int(m.group(3)) <= 0, float(m.group(2)), int(m.group(1)), int(m.group(3))))
+        cand.sort()  # chests with gold first, then the nearest
+        if len(cand) < 2:
+            note("FAIL", f"worldgold: fewer than 2 closed, unlocked chests here ({len(cand)})")
+            return
+        for k, (_, d, idx, gold) in enumerate(cand[:2]):
+            if gold <= 0:
+                # No loaded chest holds gold: put some in. The open and the
+                # transfer to the opener stay the game's own.
+                lua_lines(a, f"Money.Set(WG[{idx}], {123 + k}) print('WGSEED chest {idx}')", "WGSEED")
+                note("INFO", f"worldgold: chest {idx} ({d} m) had no gold; seeded {123 + k}")
+        ok, total = wg_open_chest(a, b, a, cand[0][2], "hero", "worldgold_host_chest", total)
+        ok2, total = wg_open_chest(a, b, b, cand[1][2], "hench", "worldgold_partner_chest", total)
+        # The quest reward: the active primary quest, then a few early ones;
+        # the first that pays gold is the test.
+        q = lua_lines(a, (
+            "local h = GetPlayerHero(); local names = {QuestTracker.GetPrimaryQuestName(h), 'QC060_NewBeginning', "
+            "'QC065_Roadblock', 'QC066_Gypsies', 'QC070_Thag'}; for _, n in ipairs(names) do if n then "
+            "local before = Money.Get(h); local ok, e = pcall(QuestTracker.GiveRewards, h, n); "
+            "local d = Money.Get(h) - before; print('WGQUEST ' .. n .. ' ok=' .. tostring(ok) .. ' ' .. "
+            "tostring(e) .. ' delta=' .. d); if d > 0 then break end end end"), "WGQUEST", 20)
+        for line in q:
+            note("INFO", f"worldgold: quest reward {line}")
+        paid = [int(m.group(1)) for m in (re.search(r"delta=(-?\d+)", l) for l in q) if m and int(m.group(1)) > 0]
+        if paid:
+            check_purse(a, b, "worldgold_quest_reward", total + paid[-1])
+        else:
+            note("FAIL", "worldgold: no quest reward paid gold (see the WGQUEST lines)")
+    finally:
+        for g in (a, b):
+            g.stop()
+        relay.kill()
+
+
 def run_luaq_kept():
     """The kept / retry path (9cace5a): while the partner's pause holds, the host
     queues 12 numbered markers and a gold change (13 one-shots, 8 console slots):
@@ -1797,7 +1934,7 @@ def run_continue2():
 def main():
     os.makedirs(OUT, exist_ok=True)
     mode = sys.argv[1] if len(sys.argv) > 1 else "coop"
-    {"coop": run_coop, "solo": run_solo, "multi": run_multi, "menu": run_menu, "menu2": run_menu2, "err": run_err, "final": run_final, "last": run_last, "start": run_start, "purse": run_purse, "fps": run_fps, "combo": run_combo, "camera": run_camera, "luaq": run_luaq, "luaq_kept": run_luaq_kept, "continue2": run_continue2, "boots": run_boots}[mode]()
+    {"coop": run_coop, "solo": run_solo, "multi": run_multi, "menu": run_menu, "menu2": run_menu2, "err": run_err, "final": run_final, "last": run_last, "start": run_start, "purse": run_purse, "fps": run_fps, "combo": run_combo, "camera": run_camera, "luaq": run_luaq, "luaq_kept": run_luaq_kept, "continue2": run_continue2, "boots": run_boots, "worldgold": run_worldgold}[mode]()
     with open(os.path.join(OUT, f"results_{mode}.txt"), "w", encoding="utf-8") as f:
         f.write("\n".join(results) + "\n")
     return 0 if not any(r.startswith("FAIL") for r in results) else 1
