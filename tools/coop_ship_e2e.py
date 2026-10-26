@@ -234,6 +234,11 @@ class Game:
         except FocusLost:
             pass
         time.sleep(0.3)
+        # A screen grab shows whatever is in front (boots, 2026-10-25 21:52Z:
+        # another program's window was captured as the host's menu).
+        self.last_shot_in_front = user32.GetForegroundWindow() == self.hwnd
+        if not self.last_shot_in_front:
+            note("INFO", f"{self.who}: screenshot {name} taken with another window in front")
         p = os.path.join(OUT, name)
         try:
             ImageGrab.grab(bbox=rect(self.hwnd), all_screens=True).save(p)
@@ -580,21 +585,106 @@ def run_multi():
         relay.kill()
 
 
+# --- the highlighted main-menu row --------------------------------------------
+# The green A button marks the highlighted row; its label is compared with a
+# crop of the Co-op row (tools/coop_e2e_ref/coop_row.png; "Co-op" reads the
+# same in every language). Checked offline on 60 saved menu screenshots: 1.00 on
+# Co-op, 0.07-0.18 on Continue. A Down sometimes moved two rows, so the walk
+# looks after every press instead of counting them (boots, 2026-10-25).
+REF_COOP = os.path.join(os.path.dirname(os.path.abspath(__file__)), "coop_e2e_ref", "coop_row.png")
+_ref_bits = None
+
+
+def a_button_y(im):
+    """Centre y of the green A button left of the menu (x 150-300), or None."""
+    a = im[:, 150:300, :3].astype(int)
+    r, g, b = a[..., 0], a[..., 1], a[..., 2]
+    rows = np.nonzero(((g > 140) & (g - r > 50) & (g - b > 60)).sum(axis=1) >= 6)[0]
+    if len(rows) < 8:
+        return None
+    runs, start = [], rows[0]
+    for p, q in zip(rows, rows[1:]):
+        if q != p + 1:
+            runs.append((start, p))
+            start = q
+    runs.append((start, rows[-1]))
+    s, e = max(runs, key=lambda t: t[1] - t[0])
+    return (s + e) // 2 if e - s >= 15 else None
+
+
+def label_bits(crop):
+    return (crop[..., :3].astype(int).mean(axis=2) > 190).astype(np.float32)
+
+
+def bits_similarity(a, b):
+    h = min(a.shape[0], b.shape[0])
+    a, b = a[:h], b[:h]
+    best = 0.0
+    for dx in range(-6, 7):
+        for dy in range(-3, 4):
+            sa = np.roll(np.roll(a, dy, 0), dx, 1)
+            union = ((sa + b) > 0).sum()
+            best = max(best, (sa * b).sum() / union if union else 0.0)
+    return best
+
+
+def coop_highlight(path):
+    """How much the highlighted row's label looks like "Co-op" (0-1), or -1 when
+    no highlighted row is on screen (a loading screen, a panel)."""
+    global _ref_bits
+    if _ref_bits is None:
+        _ref_bits = label_bits(np.asarray(Image.open(REF_COOP).convert("RGB")))
+    im = np.asarray(Image.open(path).convert("RGB"))
+    y = a_button_y(im)
+    if y is None or y < 16:
+        return -1.0
+    return bits_similarity(label_bits(im[y - 16:y + 16, 255:520]), _ref_bits)
+
+
+def menu_events(g, n0):
+    """Test-only menu events since line n0: (type, entry)."""
+    out = []
+    for l in g.lines()[n0:]:
+        m = re.search(r"main menu event type=(\d+) entry='([^']*)'", l)
+        if m:
+            out.append((int(m.group(1)), m.group(2)))
+    return out
+
+
 def open_coop_entry(g, tag):
-    """Main menu (cursor on New Game): Down twice to the native Co-op entry
-    (New Game, Continue, Co-op, ...), screenshot its highlight, A -> the hub."""
-    g.press("Down")
-    time.sleep(0.6)
-    g.shot(f"{tag}_{g.who}_menu_on_continue.png")
-    g.press("Down")
-    for i in range(5):  # the highlight moving onto Co-op
-        g.shot(f"{tag}_{g.who}_menu_to_coop_{i}.png")
-        time.sleep(0.12)
-    time.sleep(0.4)
+    """Main menu: move the highlight onto the native Co-op entry, checking the
+    highlighted row after every press (screenshot), then A -> the hub."""
+    n_lines = len(g.lines())
+    steps = []
+    for i in range(10):
+        sim, p = -1.0, None
+        for attempt in range(3):  # no highlighted row yet (animation, a window in front): look again
+            time.sleep(0.8)
+            p = g.shot(f"{tag}_{g.who}_menu_walk_{i}_{attempt}.png")
+            sim = coop_highlight(p) if g.last_shot_in_front else -1.0
+            if sim >= 0:
+                break
+        steps.append(round(sim, 2))
+        if sim >= 0.6:
+            break
+        if sim < 0:
+            note("FAIL", f"{tag}: {g.who}: no highlighted menu row on screen ({p})")
+            return False
+        # Down first (New Game/Continue are above Co-op); after 4, back up.
+        g.press("Down" if i < 4 else "Up")
+    else:
+        note("FAIL", f"{tag}: {g.who}: the highlight never reached Co-op (similarity per step {steps})")
+        return False
+    note("INFO", f"{tag}: {g.who}: highlight on Co-op after {len(steps) - 1} press(es) (similarity {steps}); "
+                 f"menu events {menu_events(g, n_lines)}")
     g.shot(f"{tag}_{g.who}_menu_on_coop.png")
     n = g.count(r"\[coop\] main menu: Co-op chosen")
+    nd = g.count(r"XamShowDeviceSelectorUI")
     g.press("E")
     ok = g.wait(f"{tag}: Co-op entry opens the hub", r"\[coop\] main menu: Co-op chosen", n, 10)
+    if not ok and g.count(r"XamShowDeviceSelectorUI") > nd:
+        note("FAIL", f"{tag}: {g.who}: A with the highlight on Co-op opened the save picker (Continue) instead; "
+                     f"menu events {menu_events(g, n_lines)}")
     time.sleep(2)
     g.shot(f"{tag}_{g.who}_hub.png")
     return ok
