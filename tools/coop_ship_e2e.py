@@ -664,11 +664,16 @@ def open_coop_entry(g, tag):
     steps = []
     for i in range(10):
         sim, p = -1.0, None
-        for attempt in range(3):  # no highlighted row yet (animation, a window in front): look again
+        t_look = time.time()
+        attempt = 0
+        # No highlighted row yet: an animation (3 looks), or another window in
+        # front (a UAC prompt, a remote session: up to 60 s, batch1 2026-10-26).
+        while True:
             time.sleep(0.8)
             p = g.shot(f"{tag}_{g.who}_menu_walk_{i}_{attempt}.png")
+            attempt += 1
             sim = coop_highlight(p) if g.last_shot_in_front else -1.0
-            if sim >= 0:
+            if sim >= 0 or (g.last_shot_in_front and attempt >= 3) or time.time() - t_look > 60:
                 break
         steps.append(round(sim, 2))
         if sim >= 0.6:
@@ -1784,6 +1789,11 @@ def worldgold_events(a, b):
         return total
 
 
+def host_has_partner(a):
+    views = [l for l in a.lines() if "[lobby] view:" in l]
+    return bool(views) and "(waiting for" not in views[-1]
+
+
 def host_continue_lobby(a, tag):
     """The host at the title: Co-op -> Host: continue a co-op save -> the newest."""
     n_menu = a.count(r"main menu: Co-op entry added")
@@ -1879,7 +1889,7 @@ def run_batch1():
                     a.select("Start")
                     a.press("E")
                 time.sleep(8)
-                note("PASS" if a.count(r"\[lobby\] host start") == n else "FAIL",
+                note("PASS" if a.count(r"\[lobby\] host start") == n and not host_has_partner(a) else "FAIL",
                      f"{tag}: the host alone cannot start the co-op save (rows {rows})")
             if k == 2:
                 # A third copy (a stranger) cannot take the partner's seat.
@@ -1896,9 +1906,10 @@ def run_batch1():
                     c.select(row)
                     c.press("E")
                     time.sleep(15)
-                host_rows = [r[0] for r in a.rows()]
-                note("PASS" if not any(r.startswith("Start") for r in host_rows) else "FAIL",
-                     f"{tag}: the stranger was not seated in the host's lobby (host rows {host_rows})")
+                views = [l for l in a.lines() if "[lobby] view:" in l]
+                note("PASS" if not host_has_partner(a) else "FAIL",
+                     f"{tag}: the stranger was not seated in the host's lobby "
+                     f"({views[-1].split('[lobby] view: ', 1)[1][:160] if views else 'no view'})")
                 c.stop()
                 c = None
             b = Game("mod-b", "partner")
