@@ -1165,7 +1165,7 @@ def read_purses(a, b, tag):
 def check_purse(a, b, tag, expect):
     time.sleep(6)  # the host's 1 s sync, the partner's mirror (new total at once)
     v = read_purses(a, b, tag)
-    ok = v is not None and v[0] == v[1] == v[2] == expect
+    ok = v is not None and v[0] == v[1] == v[2] and (expect is None or v[0] == expect)
     note("PASS" if ok else "FAIL", f"{tag}: host {v[0] if v else '?'}, host's player 2 {v[1] if v else '?'}, "
                                      f"partner's own {v[2] if v else '?'} (expected {expect} on all three)")
     a.shot(f"{tag}_host.png")
@@ -1663,6 +1663,15 @@ WG_FIND = ("local ok, e = pcall(function() local h = GetPlayerHero(); local hp =
            "end end); if not ok then print('WGN error ' .. tostring(e)) end")
 
 
+WG_SPAWN_GOLD = ("local ok, e = pcall(function() print('WGGOLD template ObjectInventoryGoldBag exists=' .. "
+                 "tostring(GDB.RecordExists('ObjectInventoryGoldBag'))); WGG = WGG or {}; "
+                 "for _, who in ipairs({GetPlayerHero(), GetPlayerHenchman()}) do local p = who:GetPosition(); "
+                 "local b = Debug.CreateEntityAtPosition('ObjectInventoryGoldBag', 'wggoldbag', "
+                 "CVector3(p:GetX() + 1.5, p:GetY(), p:GetZ())); WGG[#WGG + 1] = b; "
+                 "print(string.format('WGGOLD %d x=%.1f y=%.1f z=%.1f d=1.5 gold=%d spawned', #WGG, p:GetX() + 1.5, "
+                 "p:GetY(), p:GetZ(), Money.IsAvailable(b) and Money.Get(b) or -1)) end end); "
+                 "if not ok then print('WGGOLD error ' .. tostring(e)) end")
+
 WG_FIND_GOLD = ("local ok, e = pcall(function() local hp = GetPlayerHero():GetPosition(); "
                 "WGG = {}; for _, o in pairs(SearchTools.GetSearchResults(SearchTools.StartNewSearch('object'))) do "
                 "if Money.IsAvailable(o) and Money.Get(o) > 0 and not Chest.IsAvailable(o) then "
@@ -1723,15 +1732,18 @@ def wg_pickup(a, b, g, idx, actor, gold, tag, start):
         gone = lua_lines(a, f"print('WGPICK ' .. tostring(WGG[{idx}]:IsAlive()))", "WGPICK", 8)
         if gone and "false" in gone[-1]:
             after = read_purses(a, b, f"{tag}_after_A")
-            note("PASS", f"{tag}: {g.who} picked up {gold} gold with A (side {side})")
+            note("PASS", f"{tag}: {g.who} picked up gold object {idx} with A (side {side}; value {gold})")
             note("INFO", f"{tag}: purses right before the A {before}, right after {after}")
+            if gold < 0 and after:
+                note("INFO", f"{tag}: the bag's value was unknown; the host's purse moved by {after[0] - start}")
+                gold = after[0] - start
             check_purse(a, b, tag, start + gold)
             return start + gold
     note("FAIL", f"{tag}: {g.who} could not pick up gold object {idx}")
     return start
 
 
-def wg_open_chest(a, b, g, idx, actor, tag, start):
+def wg_open_chest(a, b, g, idx, actor, tag, start, unknown=False):
     """g (host or partner) opens chest idx with its own A, from the side where
     the open works; then all three purses must hold start + the chest's gold."""
     gold = int(re.search(r"gold=(-?\d+)", wg_chest_state(a, idx)).group(1))
@@ -1749,7 +1761,9 @@ def wg_open_chest(a, b, g, idx, actor, tag, start):
             wg_dismiss(a, b, g, tag)
             after = read_purses(a, b, f"{tag}_after_A")
             note("INFO", f"{tag}: purses right before the A {before}, right after {after} (chest gold {gold})")
-            return check_purse(a, b, tag, start + gold), start + gold
+            # unknown: the chest holds a gold item, not a gold component; the
+            # caller compares the change on the three purses.
+            return check_purse(a, b, tag, None if unknown else start + gold), start + gold
     note("FAIL", f"{tag}: {g.who} could not open chest {idx} from any side")
     return False, start
 
@@ -1797,11 +1811,15 @@ def worldgold_events(a, b):
             return None
         total = v[0]
         golds = lua_lines(a, WG_FIND_GOLD, "WGGOLD", 30)
+        if len([gl for gl in golds if gl.split()[0].isdigit()]) < 2:
+            # Not enough gold lying here: the game's own object creation with
+            # the gold-bag template next to each player (logged "spawned").
+            golds += lua_lines(a, WG_SPAWN_GOLD, "WGGOLD", 20)
         for gl in golds:
             note("INFO", f"worldgold: gold object {gl}")
         piles = []
         for gl in golds:
-            m = re.match(r"(\d+) .*d=([\d.]+) gold=(\d+)", gl)
+            m = re.match(r"(\d+) .*d=([\d.]+) gold=(-?\d+)", gl)
             if m:
                 piles.append((float(m.group(2)), int(m.group(1)), int(m.group(3))))
         piles.sort()
@@ -1825,7 +1843,19 @@ def worldgold_events(a, b):
         # Chests here have no gold component (batch1 2026-10-26): the opens check
         # the open with A and that the purses do not move.
         ok, total = wg_open_chest(a, b, a, cand[0][2], "hero", "worldgold_host_chest", total)
-        ok2, total = wg_open_chest(a, b, b, cand[1][2], "hench", "worldgold_partner_chest", total)
+        stocked = lua_lines(a, (f"local ok, e = pcall(Inventory.AddItemOfType, WG[{cand[1][2]}], "
+                                f"'ObjectInventoryGoldBag'); print('WGSTOCK ' .. tostring(ok) .. ' ' .. tostring(e) .. "
+                                f"' items=' .. tostring(Inventory.GetNumberOfItems(WG[{cand[1][2]}])))"), "WGSTOCK", 10)
+        note("INFO", f"worldgold: chest {cand[1][2]} stocked with a gold bag (spawned): {stocked}")
+        before = read_purses(a, b, "worldgold_partner_chest_purse_before")
+        ok2, total = wg_open_chest(a, b, b, cand[1][2], "hench", "worldgold_partner_chest", total, unknown=True)
+        after = read_purses(a, b, "worldgold_partner_chest_purse_after")
+        if before and after:
+            note("INFO", f"worldgold_partner_chest: purses {before} -> {after} "
+                         f"(host change {after[0] - before[0]}; the bag's gold, applied once if all three moved by it)")
+            note("PASS" if after[0] - before[0] == after[2] - before[2] == after[1] - before[1] else "FAIL",
+                 f"worldgold_partner_chest: the same change on all three purses")
+            total = after[0]
         # The quest reward: the active primary quest, then a few early ones;
         # the first that pays gold is the test.
         q = lua_lines(a, (
