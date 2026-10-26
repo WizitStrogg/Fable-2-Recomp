@@ -1663,6 +1663,28 @@ WG_FIND = ("local ok, e = pcall(function() local h = GetPlayerHero(); local hp =
            "end end); if not ok then print('WGN error ' .. tostring(e)) end")
 
 
+WG_FIND_GOLD = ("local ok, e = pcall(function() local hp = GetPlayerHero():GetPosition(); "
+                "WGG = {}; for _, o in pairs(SearchTools.GetSearchResults(SearchTools.StartNewSearch('object'))) do "
+                "if Money.IsAvailable(o) and Money.Get(o) > 0 and not Chest.IsAvailable(o) then "
+                "WGG[#WGG + 1] = o; local p = o:GetPosition(); "
+                "print(string.format('WGGOLD %d x=%.1f y=%.1f z=%.1f d=%.1f gold=%d', #WGG, p:GetX(), p:GetY(), "
+                "p:GetZ(), (p - hp):GetLength(), Money.Get(o))) end end print('WGGOLD done ' .. #WGG) end); "
+                "if not ok then print('WGGOLD error ' .. tostring(e)) end")
+
+
+def wg_dismiss(a, b, g, tag):
+    """The game's "received" boxes wait for A and hold every script (coopkit:
+    "game paused (Lua waiting)"). A until the host's console answers again."""
+    for k in range(12):
+        if lua_lines(a, f"print('WGFREE {k}')", "WGFREE", 4):
+            note("INFO", f"{tag}: scripts run again after {k} A press(es)")
+            return True
+        g.press("E")
+        time.sleep(1.5)
+    note("FAIL", f"{tag}: the host's scripts still wait after 12 A presses")
+    return False
+
+
 def wg_teleport(a, idx, actor, side):
     """Host Lua: put the host's hero or player 2 1.2 m from chest idx on one of
     four sides, facing it (Physics.TeleportToPosition / SetFacingVector, as the
@@ -1679,8 +1701,34 @@ def wg_teleport(a, idx, actor, side):
 
 def wg_chest_state(a, idx):
     out = lua_lines(a, f"local c = WG[{idx}]; print('WGSTATE open=' .. tostring(Chest.IsOpen(c)) .. "
-                       f"' gold=' .. tostring(Money.Get(c)))", "WGSTATE")
-    return out[-1] if out else "?"
+                       f"' gold=' .. tostring(Money.IsAvailable(c) and Money.Get(c) or 0))", "WGSTATE")
+    return out[-1] if out else "open=? gold=0"
+
+
+def wg_pickup(a, b, g, idx, actor, gold, tag, start):
+    """g picks up gold object idx with A (OnActionUsePickUp: Money.Modify(the
+    picker, gold))."""
+    for side in range(4):
+        off = [(0.8, 0), (-0.8, 0), (0, 0.8), (0, -0.8)][side]
+        who = "GetPlayerHero()" if actor == "hero" else "GetPlayerHenchman()"
+        lua_lines(a, (f"local o = WGG[{idx}]; local e = {who}; local p = o:GetPosition(); "
+                      f"local st = CVector3(p:GetX() + {off[0]}, p:GetY() + {off[1]}, p:GetZ()); "
+                      f"Physics.TeleportToPosition(e, st); local f = p - st; f:Normalise(); "
+                      f"Physics.SetFacingVector(e, f); print('WGTP pickup {idx} side {side}')"), "WGTP")
+        time.sleep(1.5)
+        before = read_purses(a, b, f"{tag}_before_A_side{side}")
+        g.press("E")
+        time.sleep(4)
+        wg_dismiss(a, b, g, tag)
+        gone = lua_lines(a, f"print('WGPICK ' .. tostring(WGG[{idx}]:IsAlive()))", "WGPICK", 8)
+        if gone and "false" in gone[-1]:
+            after = read_purses(a, b, f"{tag}_after_A")
+            note("PASS", f"{tag}: {g.who} picked up {gold} gold with A (side {side})")
+            note("INFO", f"{tag}: purses right before the A {before}, right after {after}")
+            check_purse(a, b, tag, start + gold)
+            return start + gold
+    note("FAIL", f"{tag}: {g.who} could not pick up gold object {idx}")
+    return start
 
 
 def wg_open_chest(a, b, g, idx, actor, tag, start):
@@ -1697,12 +1745,10 @@ def wg_open_chest(a, b, g, idx, actor, tag, start):
         st = wg_chest_state(a, idx)
         if "open=true" in st:
             note("PASS", f"{tag}: {g.who} opened chest {idx} with A (side {side}; {st})")
+            g.shot(f"{tag}_{g.who}_chest_open.png")
+            wg_dismiss(a, b, g, tag)
             after = read_purses(a, b, f"{tag}_after_A")
             note("INFO", f"{tag}: purses right before the A {before}, right after {after} (chest gold {gold})")
-            g.shot(f"{tag}_{g.who}_chest_open.png")
-            for _ in range(2):  # the "received" boxes
-                g.press("E")
-                time.sleep(1.0)
             return check_purse(a, b, tag, start + gold), start + gold
     note("FAIL", f"{tag}: {g.who} could not open chest {idx} from any side")
     return False, start
@@ -1750,6 +1796,20 @@ def worldgold_events(a, b):
         if not v:
             return None
         total = v[0]
+        golds = lua_lines(a, WG_FIND_GOLD, "WGGOLD", 30)
+        for gl in golds:
+            note("INFO", f"worldgold: gold object {gl}")
+        piles = []
+        for gl in golds:
+            m = re.match(r"(\d+) .*d=([\d.]+) gold=(\d+)", gl)
+            if m:
+                piles.append((float(m.group(2)), int(m.group(1)), int(m.group(3))))
+        piles.sort()
+        for k, (d, idx, gold) in enumerate(piles[:2]):
+            g, actor = (a, "hero") if k == 0 else (b, "hench")
+            total = wg_pickup(a, b, g, idx, actor, gold, f"worldgold_{g.who}_pickup", total)
+        if len(piles) < 2:
+            note("INFO", f"worldgold: {len(piles)} gold object(s) loaded here; chests have no gold component")
         chests = lua_lines(a, WG_FIND, "WGCHEST", 20)
         for c in chests:
             note("INFO", f"worldgold: chest {c}")
@@ -1762,12 +1822,8 @@ def worldgold_events(a, b):
         if len(cand) < 2:
             note("FAIL", f"worldgold: fewer than 2 closed, unlocked chests here ({len(cand)})")
             return total
-        for k, (_, d, idx, gold) in enumerate(cand[:2]):
-            if gold <= 0:
-                # No loaded chest holds gold: put some in. The open and the
-                # transfer to the opener stay the game's own.
-                lua_lines(a, f"Money.Set(WG[{idx}], {123 + k}) print('WGSEED chest {idx}')", "WGSEED")
-                note("INFO", f"worldgold: chest {idx} ({d} m) had no gold; seeded {123 + k}")
+        # Chests here have no gold component (batch1 2026-10-26): the opens check
+        # the open with A and that the purses do not move.
         ok, total = wg_open_chest(a, b, a, cand[0][2], "hero", "worldgold_host_chest", total)
         ok2, total = wg_open_chest(a, b, b, cand[1][2], "hench", "worldgold_partner_chest", total)
         # The quest reward: the active primary quest, then a few early ones;
