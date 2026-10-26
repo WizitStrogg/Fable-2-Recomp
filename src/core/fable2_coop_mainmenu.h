@@ -187,6 +187,14 @@ extern "C" void ProcessAndProcessAndProcess2446_826C81A0(PPCContext& ctx, uint8_
   namespace mm = fable2::coopmainmenu;
   const uint32_t ev = ctx.r4.u32;
   const uint32_t type = ev ? mm::rd32(base, ev + 4) : 0;
+  // Testing only (FABLE2_TEST_INPUT=1, set by tools/coop_ship_e2e.py): every
+  // menu event with its entry, so the harness knows the highlighted row (types
+  // 140/141/302 are not selections) instead of counting its own Down presses.
+  static const bool log_events = std::getenv("FABLE2_TEST_INPUT") != nullptr;
+  if (log_events && ev) {
+    const uint32_t buf = mm::rd32(base, ev);
+    REXSYS_INFO("[coop] main menu event type={} entry='{}'", type, buf ? mm::cstr(base, mm::rd32(base, buf)) : "");
+  }
   if (mm::enabled() && ev && type != 302 && type != 141 && type != 140) {
     const uint32_t buf = mm::rd32(base, ev);
     if (buf && mm::cstr(base, mm::rd32(base, buf)) == mm::kCoop) {

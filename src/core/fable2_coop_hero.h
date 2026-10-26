@@ -331,6 +331,26 @@ inline std::string campaign_player2() {
   return g_campaign_p2_chunk;
 }
 
+// Player 2's saved weapons, after the campaign chunk (it leaves CoopWeaponsDue):
+// every kWeaponsEveryMs until CoopHero.ApplyWeapons is done, the last try
+// final (adds what is still missing even if the slots stayed empty).
+constexpr int64_t kWeaponsEveryMs = 2000;
+constexpr int kWeaponsTries = 10;
+inline uint32_t g_weapons_epoch = ~0u;
+inline int g_weapons_tries = kWeaponsTries;
+inline int64_t g_next_weapons_ms = 0;
+inline void weapons_tick(uint32_t epoch, int64_t now) {
+  if (g_weapons_epoch != epoch || g_weapons_tries >= kWeaponsTries || now < g_next_weapons_ms) return;
+  const std::string lib = read_lib();
+  const bool final = g_weapons_tries + 1 == kWeaponsTries;
+  const std::string chunk = lib + "\nif CoopWeaponsDue and CoopWeaponsDue.e:IsAlive() and "
+                                  "CoopHero.ApplyWeapons(CoopWeaponsDue.e, CoopWeaponsDue.p, " +
+                            std::string(final ? "true" : "false") + ") then CoopWeaponsDue = nil end\n";
+  if (lib.empty() || !fable2::luaconsole::RunChunk(chunk)) return;  // no free slot: next tick
+  ++g_weapons_tries;
+  g_next_weapons_ms = now + kWeaponsEveryMs;
+}
+
 inline void host_apply(const lobby::LobbyStatus& status, int64_t now) {
   if (!is_host(status)) return;
   const int64_t spawned = g_spawned_at_ms.load();
@@ -339,12 +359,18 @@ inline void host_apply(const lobby::LobbyStatus& status, int64_t now) {
 
   const std::string campaign = campaign_player2();
   if (!campaign.empty()) {
-    if (g_applied_epoch == epoch && g_applied_ip == 0 && g_applied_rev == 2) return;
+    if (g_applied_epoch == epoch && g_applied_ip == 0 && g_applied_rev == 2) {
+      weapons_tick(epoch, now);
+      return;
+    }
     const std::string lib = read_lib();
     if (lib.empty() || !fable2::luaconsole::RunChunk(lib + "\n" + campaign)) return;  // again next tick
     g_applied_epoch = epoch;
     g_applied_ip = 0;
     g_applied_rev = 2;
+    g_weapons_epoch = epoch;
+    g_weapons_tries = 0;
+    g_next_weapons_ms = now + kWeaponsEveryMs;
     REXSYS_INFO("[coop] campaign player 2 queued");
     return;
   }

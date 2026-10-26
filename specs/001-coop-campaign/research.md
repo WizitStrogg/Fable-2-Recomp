@@ -172,3 +172,30 @@ Decided by the coordinator under Josh's "skip to adulthood" approval, after laun
 
 - Shared purse: a chest of 150 gave the game's own co-op share +75 to the host and +75 to the henchman copy; the host's sync summed them correctly (3 -> 153 on the host for both purses, mod-b log 20:31:13), but Money.Set on the host's henchman copy does not reach the partner's own game, so the partner's screen showed 3 + 75. Fix: the host publishes the total (coop_purse) and the partner mirrors it into its own purse. The partner sends no deltas: everything it does with gold happens in the host's world and is already in the host's sum; it joins with "continue without choosing a save", so the mirrored total never reaches its own hero save.
 - Joiner camera felt buggy/glitchy on the henchman in this one-PC playtest (both windows on one PC); needs further testing on two PCs (open, T057).
+
+## 2026-10-26: world gold, partner loss, persistence (coop_ship_e2e batch1, savestress)
+
+- Gold (T012): chests in the Gypsy-camp region have no gold component (Money.IsAvailable
+  false on all 15); they hold items. Gold lying in the world goes through the game's
+  OnActionUsePickUp (Money.Modify(picker, gold)). A spawned ObjectInventoryGoldBag (5 gold)
+  picked up by the host with A: the game split it "host 3, player 2 2" and the purse code
+  made it 5 on all three purses, once. Player 2's own gains are merged once too.
+- Quest gold: QuestTracker.GiveRewards (what Hero_QuestCompletionSequence calls) paid 0
+  gold for all 114 quest names. Quest gold is paid by the quest scripts themselves with
+  Money.Modify(QuestManager.HeroEntity, n) (e.g. QC066's 100), the same path the luaq and
+  purse proofs cover; closed as covered.
+- P6 / T029 / T032: the partner killed mid-session x3 (the host saves, returns to the front
+  end, continues through the hub, the partner rejoins); the host alone cannot start; a third
+  copy is shown the campaign "not for you" and never seated; the host killed 4-8 s after a
+  save x3 and continued. Items, look and purses kept.
+- Save crash (found by T032): a console chunk (002's kit tick) ran 0.7 s into an in-world
+  AutoSaveGame and the host crashed with a guest write fault; the half-written save crashed
+  the next load. The game's save builds the Lua save table (sub_825B09D0 -> GetSaveTable)
+  and our drain runs at luaD_call entry. Fix: saving() (save table being built or within
+  3 s, or a Save content root open) holds every queued script and native task. savestress
+  (30 saves, 002's kit publishing 89 times): 0 crashes, every save held the scripts.
+- Weapon re-add (T032 round 2: 5 -> 7 items): the restore ran before player 2's weapon
+  slots were filled, so the sword and pistol were added again as items. The restore now
+  skips weapons; CoopHero.ApplyWeapons adds only what is still missing once a slot is
+  filled (or on the last of 10 tries, 2 s apart).
+- Evidence: research/001-evidence/menus/ship-e2e/ (b1_*, p6_*, t032_*, ss_*), mod-a/mod-b logs of 2026-10-26.
