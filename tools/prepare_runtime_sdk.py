@@ -7,7 +7,9 @@ Accepted SDK states:
   * HEAD at the base pin - a clean SDK checkout; the patches under
     thirdparty/ are applied on top of it, and
   * any other revision where every patch is already applied - i.e. a fork
-    commit with the fixes baked into the tree (no pin list to maintain).
+    commit with the fixes baked into the tree (no pin list to maintain), and
+  * any descendant of a fork revision known to carry the fixes, as later fork
+    work may rework the patched code itself (BAKED_REVISIONS).
 """
 import argparse
 from pathlib import Path
@@ -21,6 +23,12 @@ MSPACK_PIN = "305907723a4e7ab2018e58040059ffb5e77db837"
 PATCHES = (
     "rexglue-sdk-runtime-fixes.patch",
     "rexglue-sdk-debug-exports.patch",
+)
+# Fork revisions that carry every patch. Their descendants are accepted even
+# where the patch text no longer matches: rexglue-sdk systemlink 6297cf3
+# rewrote the frame limiter that rexglue-sdk-runtime-fixes.patch added.
+BAKED_REVISIONS = (
+    "033523eb7cc6a3b687ae8e7c3ca8b33943a4bd38",
 )
 
 
@@ -50,6 +58,15 @@ def patch_state(source, patch):
     if git(source, "apply", "--check", str(patch), check=False).returncode == 0:
         return "clean"
     return "conflict"
+
+
+def baked_ancestor(source):
+    """Return the first of BAKED_REVISIONS that HEAD descends from, or None."""
+    for revision in BAKED_REVISIONS:
+        if git(source, "merge-base", "--is-ancestor", revision, "HEAD",
+               check=False).returncode == 0:
+            return revision
+    return None
 
 
 def libmspack_mode(source):
@@ -102,15 +119,21 @@ def main():
                      "The SDK work tree is not at a clean accepted revision. Restore it with:\n"
                      f"  git -C {source} checkout -- . && git -C {source} clean -fd")
     else:
-        # Any other revision is accepted only with every patch baked in.
+        # Any other revision is accepted only with every patch baked in, or as a
+        # descendant of a revision that has them.
         pending = [name for name, state in states.items() if state != "applied"]
-        if pending:
+        ancestor = baked_ancestor(source) if pending else None
+        if ancestor:
+            print(f"SDK revision {head} descends from {ancestor}, which carries all "
+                  f"runtime fixes (patch text differs: {', '.join(pending)}).")
+        elif pending:
             fail(f"unexpected SDK revision {head} with unapplied patches: "
                  f"{', '.join(pending)}.\n"
                  f"Either check out the base revision ({SDK_PIN}) so the patches "
                  f"can be applied, or use a fork revision that bakes them in.\n"
                  f"Restore the base with: git -C {source} checkout {SDK_PIN}")
-        print(f"SDK revision {head} already carries all runtime fixes (baked in).")
+        else:
+            print(f"SDK revision {head} already carries all runtime fixes (baked in).")
 
     if not args.skip_dependencies:
         # libmspack is either a submodule gitlink (base pin and older fork
