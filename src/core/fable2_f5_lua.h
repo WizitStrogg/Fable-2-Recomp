@@ -411,6 +411,7 @@ inline bool has_pending() {
 // Called by the dispatcher probe after the game's own call returned, at
 // dispatch depth 0. Runs the F5 file when latched, otherwise one queued script.
 inline void run_pending(PPCContext& ctx, uint8_t* base, const std::string& via) {
+  if (!has_pending()) return;  // nothing queued: run_native and the rest would do nothing
   if (saving()) {
     const uint32_t save = g_saves_seen.load();
     if (has_pending() && g_save_hold_logged.exchange(save) != save) {

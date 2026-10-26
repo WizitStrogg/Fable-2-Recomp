@@ -105,6 +105,19 @@ inline std::atomic<bool> g_menu_built{false};
 inline std::atomic<uint32_t> g_menu_built_dcalls{0};
 inline std::atomic<bool> g_menu_fallback_logged{false};
 constexpr uint32_t kMenuIdleDcalls = 2000;
+inline bool world_lua_busy() {
+  static uint32_t last_hits = 0;
+  static bool busy = false;
+  const uint32_t hits = fable2::f5lua::g_dcall_hits.load(std::memory_order_relaxed);
+  busy = hits - last_hits > 500;  // since the last sample, ~1 s ago
+  last_hits = hits;
+  return busy;
+}
+inline const bool g_world_busy_installed = [] {
+  fable2::stateprobe::g_world_busy = &world_lua_busy;
+  return true;
+}();
+
 inline void OnMenuBuilt() {
   g_menu_built_dcalls.store(fable2::f5lua::g_dcall_hits.load(std::memory_order_relaxed));
   g_menu_built.store(true);

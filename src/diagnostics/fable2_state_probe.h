@@ -142,18 +142,35 @@ inline bool page_ok(const void* p) {
 }
 
 // Safe guest read from the fixed 0x100000000 arena (commit-on-fault).
+// One VirtualQuery per region (it reports the region's extent), not per 4 KB
+// page: the 1 Hz scans read 64-320 MB, which was ~16k queries a second.
 inline bool aread(uint32_t ga, void* dst, size_t n) {
   const uint8_t* p = reinterpret_cast<const uint8_t*>(kArena + ga);
+#ifdef _WIN32
   size_t off = 0;
   while (off < n) {
-    size_t chunk = 0x1000u - ((reinterpret_cast<uintptr_t>(p + off)) & 0xFFFu);
-    if (chunk > n - off) chunk = n - off;
-    if (!page_ok(p + off)) return false;
+    MEMORY_BASIC_INFORMATION m;
+    if (::VirtualQuery(p + off, &m, sizeof m) == 0) return false;
+    if (m.State != MEM_COMMIT ||
+        (m.Protect & (PAGE_READWRITE | PAGE_READONLY | PAGE_WRITECOPY | PAGE_EXECUTE_READ |
+                      PAGE_EXECUTE_READWRITE)) == 0)
+      return false;
+    const size_t left = static_cast<size_t>(static_cast<const uint8_t*>(m.BaseAddress) + m.RegionSize - (p + off));
+    const size_t chunk = left < n - off ? left : n - off;
     std::memcpy(static_cast<uint8_t*>(dst) + off, p + off, chunk);
     off += chunk;
   }
+#else
+  std::memcpy(dst, p, n);
+#endif
   return true;
 }
+
+// Set by the co-op front end: true while the game's Lua runs (in the world).
+// The front-end heap scans are skipped then and their last result is kept, so
+// the reported state does not change; at the title and in the menu the game's
+// Lua is idle and the scans run every sample, as before.
+inline bool (*g_world_busy)() = nullptr;
 
 // Safe guest read at `base` + guest address (render-thread hooks pass their
 // own base; it equals kArena).
@@ -620,7 +637,14 @@ inline void do_sample() {
   // found (bounded; see fe_flag_hunt), then just re-read it. While it stays a
   // front-end value the game is in the front end; a changed value (a gameplay
   // scenario) marks "left the front end" so unknown states read "?".
-  fe_flag_hunt();
+  const bool in_world = g_world_busy && g_world_busy();
+  static bool logged_world = false;
+  if (in_world != logged_world) {
+    logged_world = in_world;
+    REXSYS_INFO("[state] front-end scans {} (the game's Lua is {})", in_world ? "paused" : "resumed",
+                in_world ? "running" : "idle");
+  }
+  if (!in_world) fe_flag_hunt();
   fe_flag_read();
   const bool front_end = front_end_value_active();
 
@@ -631,7 +655,9 @@ inline void do_sample() {
   // us WHICH screen's text exists; render_active below supplies the "is UI
   // being drawn right now" bit (the heap doesn't), which drops to ~0 during the
   // attract movie (video) and text-less scenes.
-  FrontEndText fe = ready ? scan_front_end() : FrontEndText{};
+  static FrontEndText last_fe;
+  if (ready && !in_world) last_fe = scan_front_end();
+  FrontEndText fe = ready ? last_fe : FrontEndText{};
   const bool prompt_alloc = fe.prompt;
   const int menu_hits = fe.menu_hits;
   const std::vector<std::string>& seen = fe.menu_words;
