@@ -1802,77 +1802,151 @@ def run_worldgold():
         relay.kill()
 
 
-def worldgold_events(a, b):
-    """The three world-gold events in a joined campaign. Returns the purse total
-    expected afterwards, or None."""
-    if True:
-        v = read_purses(a, b, "worldgold_purse0")
-        if not v:
-            return None
-        total = v[0]
-        golds = lua_lines(a, WG_FIND_GOLD, "WGGOLD", 30)
-        if len([gl for gl in golds if gl.split()[0].isdigit()]) < 2:
-            # Not enough gold lying here: the game's own object creation with
-            # the gold-bag template next to each player (logged "spawned").
-            golds += lua_lines(a, WG_SPAWN_GOLD, "WGGOLD", 20)
-        for gl in golds:
-            note("INFO", f"worldgold: gold object {gl}")
-        piles = []
-        for gl in golds:
-            m = re.match(r"(\d+) .*d=([\d.]+) gold=(-?\d+)", gl)
-            if m:
-                piles.append((float(m.group(2)), int(m.group(1)), int(m.group(3))))
-        piles.sort()
-        for k, (d, idx, gold) in enumerate(piles[:2]):
-            g, actor = (a, "hero") if k == 0 else (b, "hench")
-            total = wg_pickup(a, b, g, idx, actor, gold, f"worldgold_{g.who}_pickup", total)
-        if len(piles) < 2:
-            note("INFO", f"worldgold: {len(piles)} gold object(s) loaded here; chests have no gold component")
-        chests = lua_lines(a, WG_FIND, "WGCHEST", 20)
-        for c in chests:
-            note("INFO", f"worldgold: chest {c}")
-        cand = []
-        for c in chests:
-            m = re.match(r"(\d+) .*d=([\d.]+) gold=(-?\d+) open=(\w+) locked=(\w+) keys=(\d+)", c)
-            if m and m.group(4) == "false" and m.group(5) == "false" and m.group(6) == "0":
-                cand.append((int(m.group(3)) <= 0, float(m.group(2)), int(m.group(1)), int(m.group(3))))
-        cand.sort()  # chests with gold first, then the nearest
-        if len(cand) < 2:
-            note("FAIL", f"worldgold: fewer than 2 closed, unlocked chests here ({len(cand)})")
-            return total
-        # Chests here have no gold component (batch1 2026-10-26): the opens check
-        # the open with A and that the purses do not move.
-        ok, total = wg_open_chest(a, b, a, cand[0][2], "hero", "worldgold_host_chest", total)
-        stocked = lua_lines(a, (f"local ok, e = pcall(Inventory.AddItemOfType, WG[{cand[1][2]}], "
-                                f"'ObjectInventoryGoldBag'); print('WGSTOCK ' .. tostring(ok) .. ' ' .. tostring(e) .. "
-                                f"' items=' .. tostring(Inventory.GetNumberOfItems(WG[{cand[1][2]}])))"), "WGSTOCK", 10)
-        note("INFO", f"worldgold: chest {cand[1][2]} stocked with a gold bag (spawned): {stocked}")
-        before = read_purses(a, b, "worldgold_partner_chest_purse_before")
-        ok2, total = wg_open_chest(a, b, b, cand[1][2], "hench", "worldgold_partner_chest", total, unknown=True)
-        after = read_purses(a, b, "worldgold_partner_chest_purse_after")
-        if before and after:
-            note("INFO", f"worldgold_partner_chest: purses {before} -> {after} "
-                         f"(host change {after[0] - before[0]}; the bag's gold, applied once if all three moved by it)")
-            note("PASS" if after[0] - before[0] == after[2] - before[2] == after[1] - before[1] else "FAIL",
-                 f"worldgold_partner_chest: the same change on all three purses")
-            total = after[0]
-        # The quest reward: the active primary quest, then a few early ones;
-        # the first that pays gold is the test.
-        q = lua_lines(a, (
-            "local h = GetPlayerHero(); local names = {QuestTracker.GetPrimaryQuestName(h), 'QC060_NewBeginning', "
-            "'QC065_Roadblock', 'QC066_Gypsies', 'QC070_Thag'}; for _, n in ipairs(names) do if n then "
-            "local before = Money.Get(h); local ok, e = pcall(QuestTracker.GiveRewards, h, n); "
-            "local d = Money.Get(h) - before; print('WGQUEST ' .. n .. ' ok=' .. tostring(ok) .. ' ' .. "
-            "tostring(e) .. ' delta=' .. d); if d > 0 then break end end end"), "WGQUEST", 20)
-        for line in q:
-            note("INFO", f"worldgold: quest reward {line}")
-        paid = [int(m.group(1)) for m in (re.search(r"delta=(-?\d+)", l) for l in q) if m and int(m.group(1)) > 0]
-        if paid:
-            total += paid[-1]
-            check_purse(a, b, "worldgold_quest_reward", total)
-        else:
-            note("FAIL", "worldgold: no quest reward paid gold (see the WGQUEST lines)")
+def wg_partner_goto(b, xyz, kind, side):
+    """The partner's own Lua (its copy owns its position: a teleport from the
+    host's side does not stick, batch1 2026-10-26): find the gold object or
+    chest nearest the host-reported spot and stand 0.8-1.2 m from it, facing it."""
+    flt = "Money.IsAvailable(o)" if kind == "gold" else "Chest.IsAvailable(o)"
+    r = 0.8 if kind == "gold" else 1.2
+    ox, oy = [(r, 0), (-r, 0), (0, r), (0, -r)][side]
+    x, y, z = xyz
+    out = lua_lines(b, (
+        f"local ok, e = pcall(function() local me = GetPlayerHenchman(); local best, bd = nil, 1e9; "
+        f"for _, o in pairs(SearchTools.GetSearchResults(SearchTools.StartNewSearch('object'))) do "
+        f"if {flt} then local d = (o:GetPosition() - CVector3({x}, {y}, {z})):GetLength(); "
+        f"if d < bd then best, bd = o, d end end end; "
+        f"if not best or bd > 3 then print('WGPTP none ' .. tostring(bd)) return end; local p = best:GetPosition(); "
+        f"local st = CVector3(p:GetX() + {ox}, p:GetY() + {oy}, p:GetZ()); Physics.TeleportToPosition(me, st); "
+        f"local f = p - st; f:Normalise(); Physics.SetFacingVector(me, f); "
+        f"print(string.format('WGPTP ok %s side {side} (%.1f m from the spot)', '{kind}', bd)) end); "
+        f"if not ok then print('WGPTP error ' .. tostring(e)) end"), "WGPTP", 15)
+    note("INFO", f"worldgold: partner goes to the {kind} at {xyz}, side {side}: {out}")
+    return bool(out) and out[-1].startswith("ok")
+
+
+def wg_partner_pickup(a, b, idx, xyz, tag, start):
+    for side in range(4):
+        if not wg_partner_goto(b, xyz, "gold", side):
+            continue
+        time.sleep(1.5)
+        before = read_purses(a, b, f"{tag}_before_A_side{side}")
+        b.press("E")
+        time.sleep(4)
+        wg_dismiss(a, b, b, tag)
+        gone = lua_lines(a, f"print('WGPICK ' .. tostring(WGG[{idx}]:IsAlive()))", "WGPICK", 8)
+        if gone and "false" in gone[-1]:
+            after = read_purses(a, b, f"{tag}_after_A")
+            note("PASS", f"{tag}: the partner picked up gold object {idx} with its own A (side {side})")
+            note("INFO", f"{tag}: purses right before the A {before}, right after {after}")
+            if before and after:
+                same = after[0] - before[0] == after[1] - before[1] == after[2] - before[2] > 0
+                note("PASS" if same else "FAIL",
+                     f"{tag}: the same gain on all three purses ({before} -> {after})")
+                check_purse(a, b, tag, after[0])
+                return after[0]
+            return start
+    note("FAIL", f"{tag}: the partner could not pick up gold object {idx}")
+    return start
+
+
+def wg_partner_chest(a, b, idx, xyz, tag, start):
+    for side in range(4):
+        if not wg_partner_goto(b, xyz, "chest", side):
+            continue
+        time.sleep(1.5)
+        before = read_purses(a, b, f"{tag}_before_A_side{side}")
+        b.press("E")
+        time.sleep(6)
+        st = wg_chest_state(a, idx)
+        if "open=true" in st:
+            note("PASS", f"{tag}: the partner opened chest {idx} with its own A (side {side})")
+            b.shot(f"{tag}_partner_chest_open.png")
+            wg_dismiss(a, b, b, tag)
+            after = read_purses(a, b, f"{tag}_after_A")
+            note("INFO", f"{tag}: purses right before the A {before}, right after {after}")
+            if before and after:
+                same = after[0] - before[0] == after[1] - before[1] == after[2] - before[2]
+                note("PASS" if same else "FAIL", f"{tag}: the same change on all three purses ({before} -> {after}; "
+                                                 f"the gold bag's value, applied once)")
+                check_purse(a, b, tag, after[0])
+                return after[0]
+            return start
+    note("FAIL", f"{tag}: the partner could not open chest {idx} from any side")
+    return start
+
+
+def wg_quest_reward(a, b, total):
+    """QuestTracker.GiveRewards (the call the game's own quest completion makes)
+    over the game's quest names until one pays gold."""
+    names = [n.strip() for n in open(os.path.join(ROOT, "research", "quest_names.txt"), encoding="utf-8")
+             if n.strip()]
+    lst = ", ".join(f"'{n}'" for n in names)
+    q = lua_lines(a, (
+        f"local h = GetPlayerHero(); local tried = 0; for _, n in ipairs({{{lst}}}) do tried = tried + 1; "
+        f"local before = Money.Get(h); local ok, e = pcall(QuestTracker.GiveRewards, h, n); "
+        f"local d = Money.Get(h) - before; if d > 0 then print('WGQUEST paid ' .. n .. ' delta=' .. d .. "
+        f"' tried=' .. tried) return end end print('WGQUEST none tried=' .. tried)"), "WGQUEST", 60)
+    note("INFO", f"worldgold: quest reward {q}")
+    paid = [int(m.group(1)) for m in (re.search(r"paid \S+ delta=(\d+)", l) for l in q) if m]
+    if not paid:
+        note("FAIL", "worldgold: no quest's reward paid gold through QuestTracker.GiveRewards")
         return total
+    check_purse(a, b, "worldgold_quest_reward", total + paid[-1])
+    return total + paid[-1]
+
+
+def worldgold_events(a, b, host_parts=True):
+    """The world-gold events in a joined campaign: gold picked up with A by the
+    host and by the partner, a chest opened by each (the partner's holds a gold
+    bag), a quest reward. host_parts=False: the partner's and the quest's only
+    (batch1 --phases gold2). Returns the expected purse total, or None."""
+    v = read_purses(a, b, "worldgold_purse0")
+    if not v:
+        return None
+    total = v[0]
+    golds = lua_lines(a, WG_FIND_GOLD, "WGGOLD", 30)
+    if len([gl for gl in golds if gl.split()[0].isdigit()]) < 2:
+        # Not enough gold lying here: the game's own object creation with the
+        # gold-bag template next to each player (logged "spawned").
+        golds += lua_lines(a, WG_SPAWN_GOLD, "WGGOLD", 20)
+    for gl in golds:
+        note("INFO", f"worldgold: gold object {gl}")
+    piles = []
+    for gl in golds:
+        m = re.match(r"(\d+) x=(-?[\d.]+) y=(-?[\d.]+) z=(-?[\d.]+) d=([\d.]+) gold=(-?\d+)", gl)
+        if m:
+            piles.append((float(m.group(5)), int(m.group(1)), int(m.group(6)),
+                          (float(m.group(2)), float(m.group(3)), float(m.group(4)))))
+    piles.sort()
+    if len(piles) < 2:
+        note("FAIL", f"worldgold: {len(piles)} gold object(s) to pick up")
+    else:
+        if host_parts:
+            total = wg_pickup(a, b, a, piles[0][1], "hero", piles[0][2], "worldgold_host_pickup", total)
+        total = wg_partner_pickup(a, b, piles[1][1], piles[1][3], "worldgold_partner_pickup", total)
+    chests = lua_lines(a, WG_FIND, "WGCHEST", 20)
+    cand = []
+    for c in chests:
+        m = re.match(r"(\d+) x=(-?[\d.]+) y=(-?[\d.]+) z=(-?[\d.]+) d=([\d.]+) gold=(-?\d+) open=(\w+) "
+                     r"locked=(\w+) keys=(\d+)", c)
+        if m and m.group(7) == "false" and m.group(8) == "false" and m.group(9) == "0":
+            cand.append((float(m.group(5)), int(m.group(1)),
+                         (float(m.group(2)), float(m.group(3)), float(m.group(4)))))
+    cand.sort()  # nearest first
+    if len(cand) < 2:
+        note("FAIL", f"worldgold: fewer than 2 closed, unlocked chests here ({len(cand)})")
+    else:
+        if host_parts:
+            # Chests here hold items, no gold component: the host's open checks
+            # the open with A and that the purses do not move.
+            ok, total = wg_open_chest(a, b, a, cand[0][1], "hero", "worldgold_host_chest", total)
+        idx = cand[1][1]
+        stocked = lua_lines(a, (f"local ok, e = pcall(Inventory.AddItemOfType, WG[{idx}], 'ObjectInventoryGoldBag'); "
+                                f"print('WGSTOCK ' .. tostring(ok) .. ' items=' .. "
+                                f"tostring(Inventory.GetNumberOfItems(WG[{idx}])))"), "WGSTOCK", 10)
+        note("INFO", f"worldgold: chest {idx} stocked with a gold bag (spawned): {stocked}")
+        total = wg_partner_chest(a, b, idx, cand[1][2], "worldgold_partner_chest", total)
+    return wg_quest_reward(a, b, total)
 
 
 def host_has_partner(a):
@@ -1931,11 +2005,14 @@ def run_batch1():
     the host alone cannot start; a third copy cannot take the seat (T029); the
     host killed right after a save x3, then continued (T032).
     `batch1 --from p6|t032` skips the finished phases after a fresh join."""
-    phases = ["gold", "p6", "t032"]
-    first = sys.argv[sys.argv.index("--from") + 1] if "--from" in sys.argv else "gold"
-    if first not in phases:
-        raise SystemExit(f"--from must be one of {phases}")
-    run = set(phases[phases.index(first):])
+    phases = ["gold", "gold2", "p6", "t032"]  # gold2: the partner's gold and the quest reward only
+    if "--phases" in sys.argv:
+        run = set(sys.argv[sys.argv.index("--phases") + 1].split(","))
+    else:
+        first = sys.argv[sys.argv.index("--from") + 1] if "--from" in sys.argv else "gold"
+        run = set(p for p in phases[phases.index(first):] if p != "gold2") if first in phases else set()
+    if not run or not run <= set(phases):
+        raise SystemExit(f"--from/--phases must name phases from {phases}")
     note("INFO", f"batch1: phases {[p for p in phases if p in run]}")
     setup_tomls(third=True)
     relay_log = open(os.path.join(OUT, "relay_batch1.log"), "w")
@@ -1959,8 +2036,8 @@ def run_batch1():
             return
         time.sleep(8)
         # 1. World gold (T012).
-        if "gold" in run:
-            total = worldgold_events(a, b)
+        if "gold" in run or "gold2" in run:
+            total = worldgold_events(a, b, host_parts="gold" in run)
         else:
             v = read_purses(a, b, "b1_purse0")
             total = v[0] if v and v[0] == v[1] == v[2] else None
@@ -2034,6 +2111,111 @@ def run_batch1():
             note("INFO", f"b1: {g.who}: last menu events {menu[-12:]}")
     finally:
         for g in (a, b) + ((c,) if c else ()):
+            g.stop()
+        relay.kill()
+
+
+def pause_menu_save(a, tag):
+    """The host saves through the real pause menu: Start, Up to Save, A (A again
+    for a confirmation), then closes the menu. Returns True when the game's save
+    ran (a new script save table)."""
+    n = a.count(r"\[lua\] saving: script save table")
+    a.press("Start")
+    time.sleep(1.5)
+    a.press("Up")
+    time.sleep(0.8)
+    a.shot(f"{tag}_pause_on_save.png")
+    a.press("E")
+    for _ in range(3):
+        time.sleep(2.5)
+        if a.count(r"\[lua\] saving: script save table") > n:
+            break
+        a.shot(f"{tag}_after_A.png")
+        a.press("E")  # a confirmation box
+    ok = a.wait(f"{tag}: the pause-menu Save ran the game's save", r"\[lua\] saving: script save table", n, 20)
+    time.sleep(4)
+    for _ in range(3):  # back to the world
+        a.press("B")
+        time.sleep(1.0)
+    a.shot(f"{tag}_back_in_world.png")
+    return ok
+
+
+def run_savestress():
+    """The in-world save crash (batch1 2026-10-26: a console chunk ran during an
+    AutoSaveGame and the host crashed): host and partner in the world with
+    feature 002's kit ticking, 25 AutoSaveGame at 1-6 s spacing and 5 saves
+    through the pause menu. Pass: no crash, every save seen (script save table),
+    console scripts held while saving, then the partner leaves, the host saves
+    and continues the co-op save through the hub, and player 2's items, look and
+    the purses are kept."""
+    import random
+    rnd = random.Random(26)
+    setup_tomls()
+    relay_log = open(os.path.join(OUT, "relay_savestress.log"), "w")
+    relay = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                           "coop_relay.py")], stdout=relay_log, stderr=relay_log)
+    a, b = Game("mod-a", "host"), Game("mod-b", "partner")
+    a.start({"FABLE2_TEST_INPUT": "1"})
+    b.start({"FABLE2_TEST_INPUT": "1"})
+    try:
+        for g in (a, b):
+            g.n_menu = g.count(r"main menu: Co-op entry added")
+            g.past_title()
+        menu_then_coop(a, "ss", a.n_menu)
+        host_new_campaign(a, "ss")
+        menu_then_coop(b, "ss", b.n_menu)
+        wait_row(b, "Join TestA", "ss: the host's lobby is listed")
+        partner_joins(b, "Join TestA", "ss")
+        wait_row(a, "Start", "ss: host lobby shows the partner")
+        if not both_ready_and_start(a, b, "ss") or not join_phase(a, b, "ss"):
+            return
+        time.sleep(10)
+        ref = inv_dump(a, "ss_ref")
+        v = read_purses(a, b, "ss_purse0")
+        total = v[0] if v else None
+        n_tab = a.count(r"\[lua\] saving: script save table")
+        n_hold = a.count(r"\[lua\] saving: holding")
+        kit0 = a.count(r"publishing 'kit_state'")
+        issued = 0
+        for k in range(25):
+            out = lua_lines(a, f"print('SSAVE {k} ' .. tostring(pcall(AutoSaveGame, true, true)))", "SSAVE", 30)
+            issued += 1
+            if a.count(r"Unhandled guest") or b.count(r"Unhandled guest"):
+                note("FAIL", f"ss: a crash after AutoSaveGame #{k} ({out})")
+                return
+            time.sleep(rnd.uniform(1.0, 6.0))
+        for k in range(5):
+            pause_menu_save(a, f"ss_menu{k}")
+            issued += 1
+            if a.count(r"Unhandled guest") or b.count(r"Unhandled guest"):
+                note("FAIL", f"ss: a crash after pause-menu save #{k}")
+                return
+        time.sleep(10)
+        tables = a.count(r"\[lua\] saving: script save table") - n_tab
+        holds = a.count(r"\[lua\] saving: holding") - n_hold
+        kits = a.count(r"publishing 'kit_state'") - kit0
+        crashes = a.count(r"Unhandled guest") + b.count(r"Unhandled guest")
+        note("PASS" if crashes == 0 else "FAIL", f"ss: {issued} saves, {crashes} crash(es)")
+        note("PASS" if tables >= issued else "FAIL", f"ss: {tables} script save table(s) for {issued} saves")
+        note("PASS" if holds > 0 else "FAIL", f"ss: console scripts held while saving {holds} time(s) "
+                                              f"(002's kit published {kits} times meanwhile)")
+        # Every save loads: the partner leaves (the host saves and returns to the
+        # front end), the host continues the co-op save, the partner rejoins.
+        b.stop()
+        n = a.count(r"host: back at the front end")
+        if not a.wait("ss: partner gone -> host saves and returns to the front end",
+                      r"host: back at the front end", n, 240):
+            return
+        time.sleep(10)
+        b = Game("mod-b", "partner")
+        b.start({"FABLE2_TEST_INPUT": "1"})
+        if not host_continue_lobby(a, "ss_continue") or not partner_continue_join(a, b, "ss_continue"):
+            return
+        if total is not None:
+            check_kept(a, b, "ss_continue", ref, total)
+    finally:
+        for g in (a, b):
             g.stop()
         relay.kill()
 
@@ -2207,7 +2389,7 @@ def run_continue2():
 def main():
     os.makedirs(OUT, exist_ok=True)
     mode = sys.argv[1] if len(sys.argv) > 1 else "coop"
-    {"coop": run_coop, "solo": run_solo, "multi": run_multi, "menu": run_menu, "menu2": run_menu2, "err": run_err, "final": run_final, "last": run_last, "start": run_start, "purse": run_purse, "fps": run_fps, "combo": run_combo, "camera": run_camera, "luaq": run_luaq, "luaq_kept": run_luaq_kept, "continue2": run_continue2, "boots": run_boots, "worldgold": run_worldgold, "batch1": run_batch1}[mode]()
+    {"coop": run_coop, "solo": run_solo, "multi": run_multi, "menu": run_menu, "menu2": run_menu2, "err": run_err, "final": run_final, "last": run_last, "start": run_start, "purse": run_purse, "fps": run_fps, "combo": run_combo, "camera": run_camera, "luaq": run_luaq, "luaq_kept": run_luaq_kept, "continue2": run_continue2, "boots": run_boots, "worldgold": run_worldgold, "batch1": run_batch1, "savestress": run_savestress}[mode]()
     with open(os.path.join(OUT, f"results_{mode}.txt"), "w", encoding="utf-8") as f:
         f.write("\n".join(results) + "\n")
     return 0 if not any(r.startswith("FAIL") for r in results) else 1

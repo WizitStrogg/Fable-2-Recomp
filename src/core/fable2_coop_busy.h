@@ -94,7 +94,7 @@ inline void OnBusyLine(std::string_view line) {
 
 // Why this PC should not take a join or run a capture now; "" = free.
 inline std::string Busy() {
-  if (rex_content_save_busy()) return "save";
+  if (fable2::f5lua::saving()) return "saving";
   const int64_t now = fable2::f5lua::steady_ms();
   const int64_t loaded = fable2::f5lua::g_load_at_ms.load();
   if (loaded && now - loaded < kAfterLoadMs) return "level load";

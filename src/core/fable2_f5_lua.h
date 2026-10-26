@@ -383,6 +383,24 @@ inline void run_native(PPCContext& ctx, uint8_t* base) {
   g_running = false;
 }
 
+// The game is saving: no queued script or native task may run (batch1,
+// 2026-10-26: a console chunk ran 0.7 s into an in-world save and the host
+// crashed with a guest write fault; the half-written save then crashed the next
+// load). Saving = the script save table being built (sub_825B09D0, the caller
+// of GetSaveTable, hooked below) or within kSaveHoldMs of it, or a "Save"
+// content root open (the write; the SDK's rex_content_save_busy). Held scripts
+// run after the save.
+extern "C" int rex_content_save_busy();
+constexpr int64_t kSaveHoldMs = 3000;
+inline std::atomic<int> g_save_table_depth{0};
+inline std::atomic<int64_t> g_save_table_ms{0};
+inline std::atomic<uint32_t> g_saves_seen{0};
+inline std::atomic<uint32_t> g_save_hold_logged{0};
+inline bool saving() {
+  return g_save_table_depth.load() > 0 || rex_content_save_busy() ||
+         steady_ms() - g_save_table_ms.load() < kSaveHoldMs;
+}
+
 // True when run_pending has something to do (a native task, a queued script
 // or the F5 file); without it run_pending returns at once.
 inline bool has_pending() {
@@ -393,6 +411,14 @@ inline bool has_pending() {
 // Called by the dispatcher probe after the game's own call returned, at
 // dispatch depth 0. Runs the F5 file when latched, otherwise one queued script.
 inline void run_pending(PPCContext& ctx, uint8_t* base, const std::string& via) {
+  if (saving()) {
+    const uint32_t save = g_saves_seen.load();
+    if (has_pending() && g_save_hold_logged.exchange(save) != save) {
+      REXSYS_INFO("[lua] saving: holding {} script(s) and {} native task(s) until the save is written",
+                  g_queued.load(), g_native_count.load());
+    }
+    return;
+  }
   run_native(ctx, base);
   if (g_running.load() || (g_queued.load() == 0 && !g_f5_pending.load())) return;
   if (!REXCVAR_GET(coop_lua_runner)) {
@@ -722,6 +748,20 @@ extern "C" void sub_822DDF38(PPCContext& ctx, uint8_t* base) {  // other VM lua_
 // anything. nCcalls is read (rdable2 is a VirtualQuery; every call took 13.8%
 // of the game thread) only when a drain could follow: nothing pending, or
 // inside a pcall/resume/dispatch, run_pending would do nothing.
+// The script half of a save (game or level): builds the Lua save table with
+// GetSaveTable. Counted on the way in and out for saving().
+extern "C" void __imp__sub_825B09D0(PPCContext& ctx, uint8_t* base);
+extern "C" void sub_825B09D0(PPCContext& ctx, uint8_t* base) {
+  using namespace fable2::f5lua;
+  const uint32_t n = g_saves_seen.fetch_add(1) + 1;
+  g_save_table_ms.store(steady_ms());
+  ++g_save_table_depth;
+  REXSYS_INFO("[lua] saving: script save table #{} (scripts held; {} queued)", n, g_queued.load());
+  __imp__sub_825B09D0(ctx, base);
+  --g_save_table_depth;
+  g_save_table_ms.store(steady_ms());
+}
+
 extern "C" void ProcessAndIncrementAndProcess3_82228C70(PPCContext& ctx, uint8_t* base) {
   using namespace fable2::f5lua;
   g_dcall_hits.fetch_add(1, std::memory_order_relaxed);

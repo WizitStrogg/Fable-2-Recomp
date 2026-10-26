@@ -318,7 +318,8 @@ inline std::string seed_player2_chunk(bool male) {
   c += std::string("p.male = ") + (male ? "true" : "false") + "\n";
   c += "p.mor, p.pur, p.ren, p.title = 0, 0, 0, nil\n";
   c += "p.items = {}\n";
-  c += "CoopHero.Apply(hench, p, {body = false})\n";
+  c += "CoopHero.Apply(hench, p, {body = false, weapons = false})\n";
+  c += "CoopWeaponsDue = {e = hench, p = p}\n";  // weapons after the spawn settles (fable2_coop_hero.h)
   c += "print('[coop] player 2 seeded from the host starter profile')\n";
   c += "print(CoopHero.SerializeV2(CoopHero.Capture(hench), 0))\n";
   return c;
@@ -773,7 +774,8 @@ inline std::optional<std::string> restore_player2_chunk(const std::filesystem::p
   c += "if not hench or not hench:IsAlive() then print('[coop] restore: no live player 2') return end\n";
   c += "local p = CoopHero.Parse([" + eq + "[" + f->profile + "]" + eq + "])\n";
   c += "if not p then print('[coop] restore: bad profile') return end\n";
-  c += "CoopHero.Apply(hench, p, {body = false})\n";
+  c += "CoopHero.Apply(hench, p, {body = false, weapons = false})\n";
+  c += "CoopWeaponsDue = {e = hench, p = p}\n";  // weapons after the spawn settles (fable2_coop_hero.h)
   c += "print('[coop] player 2 restored from coop_player2.txt')\n";
   c += "print(CoopHero.SerializeV2(CoopHero.Capture(hench), 0))\n";
   return c;

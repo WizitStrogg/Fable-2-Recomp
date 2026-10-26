@@ -201,6 +201,36 @@ local function owns(entity, hex, id)
   return false
 end
 
+-- The saved weapons, added only when still missing from the inventory and
+-- the hand/sheath slots once player 2 is fully up (batch1, 2026-10-26: a
+-- restore right after the spawn found the slots still empty and added the
+-- sword and the pistol again as inventory items, 5 -> 7). Returns true when
+-- done; false while every slot is still empty (the caller tries again), unless
+-- final.
+function CoopHero.ApplyWeapons(entity, p, final)
+  local any = false
+  for _, slot in ipairs(WEAPON_SLOTS) do
+    local w = try("GetEntityInSlot", Carrying.GetEntityInSlot, entity, slot)
+    if w and w:IsAlive() then any = true end
+  end
+  if not any and not final and #p.weap > 0 then
+    print("[coop] weapons: player 2's weapon slots still empty, waiting")
+    return false
+  end
+  local added, had = 0, 0
+  for _, hex in ipairs(p.weap) do
+    local id = id_from_hex(hex)
+    if id and not owns(entity, hex, id) then
+      try("AddItemOfType " .. hex, Inventory.AddItemOfType, entity, id)
+      added = added + 1
+    elseif id then
+      had = had + 1
+    end
+  end
+  print("[coop] weapons: added " .. added .. ", already had " .. had)
+  return true
+end
+
 function CoopHero.Apply(entity, p, opts)
   opts = opts or {}
   if opts.body ~= false then
