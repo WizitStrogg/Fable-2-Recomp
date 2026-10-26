@@ -46,13 +46,13 @@ switches to its fallback; only a failed fallback is raised to Josh.
 
 - [x] T007 Proof P1: function-trace diff of A on New Game and on Continue at the main menu; intercept each and resume the original; screenshots
  → P1 verified: hook FrontMenu_PressBitDispatch 0x82188F20; intercept + resume proven (see research.md Proof results). `D:\Fable2-LAN\research\001-evidence\T018\`, `D:\Fable2-LAN\research\001-evidence\proofs\P1\`
-- [ ] T008 [P] Proof P2: fresh New Game on A, then `Gameflow:SetGameflowPosition(ScriptEnum.DebugQC060)`; compare with a reference QC060 state (position, age, titles, weapons, layers, chapter card); list gaps
+- [x] T008 [P] Proof P2: fresh New Game on A, then `Gameflow:SetGameflowPosition(ScriptEnum.DebugQC060)`; compare with a reference QC060 state (position, age, titles, weapons, layers, chapter card); list gaps (superseded 2026-10-26: campaigns start from a starter save copied into their own slot, not a debug gameflow position)
  → (open) P2 attempt ran on an adult save by a navigation error; skip API works (restart + QC060_NewBeginning started); fresh New Game run still needed. `D:\Fable2-LAN\research\001-evidence\launch2\`
 - [x] T009 [P] Proof P3: B at the main menu joins A's world through join-via-presence without loading a save; else build the hidden "lobby save" fallback and prove it
  → P3 verified: B joined from the main menu with F9, no save loaded; B's save unchanged. `D:\Fable2-LAN\research\001-evidence\launch2\p3_b_joined_frame.png`
 - [x] T010 [P] Proof P4a: where a new game's slot folder is created and how the load screen selects a slot; read a test marker file at selection time
  → P4a verified: load = root Save OPEN_EXISTING; New Game creates next HeroNNN with CREATE_ALWAYS and writes a starting save at once. `D:\Fable2-LAN\research\001-evidence\proofs\RESULTS.md`
-- [ ] T011 Proof P4b: find and hook the game's save routine on A; log every manual save and autosave with the slot path; prove the hook fires after the write completes
+- [x] T011 Proof P4b: find and hook the game's save routine on A; log every manual save and autosave with the slot path; prove the hook fires after the write completes (superseded 2026-10-26: the co-op save is made with the game's own AutoSaveGame from the front end, so no save-routine hook is needed)
  → (partly) manual save verified: OPEN_ALWAYS, folder kept, close after last write = hook point; autosave not yet observed. `D:\Fable2-LAN\research\001-evidence\proofs\P4\`
 - [ ] T012 [P] Proof P5: B picks up gold and A completes a quest with a gold reward; record where player 2's gold goes; test `Multiplayer.SetHenchmanGoldValue(0)` plus redirect to `Money.Modify(host, n)`
  → (partly) Money.Modify(p2,100) -> host +50, p2 +50 (henchman share 50/50); pickups/quest rewards not yet tested. `D:\Fable2-LAN\research\001-evidence\launch2\`
@@ -60,7 +60,7 @@ switches to its fallback; only a failed fallback is raised to Josh.
  → (partly) loss detected ~3.5 s, host calls XSessionLeaveRemote, stays in world; save + return to lobby not yet proven. `D:\Fable2-LAN\research\001-evidence\launch2\p6_a_log_after_kill.txt`
 - [x] T014 [P] Proof P7: zip a slot, measure size, send it over a test TCP connection between A and B, verify hashes
  → P7 verified on loopback (ZeroTier unverified). `D:\Fable2-LAN\research\001-evidence\proofs\P7\p7_run1.txt`
-- [ ] T015 Write all proof results and chosen fallbacks into `specs/001-coop-campaign/research.md`; post one milestone message to the project thread
+- [x] T015 Write all proof results and chosen fallbacks into `specs/001-coop-campaign/research.md`; post one milestone message to the project thread (done: specs/001-coop-campaign/research.md and research/001-evidence/)
 
 ### Foundations
 
@@ -71,7 +71,7 @@ switches to its fallback; only a failed fallback is raised to Josh.
  → (code done, rig check pending: luafile coop_capture2)
 - [x] T018 Front-end intercept in `src/core/fable2_coop_frontend.h` per P1: New Game shows Solo / Co-op (Solo = original handler), Continue checks the selected slot for a marker
  → done, verified on the rig: New Game -> Solo / Co-op / Back; Solo -> stock hero cards; Co-op -> host lobby; B returns. `D:\Fable2-LAN\research\001-evidence\T018\launch1_02_chooser_screen.png`, `launch1_03_solo_hero_cards_frame.png`, `D:\Fable2-LAN\research\001-evidence\launch2\t018_a_host_lobby_screen.png`
-- [ ] T019 Lobby overlay and state machine in `src/core/fable2_coop_lobby.h` per `contracts/lobby-protocol.md`, with pad and keyboard navigation
+- [x] T019 Lobby overlay and state machine in `src/core/fable2_coop_lobby.h` per `contracts/lobby-protocol.md`, with pad and keyboard navigation (superseded 2026-10-26: the native main-menu Co-op entry and hub, src/core/fable2_coop_mainmenu.h and fable2_coop_frontend.h)
  → (partly) chooser and host lobby panel verified on the rig; partner side (seat, ready, coop_go) not yet run. `D:\Fable2-LAN\research\001-evidence\launch2\t018_a_host_lobby_screen.png`
 
 **Checkpoint**: proofs answered; Solo still starts the normal game (rig screenshot)
@@ -82,14 +82,14 @@ switches to its fallback; only a failed fallback is raised to Josh.
 
 **Independent Test**: rig: A creates, B joins, both arrive at the adult start, B's gender as chosen, marker on A, solo slots unchanged
 
-- [ ] T020 [US1] Lobby `new` flow: host advertises, partner lists and seats, gender and childhood choices, ready states, host-only Start (`fable2_coop_lobby.h`)
+- [x] T020 [US1] Lobby `new` flow: host advertises, partner lists and seats, gender and childhood choices, ready states, host-only Start (`fable2_coop_lobby.h`) (superseded 2026-10-26: the hub's Host: new co-op campaign flow, proven by coop_ship_e2e menu/start)
 - [x] T021 [US1] Start: host runs the original New Game, then the skip to adulthood (`data/scripts/recomp/coop_campaign.lua`) per P2, with defaults for anything the skip misses → (changed 2026-10-23, research.md "P2 -> fallback A") Start copies the starter-save template into the next HeroNNN and Continue loads it; the gameflow skip is kept behind coop_childhood_skip (off). Waiting for Josh's childhood playthrough in mod-c for the template.
   - Result: Done (fallback A): Start makes a campaign slot from the starter save (QC060) and the game's own Continue loads it, lobby gender applied. Evidence: research/001-evidence/launch17/launch17_results.txt
 - [x] T022 [US1] Partner join after `coop_go` via the P3 path; player 2 spawned as `CreatureHero`/`CreatureHeroFemale` per the chosen gender (v13 selector override)
   - Result: Done: partner joins after coop_go; host join gate fixed (friends-only check, fable2_coop_joingate.h); join screens auto-accepted; player 2 spawns at the Gypsy camp (launches 16, 17). Evidence: research/001-evidence/launch17/launch17_results.txt, launch17/2_a_camp_with_p2_screen.png
 - [x] T023 [US1] Write `coop_campaign.toml` after the first successful save with both in the world (`fable2_coop_campaign.h`)
   - Result: Done with a change: the marker is written into the new slot at Start (not after the first save), so Continue can recognize the campaign; the game's own saves keep it (P4b check, launch 17). Evidence: launch17/2_marker.toml, research/001-evidence/launch17/launch17_results.txt
-- [ ] T024 [US1] Rig verification, 3 runs: full flow driven by `fable2_control.py`; screenshots of lobby and both worlds; marker contents; solo slot hashes unchanged
+- [x] T024 [US1] Rig verification, 3 runs: full flow driven by `fable2_control.py`; screenshots of lobby and both worlds; marker contents; solo slot hashes unchanged (superseded 2026-10-26: tools/coop_ship_e2e.py on the ship build replaces fable2_control.py rig runs)
 
 **Checkpoint**: US1 proven
 
@@ -157,8 +157,8 @@ switches to its fallback; only a failed fallback is raised to Josh.
   - Result: Superseded (2026-10-24): co-op joins now work inside QC060 (the refusal was the friends-only join check, fixed in fable2_coop_joingate.h; launches 16-18). The childhood template is the starter save; no further playthrough needed.
 - [x] T035b Offline alternative to T035a: from the QC060 template, finish QC060 by script (Lua / gameflow: end the quest and move the gameflow to QC070 so AllowHenchman(true) runs) and save, so no playthrough is needed. Also replace tools\check_template.py's gossip markers (they are deactivated later in the story; a mid-game save shows 0 too) with a reliable "past QC060" check.
   - Result: Superseded with T035a: no scripted QC060 completion needed.
-- [ ] T036 [JOSH] Gate 2 for v14: Josh approves install into `D:\Fable2-LAN\mod` and friend zip `Fable2-LAN-friend-v14.zip`
-- [ ] T037 Install v14 (no game running), build friend zip, post release message
+- [x] T036 [JOSH] Gate 2 for v14: Josh approves install into `D:\Fable2-LAN\mod` and friend zip `Fable2-LAN-friend-v14.zip` (done: Josh's "Install zip" / "Install, zip, merge", 2026-10-24 and 2026-10-25)
+- [x] T037 Install v14 (no game running), build friend zip, post release message (done: installs with backups D:\Fable2-LAN\backups\20261024-212846-pre-v14 and 20261025-130039-pre-v14; friend-package\Fable2-LAN-friend-v14.zip)
 - [ ] T038 [JOSH] Josh and Calvin create a campaign and play two sessions on two PCs; findings become new tasks here
 
 **Checkpoint**: v14 released (US1 to US4)
@@ -185,7 +185,7 @@ switches to its fallback; only a failed fallback is raised to Josh.
 - [x] T044 Two-hour stability run on the rig with both players active; solo slots re-hashed
   - Result: Done: 120.1 min with both players moving, no crash, partner never lost; memory flat after 60 min (host 1525->1530 MB, partner 1303->1304 MB); 4 saves each wrote player 2 and a verified backup. Solo slots of the partner were not loaded. Evidence: research/001-evidence/stability/T044-T040-NOTES.txt, stability/memory.tsv, stability/stability_results.txt
   - Pre-run 2026-10-24 03:53Z stopped after 4 min for a gfx-test launch (no failure; research/001-evidence/stability-prerun/). Full run pending.
-- [ ] T045 [JOSH] Merge `coop/001-coop-campaign` into `systemlink` in both repos after approval
+- [x] T045 [JOSH] Merge `coop/001-coop-campaign` into `systemlink` in both repos after approval (done: Fable-2-Recomp PRs #1, #2, #3 merged into systemlink, a19b83b; rexglue-sdk PR #2)
 - [x] T046 Update `specs/README.md`; run `/speckit-plan` and `/speckit-tasks` for 002 and post them for Gate 1
   - Result: specs/002-player2-kit/plan.md and tasks.md written (direct patching: XP credit override, native use-item and learn paths; builds on 001's proven pieces); research.md updated; status ready for Josh's review (Gate 1). specs/README.md updated.
 
@@ -208,7 +208,7 @@ switches to its fallback; only a failed fallback is raised to Josh.
 - [x] T051 Go acknowledged by the partner (coop_ack), re-sent every 15 s; 2-minute limit with a message on both PCs (src/core/fable2_coop_frontend.h)
 - [x] T052 Native "Co-op" main-menu entry below Continue through the game's own AddEntry; its selection opens the hub (src/core/fable2_coop_mainmenu.h) - built, proof launch pending
 - [x] T053 Co-op hub: lobbies to join, "Host: continue a co-op save" (save list), "Host: new co-op campaign", Back; New Game and Continue stock again; the host loads through the menu's own "Load Game" - built, proof launch pending
-- [ ] T054 Ship-build proof (tools/coop_ship_e2e.py menu, two networks): menu screenshot, new campaign join, partner leaves, continue the co-op save, rejoin, host-left message, stock New Game
-- [ ] T055 Reinstall v14 into D:\Fable2-LAN\mod (backup) and rebuild the friend zip after T054 passes
+- [x] T054 Ship-build proof (tools/coop_ship_e2e.py menu, two networks): menu screenshot, new campaign join, partner leaves, continue the co-op save, rejoin, host-left message, stock New Game (done: research/001-evidence/menus/ship-e2e/ and for-josh/, modes menu, menu2, err, start, continue2, luaq, boots)
+- [x] T055 Reinstall v14 into D:\Fable2-LAN\mod (backup) and rebuild the friend zip after T054 passes (done: reinstall 2026-10-25, backup 20261025-130039-pre-v14; zip rebuilt from staging-v14)
 - [x] T056 Shared purse on the partner's screen: the host publishes its total (coop_purse), the partner mirrors it (tools/coop_lobby_test.cpp purse checks pass); proof launch pending
 - [ ] T057 Joiner camera felt buggy/glitchy in Josh's 2026-10-25 one-PC playtest; needs further testing on two PCs
