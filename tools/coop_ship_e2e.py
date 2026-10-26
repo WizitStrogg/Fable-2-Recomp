@@ -1802,6 +1802,19 @@ def run_worldgold():
         relay.kill()
 
 
+def wg_place_before_p2(a, table, idx, dist):
+    """Host Lua: move object table[idx] dist m in front of player 2 (the host
+    owns world objects; player 2's position is the partner's own)."""
+    out = lua_lines(a, (
+        f"local ok, e = pcall(function() local h = GetPlayerHenchman(); local o = {table}[{idx}]; "
+        f"local p = h:GetPosition(); local f = Physics.GetFacingVector(h); "
+        f"local st = CVector3(p:GetX() + f:GetX() * {dist}, p:GetY() + f:GetY() * {dist}, p:GetZ()); "
+        f"Physics.TeleportToPosition(o, st); print(string.format('WGPLACE %s %d %.1f m in front of player 2', "
+        f"'{table}', {idx}, {dist})) end); if not ok then print('WGPLACE error ' .. tostring(e)) end"), "WGPLACE", 10)
+    note("INFO", f"worldgold: {out}")
+    return bool(out) and "error" not in out[-1]
+
+
 def wg_partner_goto(b, xyz, kind, side):
     """The partner's own Lua (its copy owns its position: a teleport from the
     host's side does not stick, batch1 2026-10-26): find the gold object or
@@ -1825,8 +1838,8 @@ def wg_partner_goto(b, xyz, kind, side):
 
 
 def wg_partner_pickup(a, b, idx, xyz, tag, start):
-    for side in range(4):
-        if not wg_partner_goto(b, xyz, "gold", side):
+    for side, dist in enumerate((0.9, 0.6, 1.2, 0.4)):
+        if not wg_place_before_p2(a, "WGG", idx, dist):
             continue
         time.sleep(1.5)
         before = read_purses(a, b, f"{tag}_before_A_side{side}")
@@ -1850,8 +1863,8 @@ def wg_partner_pickup(a, b, idx, xyz, tag, start):
 
 
 def wg_partner_chest(a, b, idx, xyz, tag, start):
-    for side in range(4):
-        if not wg_partner_goto(b, xyz, "chest", side):
+    for side, dist in enumerate((1.3, 1.0, 1.6, 0.8)):
+        if not wg_place_before_p2(a, "WG", idx, dist):
             continue
         time.sleep(1.5)
         before = read_purses(a, b, f"{tag}_before_A_side{side}")
@@ -2122,6 +2135,11 @@ def pause_menu_save(a, tag):
     n = a.count(r"\[lua\] saving: script save table")
     a.press("Start")
     time.sleep(1.5)
+    p = a.shot(f"{tag}_pause_open.png")
+    if cover_metrics(p)[0] < 0.05:  # no parchment: a quest card took the Start (savestress, 2026-10-26)
+        time.sleep(3)
+        a.press("Start")
+        time.sleep(1.5)
     a.press("Up")
     time.sleep(0.8)
     a.shot(f"{tag}_pause_on_save.png")
@@ -2200,6 +2218,8 @@ def run_savestress():
         note("PASS" if tables >= issued else "FAIL", f"ss: {tables} script save table(s) for {issued} saves")
         note("PASS" if holds > 0 else "FAIL", f"ss: console scripts held while saving {holds} time(s) "
                                               f"(002's kit published {kits} times meanwhile)")
+        v = read_purses(a, b, "ss_purse_before_leave")
+        total = v[0] if v and v[0] == v[1] == v[2] else total
         # Every save loads: the partner leaves (the host saves and returns to the
         # front end), the host continues the co-op save, the partner rejoins.
         b.stop()
