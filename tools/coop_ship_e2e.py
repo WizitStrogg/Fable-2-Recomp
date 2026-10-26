@@ -216,7 +216,9 @@ class Game:
 
     def press(self, name):
         if self.test_input:
-            self.send(f"press {dict(E='A').get(name, name)} 120")  # E is A on Josh's keyboard map
+            # 60 ms: a 120 ms hold sometimes moved the menu two rows (boots,
+            # 2026-10-25: Down, Down landed on Language, past Co-op).
+            self.send(f"press {dict(E='A').get(name, name)} 60")  # E is A on Josh's keyboard map
             time.sleep(0.45)
             return
         focus(self.hwnd)
@@ -266,9 +268,17 @@ class Game:
             self.proc.terminate()
             self.proc.wait(15)
 
-    def past_title(self):
+    def past_title(self, blind=False):
+        if blind:  # FABLE2_TEST_PROBE=blind: no state line will come; the stock title takes the A
+            time.sleep(20)
+            self.press("E")
+            note("INFO", f"{self.who}: probe kept blind; title A pressed after 20 s")
+            time.sleep(4)
+            return
+        # 30 s, then A regardless: a blind state probe (wt002-b fable_2_026.log,
+        # 2026-10-25) left the title waiting for minutes; the FAIL line stays.
         self.wait("menu detected in the ship build ([state] -> PressAScreen/MainMenu)",
-                  r"\[state\].*-> (PressAScreen|MainMenu)", 0, 240)
+                  r"\[state\].*-> (PressAScreen|MainMenu)", 0, 30)
         time.sleep(5)
         # One press only: a retry that lands on the menu starts the stock New Game
         # (launch of 2026-10-24, the error path).
@@ -1037,14 +1047,17 @@ def console(g, command):
 def read_purses(a, b, tag):
     """Host: its hero and its henchman copy; partner: its own purse (the one its
     screen shows). Returns (host, host's henchman copy, partner) or None."""
-    na, nb = a.count(r"PURSECHK host"), b.count(r"PURSECHK partner")
+    # The print itself ("[lua] PURSECHK host 150 150"), not the test-input echo
+    # of the command, which arrives first (boots, 2026-10-25: int('..Money...')).
+    ph, pp = r"\[lua\] PURSECHK host -?\d", r"\[lua\] PURSECHK partner -?\d"
+    na, nb = a.count(ph), b.count(pp)
     console(a, "lua print('PURSECHK host '..Money.Get(GetPlayerHero())..' '..Money.Get(GetPlayerHenchman()))")
     console(b, "lua print('PURSECHK partner '..Money.Get(GetPlayerHenchman()))")
-    if not (a.wait(f"{tag}: host purses read", r"PURSECHK host", na, 15) and
-            b.wait(f"{tag}: partner purse read", r"PURSECHK partner", nb, 15)):
+    if not (a.wait(f"{tag}: host purses read", ph, na, 15) and
+            b.wait(f"{tag}: partner purse read", pp, nb, 15)):
         return None
-    h = [l for l in a.lines() if "PURSECHK host" in l][-1].split("PURSECHK host ")[1].split()
-    p = [l for l in b.lines() if "PURSECHK partner" in l][-1].split("PURSECHK partner ")[1].split()
+    h = [l for l in a.lines() if re.search(ph, l)][-1].split("PURSECHK host ")[1].split()
+    p = [l for l in b.lines() if re.search(pp, l)][-1].split("PURSECHK partner ")[1].split()
     return int(h[0]), int(h[1]), int(p[0])
 
 
@@ -1360,22 +1373,41 @@ def run_camera():
         relay.kill()
 
 
-def run_luaq():
+def unpause(a, b, tag):
+    """Closes the partner's pause menu: Start, then B if the games stay paused
+    (boots, 2026-10-25: with 002's full wheel the second Start left both paused).
+    Resumed = the host's queued Lua runs again or coopkit logs the resume."""
+    resumed = r"\[coopkit\] host: game resumed|\[lua\] ran scripts"
+    for inp in ("Start", "B"):
+        n = a.count(resumed)
+        b.press(inp)
+        time.sleep(3)
+        if a.count(resumed) > n:
+            note("PASS" if inp == "Start" else "INFO", f"{tag}: the partner's {inp} closed the pause")
+            return inp
+        note("INFO", f"{tag}: still paused 3 s after the partner's {inp}")
+    b.shot(f"{tag}_unpause_failed_partner.png")
+    a.shot(f"{tag}_unpause_failed_host.png")
+    note("FAIL", f"{tag}: neither Start nor B closed the partner's pause")
+    return None
+
+
+def run_luaq(host_probe=None):
     """The Lua console slot fix (b422910 + 9cace5a): the join (start flow), a
     normal purse step, then the partner pauses for ~20 s while the host gains and
     spends gold. Pass: the same total on all purses after the pause, each change
-    run exactly once, no chunk lost."""
+    run exactly once, no chunk lost. host_probe: FABLE2_TEST_PROBE for the host."""
     setup_tomls()
     relay_log = open(os.path.join(OUT, "relay_luaq.log"), "w")
     relay = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                                            "coop_relay.py")], stdout=relay_log, stderr=relay_log)
     a, b = Game("mod-a", "host"), Game("mod-b", "partner")
-    a.start({"FABLE2_TEST_INPUT": "1"})
+    a.start(dict({"FABLE2_TEST_INPUT": "1"}, **({"FABLE2_TEST_PROBE": host_probe} if host_probe else {})))
     b.start({"FABLE2_TEST_INPUT": "1"})
     try:
         for g in (a, b):
             g.n_menu = g.count(r"main menu: Co-op entry added")
-            g.past_title()
+            g.past_title(blind=g is a and host_probe == "blind")
         menu_then_coop(a, "luaq", a.n_menu)
         host_new_campaign(a, "luaq")
         menu_then_coop(b, "luaq", b.n_menu)
@@ -1396,6 +1428,7 @@ def run_luaq():
         # A normal step.
         a.send("lua Money.Modify(GetPlayerHero(), 150) print('LUAQ gain1')")
         check_purse(a, b, "luaq_purse1_gain_150", start + 150)
+        time.sleep(3)  # the gold screens have closed (boots, 2026-10-25)
         # The pause variant: the partner's pause menu (it pauses both games) for
         # ~20 s while the host gains 150 and spends 100; then it closes.
         b.press("Start")
@@ -1406,7 +1439,7 @@ def run_luaq():
         time.sleep(8)
         a.send("lua Money.Modify(GetPlayerHero(), -100) print('LUAQ spend2')")
         time.sleep(10)
-        b.press("Start")
+        unpause(a, b, "luaq")
         expect = start + 150 + 150 - 100
         time.sleep(10)  # queued and kept chunks run after the pause; the sync and mirror follow
         v = read_purses(a, b, "luaq_after_pause")
@@ -1431,6 +1464,79 @@ def run_luaq():
         for g in (a, b):
             g.stop()
         relay.kill()
+
+
+def dcall_report(g, tag):
+    """The luaD_call minute lines: calls, nCcalls reads (each a VirtualQuery)."""
+    rows = [re.search(r"luaD_call (\d+) \(VM thread (\d+), outermost (\d+), nCcalls reads (\d+)\)", l)
+            for l in g.lines() if "last minute: luaD_call" in l]
+    rows = [tuple(int(x) for x in m.groups()) for m in rows if m]
+    if not rows:
+        note("FAIL", f"{tag}: {g.who}: no luaD_call minute lines with nCcalls reads")
+        return
+    busy = [r for r in rows if r[1] > 10000]
+    note("INFO", f"{tag}: {g.who}: per minute (calls, VM thread, outermost, reads): {rows}")
+    # 002 queues a COOPKIT chunk every ~0.5 s, so some reads remain: PASS at
+    # <= 1% of the VM-thread calls in every busy minute.
+    worst = max((r[3] / r[1] for r in busy), default=0.0)
+    note("PASS" if busy and worst <= 0.01 else "FAIL",
+         f"{tag}: {g.who}: nCcalls reads at most {worst:.2%} of VM-thread luaD_calls over {len(busy)} "
+         f"busy minute(s) (before c405db4: one per VM-thread call, 162k-755k/min)")
+
+
+def run_boots():
+    """Boot-hang check (wt002-b fable_2_026.log): both copies cold-boot 4 times;
+    each boot must reach a menu state on the probe, pass the title, build the
+    menu with the Co-op entry and open the hub through the real menu. Then one
+    luaq run (it includes the host's Start and the partner's join) with the
+    luaD_call minute lines (nCcalls reads)."""
+    setup_tomls()
+    for i in range(1, 5):
+        tag = f"boot{i}"
+        # Boot 2 forces the stale latch on both copies (the 026 failure).
+        env = dict({"FABLE2_TEST_INPUT": "1"}, **({"FABLE2_TEST_PROBE": "stale"} if i == 2 else {}))
+        a, b = Game("mod-a", "host"), Game("mod-b", "partner")
+        a.start(env)
+        b.start(env)
+        try:
+            for g in (a, b):
+                g.n_menu = g.count(r"main menu: Co-op entry added")
+                g.past_title()
+            for g in (a, b):
+                menu_then_coop(g, tag, g.n_menu)
+                stale = g.count(r"front-end value copy at .* went stale")
+                blind = g.count(r"state probe has no state")
+                note("INFO", f"{tag}: {g.who}: probe stale copies {stale}, menu fallback used {blind}")
+                if i == 2:
+                    forced = g.count(r"\[state\] test: the value copy at")
+                    note("PASS" if forced and stale else "FAIL",
+                         f"{tag}: {g.who}: forced stale copy re-hunted (forced {forced}, re-hunts {stale})")
+        finally:
+            for g in (a, b):
+                g.stop()
+        time.sleep(5)
+    # The host's probe kept blind for the whole front end: the in_main_menu
+    # fallback must still turn the host's Start into the game's Load Game.
+    run_luaq(host_probe="blind")
+    hosts = []
+    for g in (Game("mod-a", "host"), Game("mod-b", "partner")):
+        logs = sorted(glob.glob(os.path.join(g.dir, "logs", "*.log")), key=os.path.getmtime)
+        g.log = logs[-1]
+        hosts.append(g)
+        dcall_report(g, "boots_luaq")
+    a = hosts[0]
+    checks = [("probe kept blind", r"\[state\] test: probe kept blind"),
+              ("no state line after boot", None),
+              ("menu fallback warning", r"state probe has no state"),
+              ("Start loaded through Load Game", r"main menu: Load Game"),
+              ("player 2 spawned", r"player 2 spawned|campaign player 2 queued")]
+    for what, pat in checks:
+        if pat is None:
+            n = len([l for l in a.lines() if "[state]" in l and "boot=0ms" not in l and "test:" not in l])
+            note("PASS" if n == 0 else "FAIL", f"boots_blind: host: {what} ({n} state change(s))")
+        else:
+            n = a.count(pat)
+            note("PASS" if n else "FAIL", f"boots_blind: host: {what} ({n})")
 
 
 def run_luaq_kept():
@@ -1601,7 +1707,7 @@ def run_continue2():
 def main():
     os.makedirs(OUT, exist_ok=True)
     mode = sys.argv[1] if len(sys.argv) > 1 else "coop"
-    {"coop": run_coop, "solo": run_solo, "multi": run_multi, "menu": run_menu, "menu2": run_menu2, "err": run_err, "final": run_final, "last": run_last, "start": run_start, "purse": run_purse, "fps": run_fps, "combo": run_combo, "camera": run_camera, "luaq": run_luaq, "luaq_kept": run_luaq_kept, "continue2": run_continue2}[mode]()
+    {"coop": run_coop, "solo": run_solo, "multi": run_multi, "menu": run_menu, "menu2": run_menu2, "err": run_err, "final": run_final, "last": run_last, "start": run_start, "purse": run_purse, "fps": run_fps, "combo": run_combo, "camera": run_camera, "luaq": run_luaq, "luaq_kept": run_luaq_kept, "continue2": run_continue2, "boots": run_boots}[mode]()
     with open(os.path.join(OUT, f"results_{mode}.txt"), "w", encoding="utf-8") as f:
         f.write("\n".join(results) + "\n")
     return 0 if not any(r.startswith("FAIL") for r in results) else 1

@@ -533,6 +533,11 @@ inline uint16_t injected_now() {
   return b;
 }
 
+// Another module may rewrite the game's pad-0 buttons (lobby panel closed):
+// fable2_coop_kit.h turns the partner's Start into B while its full pause wheel
+// is up. nullptr = the buttons go through unchanged.
+inline uint16_t (*g_game_pad_hook)(uint16_t buttons) = nullptr;
+
 // Stick and trigger injection (the test input source only): held values for
 // a time window, applied before everything else reads the pad.
 struct InjectedAnalog {
@@ -576,7 +581,8 @@ inline void input_filter(uint32_t user_index, rex::input::X_INPUT_STATE* state) 
   const uint16_t now = static_cast<uint16_t>(state->gamepad.buttons | inj);
   if (!g_open.load()) {
     g_prev_buttons = now;
-    if (inj) state->gamepad.buttons.set(now);
+    const uint16_t game = g_game_pad_hook ? g_game_pad_hook(now) : now;
+    if (inj || game != now) state->gamepad.buttons.set(game);
     return;
   }
   const uint16_t pressed = now & ~g_prev_buttons;

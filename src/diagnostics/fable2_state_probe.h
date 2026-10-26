@@ -417,10 +417,31 @@ inline FrontEndText scan_front_end() {
 // string and (b) a table entry holding a pointer to the flag-name constant.
 // Once the value copy is found it is re-read every sample, so the classifier
 // knows whether the game is still in the front end.
+// Test only (tools/coop_ship_e2e.py boots; needs FABLE2_TEST_INPUT=1, which
+// no launcher sets): FABLE2_TEST_PROBE=stale makes the first latched value copy
+// read as reused memory from then on; =blind keeps the state at "?" for good.
+enum TestProbe { kTestNone = 0, kTestStale = 1, kTestBlind = 2 };
+inline int test_probe() {
+  static const int m = [] {
+#ifdef _WIN32
+    char t[8] = {}, v[16] = {};
+    size_t n = 0;
+    if (::getenv_s(&n, t, sizeof(t), "FABLE2_TEST_INPUT") != 0 || t[0] != '1') return kTestNone;
+    if (::getenv_s(&n, v, sizeof(v), "FABLE2_TEST_PROBE") != 0) return kTestNone;
+    if (std::strcmp(v, "stale") == 0) return kTestStale;
+    if (std::strcmp(v, "blind") == 0) return kTestBlind;
+#endif
+    return kTestNone;
+  }();
+  return m;
+}
+inline uint32_t g_test_reused_addr = 0;  // kTestStale: the copy that "was reused"
+
 struct FrontEndFlag {
   uint32_t value_addr = 0;  // heap copy of the GUI_FRONT_END value string
   bool value_found = false;
   char value[64] = {};
+  int hunts = 0;  // heap passes made (a stale copy restarts the count)
 };
 inline FrontEndFlag& fe_flag() {
   static FrontEndFlag* f = new FrontEndFlag;  // leaked on purpose
@@ -445,11 +466,38 @@ inline std::string CurrentFrontEndValue() {
   return std::string(f.value);
 }
 
+// A scenario name: letters, digits and '_' ("DefaultScenario",
+// "QC010_ChildhoodStart"), NUL-terminated within the buffer.
+inline bool looks_like_value(const uint8_t* b, size_t cap) {
+  size_t n = 0;
+  for (; n < cap && b[n]; ++n) {
+    if (!std::isalnum(b[n]) && b[n] != '_') return false;
+  }
+  return n < cap;
+}
+
+// The first copy the hunt finds can be a temporary one that is freed and
+// reused at boot (wt002-b fable_2_026.log, 2026-10-25: the latched address
+// then read as something else, front_end went false and the state stayed "?"
+// for ten minutes on the title screen). A copy that no longer reads as a
+// value is dropped and the hunt starts again.
 inline void fe_flag_read() {
   FrontEndFlag& f = fe_flag();
   if (!f.value_found) return;
   uint8_t b[64] = {};
   if (aread(f.value_addr, b, sizeof b)) {
+    if (f.value_addr == g_test_reused_addr) {
+      static const uint8_t kReused[] = {0x01, 0x8A, 0x00};
+      std::memcpy(b, kReused, sizeof kReused);
+    }
+    if (!looks_like_value(b, sizeof b)) {
+      REXSYS_INFO("[state] front-end value copy at 0x{:08X} went stale; hunting again", f.value_addr);
+      f.value_found = false;
+      f.value_addr = 0;
+      f.value[0] = 0;
+      f.hunts = 0;
+      return;
+    }
     size_t n = 0;
     while (n < 63 && b[n]) ++n;
     std::memcpy(f.value, b, n);
@@ -461,11 +509,10 @@ inline void fe_flag_read() {
 // table entries that point at the static constants above.
 inline void fe_flag_hunt() {
   FrontEndFlag& f = fe_flag();
-  static int hunts = 0;
   // The value copy is present from early boot; stop the full-heap scan once
   // it is found (and the flag-name context is logged), or after ~5 min.
-  if (f.value_found && hunts > 20) return;
-  if (++hunts > 300) return;
+  if (f.value_found && f.hunts > 20) return;
+  if (++f.hunts > 300) return;
   const uint32_t search_base = 0x40000000u;
   const uint32_t kEnd = 0x50000000u;
   const size_t chunk = 65536;
@@ -498,6 +545,12 @@ inline void fe_flag_hunt() {
       // (a) runtime copy of the value string (ASCII or UTF-16BE)
       if (f.value_found) continue;
       if (std::memcmp(buf + i, needle, 15) == 0) {
+        if (a + (uint32_t)i == g_test_reused_addr) continue;
+        if (test_probe() == kTestStale && g_test_reused_addr == 0) {
+          g_test_reused_addr = a + (uint32_t)i;
+          REXSYS_INFO("[state] test: the value copy at 0x{:08X} reads as reused memory from now on",
+                      g_test_reused_addr);
+        }
         f.value_found = true;
         f.value_addr = a + (uint32_t)i;
         if (logging()) {
@@ -639,6 +692,15 @@ inline void do_sample() {
     raw = kPressAScreen;  // the "to start" prompt is drawn
   } else {
     raw = kPreMainMenu;  // front end + render active, but no prompt/menu yet
+  }
+
+  if (test_probe() == kTestBlind) {
+    static bool logged = false;
+    if (!logged) {
+      logged = true;
+      REXSYS_INFO("[state] test: probe kept blind (state \"?\")");
+    }
+    raw = kUnknown;
   }
 
   // 2-sample hysteresis: a single one-second dip (e.g. the prompt blink-off
