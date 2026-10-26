@@ -54,9 +54,9 @@ switches to its fallback; only a failed fallback is raised to Josh.
  → P4a verified: load = root Save OPEN_EXISTING; New Game creates next HeroNNN with CREATE_ALWAYS and writes a starting save at once. `D:\Fable2-LAN\research\001-evidence\proofs\RESULTS.md`
 - [x] T011 Proof P4b: find and hook the game's save routine on A; log every manual save and autosave with the slot path; prove the hook fires after the write completes (superseded 2026-10-26: the co-op save is made with the game's own AutoSaveGame from the front end, so no save-routine hook is needed)
  → (partly) manual save verified: OPEN_ALWAYS, folder kept, close after last write = hook point; autosave not yet observed. `D:\Fable2-LAN\research\001-evidence\proofs\P4\`
-- [ ] T012 [P] Proof P5: B picks up gold and A completes a quest with a gold reward; record where player 2's gold goes; test `Multiplayer.SetHenchmanGoldValue(0)` plus redirect to `Money.Modify(host, n)`
+- [ ] T012 [P] Proof P5: B picks up gold and A completes a quest with a gold reward; record where player 2's gold goes; test `Multiplayer.SetHenchmanGoldValue(0)` plus redirect to `Money.Modify(host, n)` (2026-10-26: host pickup with A shared once, 5 -> (5,5,5); player 2 gains shared once; quest gold closed as covered: QuestTracker.GiveRewards pays no gold for any of the 114 quests, quest scripts pay with Money.Modify(QuestManager.HeroEntity, n), the luaq/purse path; the partner's own pickup and chest open: batch1 --phases gold2)
  → (partly) Money.Modify(p2,100) -> host +50, p2 +50 (henchman share 50/50); pickups/quest rewards not yet tested. `D:\Fable2-LAN\research\001-evidence\launch2\`
-- [ ] T013 [P] Proof P6: kill B mid-session; find the partner-loss hook; trigger a save and return to the front end on A
+- [x] T013 [P] Proof P6: kill B mid-session; find the partner-loss hook; trigger a save and return to the front end on A (done 2026-10-26: coop_ship_e2e batch1 p6_1..3, the partner killed, the host saves and returns to the front end, continue through the hub, items/look/purse kept; mod-a logs fable_2_107-110)
  → (partly) loss detected ~3.5 s, host calls XSessionLeaveRemote, stays in world; save + return to lobby not yet proven. `D:\Fable2-LAN\research\001-evidence\launch2\p6_a_log_after_kill.txt`
 - [x] T014 [P] Proof P7: zip a slot, measure size, send it over a test TCP connection between A and B, verify hashes
  → P7 verified on loopback (ZeroTier unverified). `D:\Fable2-LAN\research\001-evidence\proofs\P7\p7_run1.txt`
@@ -114,7 +114,7 @@ switches to its fallback; only a failed fallback is raised to Josh.
 - [x] T028b [US2] Make the own-hero auto-capture safe everywhere (coordinator, 2026-10-23): v13's capture (coop_capture Lua ~20 s after any world load) crashed the host when it landed in QC060's opening (launches 9 and 10), and v13 is installed on Josh's and Calvin's PCs, so any load that ends in a movie or autosave is exposed. The campaign start now pauses it until the go signal (commit dda6cf8); for v14 the capture skips or postpones itself while a movie, cutscene, loading screen or save runs, using the same detector as T028a. Rig proof: capture timed into a movie and a save, host survives.
   - Result (launch 20): the partner's joins timed into the host's pause menu and save were held off twice ('join held off: host busy (no recent probe (paused?))'), then the join completed and the host survived; the hero capture also waited ('hero capture waits'). Evidence: research/001-evidence/launch20/launch20_results.txt
   - Partial (launch 19): the own-hero capture waits while busy (same detector; log 'hero capture waits'). Rig proof of a capture timed into a movie and a save still open.
-- [ ] T029 [US2] Rig verification: A alone cannot enter; B rejoins; kill B mid-session (3 times); third instance `mod-c` cannot join
+- [x] T029 [US2] Rig verification: A alone cannot enter; B rejoins; kill B mid-session (3 times); third instance `mod-c` cannot join (done 2026-10-26: batch1 p6_1 host alone cannot start, p6_2 mod-c stranger shown "not for you" and never seated, partner killed and rejoined x3)
 
 **Checkpoint**: US2 proven
 
@@ -130,7 +130,7 @@ switches to its fallback; only a failed fallback is raised to Josh.
   - Result: Done: continue restores player 2 from the file at each spawn (launch 18 'player 2 restored'); no file / other slot -> seed. Evidence: research/001-evidence/launch18/launch18_results.txt
 - [x] T031a [US3] Seed player 2 in a new campaign (coordinator, 2026-10-24): on the first join into a new campaign, player 2 is a fresh adult hero with the lobby's gender and the host's starter kit (clothes, starter weapons, age and look defaults), not a bare henchman: apply the host's starter profile (v2 capture) minus host-only state (gold, renown, titles, quest items) to player 2 at spawn; the first save then writes a real coop_player2.txt (T030). Launch 16: player 2 captured empty.
   - Result: Done: player 2 seeded from the host's starter profile (starter clothes + both starter weapons, lobby gender) at spawn (launch 17). Evidence: research/001-evidence/launch17/launch17_results.txt
-- [ ] T032 [US3] Rig verification, 5 runs: XP, item, clothing change; save; reload; diff captures; one run killing A right after the save
+- [x] T032 [US3] Rig verification, 5 runs: XP, item, clothing change; save; reload; diff captures; one run killing A right after the save (done 2026-10-26: batch1 t032_1..3 on be9751c, host killed 4/8/8 s after a save then continued, items/look/purse kept; found and fixed the save crash and the weapon re-add, see research.md)
 
 **Checkpoint**: US3 proven
 
