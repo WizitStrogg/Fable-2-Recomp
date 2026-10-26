@@ -383,10 +383,12 @@ def run_solo():
         a.stop()
 
 
-def setup_tomls():
+def setup_tomls(third=False):
     """Josh's fable_2.toml for the host; Calvin's case for the partner: no
     gamertag line and no coop_campaign (the friend's play-coop.cmd turns it on).
-    Two networks each: loopback plus the relay's second address."""
+    Two networks each: loopback plus the relay's second address. third: mod-c,
+    a stranger with the partner's setup on 127.0.0.3 (its own XUID: isolated
+    copies seed it with their address), heard by the host."""
     src = open(os.path.join(ROOT, "mod", "fable_2.toml"), encoding="utf-8").read().splitlines()
 
     def make(folder, me, peers, tag, drop):
@@ -412,12 +414,16 @@ def setup_tomls():
 
     if "--fps" in sys.argv:  # the graphics thread's stencil-copy build (rexglue-sdk ec757ef)
         src += ["readback_memexport = false", "shared_memory_preserve_gpu_writes = true"]
-    make("mod-a", "127.0.0.1", "127.0.0.2,127.0.0.5", "TestA", set())
+    make("mod-a", "127.0.0.1", "127.0.0.2,127.0.0.5" + (",127.0.0.3" if third else ""), "TestA", set())
     # Calvin's case: no gamertag, no coop_campaign, and no camera lines (the
     # defaults decide: coop_own_camera is on by default since 2026-10-24).
     make("mod-b", "127.0.0.2", "127.0.0.1,127.0.0.4", None,
          {"profile_gamertag", "coop_campaign", "coop_own_camera", "coop_camera_follow_partner"})
-    note("INFO", "tomls: host = Josh's (+ loopback, 2 networks); partner = no gamertag, no coop_campaign")
+    if third:
+        make("mod-c", "127.0.0.3", "127.0.0.1", None,
+             {"profile_gamertag", "coop_campaign", "coop_own_camera", "coop_camera_follow_partner"})
+    note("INFO", "tomls: host = Josh's (+ loopback, 2 networks); partner = no gamertag, no coop_campaign"
+                 + ("; mod-c = a stranger on 127.0.0.3" if third else ""))
 
 
 def join_phase(a, b, tag):
@@ -1680,11 +1686,14 @@ def wg_open_chest(a, b, g, idx, actor, tag, start):
         wg_teleport(a, idx, actor, side)
         time.sleep(1.5)
         g.shot(f"{tag}_{g.who}_at_chest_side{side}.png")
+        before = read_purses(a, b, f"{tag}_before_A_side{side}")
         g.press("E")
         time.sleep(6)  # the open animation, the take-items script, the reward box
         st = wg_chest_state(a, idx)
         if "open=true" in st:
             note("PASS", f"{tag}: {g.who} opened chest {idx} with A (side {side}; {st})")
+            after = read_purses(a, b, f"{tag}_after_A")
+            note("INFO", f"{tag}: purses right before the A {before}, right after {after} (chest gold {gold})")
             g.shot(f"{tag}_{g.who}_chest_open.png")
             for _ in range(2):  # the "received" boxes
                 g.press("E")
@@ -1721,9 +1730,20 @@ def run_worldgold():
         if not both_ready_and_start(a, b, "worldgold") or not join_phase(a, b, "worldgold"):
             return
         time.sleep(8)
+        worldgold_events(a, b)
+    finally:
+        for g in (a, b):
+            g.stop()
+        relay.kill()
+
+
+def worldgold_events(a, b):
+    """The three world-gold events in a joined campaign. Returns the purse total
+    expected afterwards, or None."""
+    if True:
         v = read_purses(a, b, "worldgold_purse0")
         if not v:
-            return
+            return None
         total = v[0]
         chests = lua_lines(a, WG_FIND, "WGCHEST", 20)
         for c in chests:
@@ -1736,7 +1756,7 @@ def run_worldgold():
         cand.sort()  # chests with gold first, then the nearest
         if len(cand) < 2:
             note("FAIL", f"worldgold: fewer than 2 closed, unlocked chests here ({len(cand)})")
-            return
+            return total
         for k, (_, d, idx, gold) in enumerate(cand[:2]):
             if gold <= 0:
                 # No loaded chest holds gold: put some in. The open and the
@@ -1757,11 +1777,155 @@ def run_worldgold():
             note("INFO", f"worldgold: quest reward {line}")
         paid = [int(m.group(1)) for m in (re.search(r"delta=(-?\d+)", l) for l in q) if m and int(m.group(1)) > 0]
         if paid:
-            check_purse(a, b, "worldgold_quest_reward", total + paid[-1])
+            total += paid[-1]
+            check_purse(a, b, "worldgold_quest_reward", total)
         else:
             note("FAIL", "worldgold: no quest reward paid gold (see the WGQUEST lines)")
-    finally:
+        return total
+
+
+def host_continue_lobby(a, tag):
+    """The host at the title: Co-op -> Host: continue a co-op save -> the newest."""
+    n_menu = a.count(r"main menu: Co-op entry added")
+    a.past_title()
+    menu_then_coop(a, tag, n_menu)
+    wait_row(a, "Host: continue a co-op save", f"{tag}: the hub offers the co-op saves")
+    a.select("Host: continue a co-op save")
+    n = a.count(r"\[lobby\] open saves")
+    a.press("E")
+    a.wait(f"{tag}: the hub lists the co-op saves", r"\[lobby\] open saves", n, 10)
+    n = a.count(r"\[lobby\] open host kind=continue")
+    a.press("E")  # the newest campaign: the one just played
+    return a.wait(f"{tag}: the save's lobby opens", r"\[lobby\] open host kind=continue", n, 10)
+
+
+def partner_continue_join(a, b, tag):
+    """A fresh partner copy joins the host's continue lobby; both start; join."""
+    n = b.count(r"main menu: Co-op entry added")
+    b.past_title()
+    menu_then_coop(b, tag, n)
+    wait_row(b, "Continue TestA", f"{tag}: the campaign is listed for the partner")
+    partner_joins(b, "Continue TestA", tag)
+    wait_row(a, "Start", f"{tag}: host lobby shows the partner")
+    return both_ready_and_start(a, b, tag) and join_phase(a, b, tag)
+
+
+def check_kept(a, b, tag, ref, total):
+    """Player 2's items and look and the three purses against the reference."""
+    time.sleep(10)
+    now = inv_dump(a, tag)
+    b.shot(f"{tag}_partner_look.png")
+    if ref and now:
+        grown = {r: (ref[0].get(r, 0), c) for r, c in now[0].items() if c != ref[0].get(r, 0)}
+        lost = {r: (c, 0) for r, c in ref[0].items() if r not in now[0]}
+        note("PASS" if not grown and not lost and now[1] == ref[1] else "FAIL",
+             f"{tag}: player 2's items kept ({ref[1]} -> {now[1]}; changed: {grown or 'none'}"
+             f"{'; missing: ' + str(lost) if lost else ''})")
+        note("PASS" if now[2] == ref[2] else "FAIL", f"{tag}: player 2's look kept ({ref[2]} -> {now[2]})")
+    v = read_purses(a, b, f"{tag}_purse")
+    note("PASS" if v and v[0] == v[1] == v[2] == total else "FAIL",
+         f"{tag}: purses {v} (expected {total} on all three)")
+    return now or ref
+
+
+def run_batch1():
+    """One PC session for spec 001's open items (coordinator, 2026-10-26):
+    world gold (T012); the partner killed mid-session x3: the host saves and
+    returns to the menu, the partner rejoins through the hub (T013 P6, T029);
+    the host alone cannot start; a third copy cannot take the seat (T029); the
+    host killed right after a save x3, then continued (T032)."""
+    setup_tomls(third=True)
+    relay_log = open(os.path.join(OUT, "relay_batch1.log"), "w")
+    relay = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                           "coop_relay.py")], stdout=relay_log, stderr=relay_log)
+    a, b = Game("mod-a", "host"), Game("mod-b", "partner")
+    c = None
+    a.start({"FABLE2_TEST_INPUT": "1"})
+    b.start({"FABLE2_TEST_INPUT": "1"})
+    try:
         for g in (a, b):
+            g.n_menu = g.count(r"main menu: Co-op entry added")
+            g.past_title()
+        menu_then_coop(a, "b1", a.n_menu)
+        host_new_campaign(a, "b1")
+        menu_then_coop(b, "b1", b.n_menu)
+        wait_row(b, "Join TestA", "b1: the host's lobby is listed")
+        partner_joins(b, "Join TestA", "b1")
+        wait_row(a, "Start", "b1: host lobby shows the partner")
+        if not both_ready_and_start(a, b, "b1") or not join_phase(a, b, "b1"):
+            return
+        time.sleep(8)
+        # 1. World gold (T012).
+        total = worldgold_events(a, b)
+        if total is None:
+            return
+        ref = inv_dump(a, "b1_ref")
+        # 2. The partner killed mid-session, three times (T013 P6, T029).
+        for k in (1, 2, 3):
+            tag = f"p6_{k}"
+            b.stop()  # a kill, not a quit
+            n = a.count(r"host: back at the front end")
+            if not a.wait(f"{tag}: partner killed -> host saves and returns to the front end",
+                          r"host: back at the front end", n, 240):
+                return
+            time.sleep(10)
+            if not host_continue_lobby(a, tag):
+                return
+            if k == 1:
+                # The host alone cannot start the co-op save.
+                rows = [r[0] for r in a.rows()]
+                n = a.count(r"\[lobby\] host start")
+                if any(r.startswith("Start") for r in rows):
+                    a.select("Start")
+                    a.press("E")
+                time.sleep(8)
+                note("PASS" if a.count(r"\[lobby\] host start") == n else "FAIL",
+                     f"{tag}: the host alone cannot start the co-op save (rows {rows})")
+            if k == 2:
+                # A third copy (a stranger) cannot take the partner's seat.
+                c = Game("mod-c", "stranger")
+                c.start({"FABLE2_TEST_INPUT": "1"})
+                n = c.count(r"main menu: Co-op entry added")
+                c.past_title()
+                menu_then_coop(c, f"{tag}_stranger", n)
+                time.sleep(6)
+                seen = [r[0] for r in c.rows()]
+                row = next((r for r in seen if "TestA" in r), None)
+                note("INFO", f"{tag}: the stranger's hub rows {seen}")
+                if row:
+                    c.select(row)
+                    c.press("E")
+                    time.sleep(15)
+                host_rows = [r[0] for r in a.rows()]
+                note("PASS" if not any(r.startswith("Start") for r in host_rows) else "FAIL",
+                     f"{tag}: the stranger was not seated in the host's lobby (host rows {host_rows})")
+                c.stop()
+                c = None
+            b = Game("mod-b", "partner")
+            b.start({"FABLE2_TEST_INPUT": "1"})
+            if not partner_continue_join(a, b, tag):
+                return
+            ref = check_kept(a, b, tag, ref, total)
+        # 3. The host killed right after a save, three times (T032).
+        for k in (1, 2, 3):
+            tag = f"t032_{k}"
+            out = lua_lines(a, "print('B1SAVE ' .. tostring(pcall(AutoSaveGame, true, true)))", "B1SAVE", 20)
+            note("INFO", f"{tag}: save {out}")
+            time.sleep(4 if k == 1 else 8)  # k=1: right after the save; then a little later
+            a.stop()
+            b.stop()
+            time.sleep(5)
+            a, b = Game("mod-a", "host"), Game("mod-b", "partner")
+            a.start({"FABLE2_TEST_INPUT": "1"})
+            b.start({"FABLE2_TEST_INPUT": "1"})
+            if not host_continue_lobby(a, tag) or not partner_continue_join(a, b, tag):
+                return
+            ref = check_kept(a, b, tag, ref, total)
+        for g in (a, b):
+            menu = [l.split("main menu event ", 1)[1] for l in g.lines() if "main menu event " in l]
+            note("INFO", f"b1: {g.who}: last menu events {menu[-12:]}")
+    finally:
+        for g in (a, b) + ((c,) if c else ()):
             g.stop()
         relay.kill()
 
@@ -1852,7 +2016,8 @@ def inv_dump(a, tag):
     t = re.search(r"\|itemtotal=(\d+)", line)
     total = int(t.group(1)) if t else sum(items.values())
     note("INFO", f"{tag}: player 2 holds {len(items)} item types, {total} items")
-    return items, total
+    look = "|".join(f.group(0) for f in re.finditer(r"\|(g|worn|weap|hgt|age)=[^|]*", line))
+    return items, total, look
 
 
 def run_continue2():
@@ -1934,7 +2099,7 @@ def run_continue2():
 def main():
     os.makedirs(OUT, exist_ok=True)
     mode = sys.argv[1] if len(sys.argv) > 1 else "coop"
-    {"coop": run_coop, "solo": run_solo, "multi": run_multi, "menu": run_menu, "menu2": run_menu2, "err": run_err, "final": run_final, "last": run_last, "start": run_start, "purse": run_purse, "fps": run_fps, "combo": run_combo, "camera": run_camera, "luaq": run_luaq, "luaq_kept": run_luaq_kept, "continue2": run_continue2, "boots": run_boots, "worldgold": run_worldgold}[mode]()
+    {"coop": run_coop, "solo": run_solo, "multi": run_multi, "menu": run_menu, "menu2": run_menu2, "err": run_err, "final": run_final, "last": run_last, "start": run_start, "purse": run_purse, "fps": run_fps, "combo": run_combo, "camera": run_camera, "luaq": run_luaq, "luaq_kept": run_luaq_kept, "continue2": run_continue2, "boots": run_boots, "worldgold": run_worldgold, "batch1": run_batch1}[mode]()
     with open(os.path.join(OUT, f"results_{mode}.txt"), "w", encoding="utf-8") as f:
         f.write("\n".join(results) + "\n")
     return 0 if not any(r.startswith("FAIL") for r in results) else 1
