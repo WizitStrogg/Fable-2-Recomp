@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <cstdio>
@@ -29,6 +30,7 @@
 #include <mutex>
 #include <sstream>
 #include <string>
+#include <thread>
 
 #include <rex/cvar.h>
 #include <rex/logging.h>
@@ -1325,17 +1327,14 @@ inline bool OnPress(PPCContext& ctx, uint8_t* base) {
 inline void (*g_prev_frame_hook)() = nullptr;
 // Testing only (FABLE2_TEST_INPUT=1 in the environment, set by
 // tools/coop_ship_e2e.py; never by play-coop.cmd): commands from
-// <exe dir>\test_input.txt, read and emptied each frame, so proofs do not depend
-// on which window is in front (2026-10-25: focus loss and key repeat at 60 fps
-// broke two runs). Command language: fable2_coop_test_input.h.
-inline void test_input_tick() {
-  static const bool on = std::getenv("FABLE2_TEST_INPUT") != nullptr;
-  if (!on) return;
-  static int64_t next = 0;
-  const int64_t now = fable2::f5lua::steady_ms();
-  if (now < next) return;
-  next = now + 50;
-  const auto path = fable2::cooptemplate::exe_dir() / "test_input.txt";
+// <exe dir>\test_input.txt, read and emptied every 50 ms, so proofs do not
+// depend on which window is in front (2026-10-25: focus loss and key repeat at
+// 60 fps broke two runs). Command language: fable2_coop_test_input.h.
+// A thread of its own polls the file: on the frame hook (3D Engine thread) the
+// stat/read/rewrite calls took up to 1.2 s under disk load and stalled frames
+// (2026-10-27 walk profile). Presses, sticks, Lua chunks and cvars are all
+// safe to queue from any thread.
+inline void test_input_poll(const std::filesystem::path& path) {
   std::error_code ec;
   if (!std::filesystem::exists(path, ec) || std::filesystem::file_size(path, ec) == 0) return;
   std::string text;
@@ -1373,6 +1372,21 @@ inline void test_input_tick() {
     }
     REXSYS_INFO("[test-input] {}", line);
   }
+}
+
+inline void test_input_tick() {
+  static const bool on = std::getenv("FABLE2_TEST_INPUT") != nullptr;
+  if (!on) return;
+  static const bool started = [] {
+    std::thread([path = fable2::cooptemplate::exe_dir() / "test_input.txt"] {
+      for (;;) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        test_input_poll(path);
+      }
+    }).detach();
+    return true;
+  }();
+  (void)started;
 }
 
 inline void OnFrame() {
