@@ -184,14 +184,13 @@ inline bool joiner_in_campaign() {
 
 // The joiner's Lua, on the partner's A: the nearest closed chest within 2.5 m
 // of player 2 and in front of it (anything within 0.8 m counts), printed for
-// the host. The harness's partner search (rig 2026-10-27): the chest search by
-// component, positions, the facing (a plain object search finds no chest on
-// the joiner). No Chest/Door.IsOpen of the joiner's copies (the host checks
-// the open state). The pick runs kPickDelayMs after the A, not at once: run
-// at the first drain after the press it crashed the joiner every time, 3 ms
-// after the chunk (guest read of 0x5), most likely inside the game's own
-// handling of that A (joiner_tick). Doors and the "A: Open" hint wait until
-// proven on their own.
+// the host. Exactly the harness's partner search, proven on the joiner (rig
+// 2026-10-27): the chest search by component, positions, the facing (a plain
+// object search finds no chest there). No Chest.* call on the joiner's chest
+// copies: every chunk that made one (Chest.IsOpen, Chest.IsAvailable) on a
+// chest crashed the joiner 3 ms after the chunk (guest read of 0x5); the
+// component filter is the type check, the host checks the open state. Doors
+// and the "A: Open" hint wait until proven on their own.
 inline std::string joiner_chunk() {
   std::string c;
   c += "local ok, err = pcall(function()\n";
@@ -201,7 +200,7 @@ inline std::string joiner_chunk() {
   c += "  local best, bd, seen, near = nil, 1e9, 0, 1e9\n";
   c += "  for _, o in pairs(SearchTools.GetSearchResults(SearchTools.FilterWithEC(SearchTools.StartNewSearch('object'), "
        "Chest.GetECType()))) do\n";
-  c += "    if Chest.IsAvailable(o) then\n";
+  c += "    do\n";
   c += "    local d = o:GetPosition() - p\n";
   c += "    local dist = d:GetLength()\n";
   c += "    seen = seen + 1\n";
