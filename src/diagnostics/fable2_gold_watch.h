@@ -79,9 +79,11 @@ inline LONG CALLBACK handler(PEXCEPTION_POINTERS info) {
 
 inline uint32_t rd(const uint8_t* base, uint32_t a) { return ta::rdable2(base, a, 4) ? ta::load_be(base, a) : 0; }
 
+// [from, from + len) must be readable (checked once by the caller: one
+// VirtualQuery per word made the heap scan take minutes).
 inline void scan(const uint8_t* base, uint32_t from, uint32_t len, uint32_t value, std::vector<uint32_t>& out) {
   for (uint32_t a = from; a + 4 <= from + len; a += 4)
-    if (ta::rdable2(base, a, 4) && ta::load_be(base, a) == value) out.push_back(a);
+    if (ta::load_be(base, a) == value) out.push_back(a);
 }
 
 inline void step(const std::string& cmd) {
