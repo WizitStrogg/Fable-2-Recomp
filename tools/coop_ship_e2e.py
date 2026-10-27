@@ -3089,11 +3089,17 @@ def lf_use23():
             p2inv0 = inv_dump(a, f"{tag}_{label}_p2_before")
             na, nb = len(a.lines()), len(b.lines())
             b.send("press A 200")
+            # A chest's items show the host a "received" box that waits for the
+            # host player's A (the game pauses meanwhile): dismiss them.
             t = time.time()
-            while time.time() - t < 25:
-                if kind != "chest" or any("world use done" in l for l in a.lines()[na:]):
+            while time.time() - t < 40:
+                if any("world use done" in l for l in a.lines()[na:]) or (
+                        kind != "chest" and time.time() - t > 6):
                     break
-                time.sleep(1)
+                time.sleep(3)
+                if any("game paused" in l for l in a.lines()[na:]) and not any(
+                        "world use done" in l for l in a.lines()[na:]):
+                    a.send("press A 200")
             time.sleep(3)
             b.shot(f"{tag}_{label}_partner_after.png")
             a.shot(f"{tag}_{label}_host_after.png")

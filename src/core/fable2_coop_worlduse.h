@@ -217,8 +217,11 @@ inline bool joiner_in_campaign() {
 // says "A" (kind=near) and the host finds what is in front of its own copy of
 // player 2. The game still gets the press: pickups and attacks keep the stock
 // path (at a chest the stock A does nothing on the joiner).
-// A menu is open when the kit saw one go up after player 2 settled: the join
-// screens' pause raised its flag and nothing lowered it.
+// No menu check: the kit's menu flag also goes up with every pause of the
+// host's game (the join screens, the host's "received" boxes) and nothing
+// lowers it, so it blocked every A after the first chest (rig 2026-10-27).
+// An A on a pause menu row only uses something if a closed chest or door is
+// within 2.5 m in front of player 2.
 inline std::atomic<bool> g_a_pressed{false};
 inline uint16_t g_prev_buttons = 0;
 inline uint16_t (*g_prev_pad_hook)(uint16_t) = nullptr;
@@ -246,14 +249,9 @@ inline bool joiner_settled(int64_t now) {
   return p2 && now - g_p2_since_ms > kSettleMs && !fable2::f5lua::saving() &&
          !(loaded && now - loaded < kSettleMs);
 }
-inline bool menu_open() {
-  return fable2::coopkit::g_menu_up.load() &&
-         fable2::coopkit::g_menu_event_ms.load() > g_p2_since_ms + kSettleMs;
-}
-
 inline void joiner_tick(int64_t now) {
   if (!g_a_pressed.exchange(false)) return;
-  if (!joiner_in_campaign() || !joiner_settled(now) || menu_open()) return;
+  if (!joiner_in_campaign() || !joiner_settled(now)) return;
   char rec[96];
   std::snprintf(rec, sizeof(rec), "COOPWUSE:v1|n=%lld|kind=near", static_cast<long long>(now));
   lobby::PublishData("coop_wuse", rec);
