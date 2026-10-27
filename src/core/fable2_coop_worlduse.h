@@ -184,13 +184,14 @@ inline bool joiner_in_campaign() {
 
 // The joiner's Lua, on the partner's A: the nearest closed chest within 2.5 m
 // of player 2 and in front of it (anything within 0.8 m counts), printed for
-// the host. Only calls proven on the joiner, the harness's partner search
-// (rig 2026-10-27): a plain object search with Chest.IsAvailable, positions,
-// the facing. Every chunk that crashed it (guest reads of 0x5 / 0x3A000008,
-// 3 ms after the chunk, before anything reached the host) searched with
-// SearchTools.FilterWithEC, and most asked Chest/Door.IsOpen of the joiner's
-// copies; neither is used here (the host checks the open state). Doors and
-// the "A: Open" hint wait until proven on their own.
+// the host. The harness's partner search (rig 2026-10-27): the chest search by
+// component, positions, the facing (a plain object search finds no chest on
+// the joiner). No Chest/Door.IsOpen of the joiner's copies (the host checks
+// the open state). The pick runs kPickDelayMs after the A, not at once: run
+// at the first drain after the press it crashed the joiner every time, 3 ms
+// after the chunk (guest read of 0x5), most likely inside the game's own
+// handling of that A (joiner_tick). Doors and the "A: Open" hint wait until
+// proven on their own.
 inline std::string joiner_chunk() {
   std::string c;
   c += "local ok, err = pcall(function()\n";
@@ -198,7 +199,8 @@ inline std::string joiner_chunk() {
   c += "  if not me or not me:IsAlive() then return 'no player 2' end\n";
   c += "  local p, f = me:GetPosition(), Physics.GetFacingVector(me)\n";
   c += "  local best, bd, seen, near = nil, 1e9, 0, 1e9\n";
-  c += "  for _, o in pairs(SearchTools.GetSearchResults(SearchTools.StartNewSearch('object'))) do\n";
+  c += "  for _, o in pairs(SearchTools.GetSearchResults(SearchTools.FilterWithEC(SearchTools.StartNewSearch('object'), "
+       "Chest.GetECType()))) do\n";
   c += "    if Chest.IsAvailable(o) then\n";
   c += "    local d = o:GetPosition() - p\n";
   c += "    local dist = d:GetLength()\n";
@@ -225,7 +227,8 @@ inline std::string joiner_chunk() {
 // paused) and comes back late.
 inline std::atomic<bool> g_a_pressed{false};
 inline std::atomic<int64_t> g_a_ms{0};
-constexpr int64_t kPickFreshMs = 1500;
+constexpr int64_t kPickDelayMs = 300;   // the game's own A handling first (joiner_chunk)
+constexpr int64_t kPickFreshMs = 1800;
 inline uint16_t g_prev_buttons = 0;
 inline uint16_t (*g_prev_pad_hook)(uint16_t) = nullptr;
 inline uint16_t pad_hook(uint16_t buttons) {
@@ -297,7 +300,8 @@ inline void joiner_tick(int64_t now) {
     g_a_pressed = false;
     return;
   }
-  if (g_a_pressed.exchange(false)) {
+  if (g_a_pressed.load() && now - g_a_ms.load() >= kPickDelayMs) {
+    g_a_pressed = false;
     REXSYS_INFO("[coop] world use: the partner's A, looking for a chest");
     fable2::luaconsole::RunChunk(joiner_chunk());
   }
