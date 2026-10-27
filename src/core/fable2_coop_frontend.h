@@ -886,10 +886,14 @@ inline void partner_purse_tick(int64_t now) {
   const bool fresh = best->seq != g_purse_applied_seq;
   if (fable2::f5lua::g_queued.load() > 0) return;  // paused: queued scripts wait; try next tick
   const std::string t = std::to_string(best->total);
-  if (!fable2::luaconsole::RunChunk("local me = GetPlayerHenchman()\n"
-                               "if me and me:IsAlive() and Money.Get(me) ~= " + t + " then\n"
+  // The partner's own pause menu shows GetPlayerHero()'s gold, not its
+  // creature's (rig 2026-10-27: 0 while the creature had the total), so both.
+  if (!fable2::luaconsole::RunChunk("local me, hero = GetPlayerHenchman(), GetPlayerHero()\n"
+                               "if me and me:IsAlive() and (Money.Get(me) ~= " + t +
+                               " or (hero and Money.Get(hero) ~= " + t + ")) then\n"
                                "  local was = Money.Get(me)\n"
                                "  Money.Set(me, " + t + ")\n"
+                               "  if hero then Money.Set(hero, " + t + ") end\n"
                                "  print('[coop] purse: mirrored the host total " + t + " (was ' .. was .. ')')\n"
                                "end\n"))
     return;  // no free console slot: the next tick tries again

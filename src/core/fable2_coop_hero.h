@@ -332,8 +332,10 @@ inline void auto_capture(const lobby::LobbyStatus& status, int64_t now) {
 // runs it instead of applying the partner's published hero (T031a).
 inline std::mutex g_campaign_mu;
 inline std::string g_campaign_p2_chunk;
+inline std::atomic<bool> g_campaign_on{false};  // a campaign's player 2 is set up (the wage below)
 inline void SetCampaignPlayer2(std::string chunk) {
   std::lock_guard<std::mutex> l(g_campaign_mu);
+  g_campaign_on.store(!chunk.empty());
   g_campaign_p2_chunk = std::move(chunk);
 }
 inline std::string campaign_player2() {
@@ -375,13 +377,7 @@ inline void host_apply(const lobby::LobbyStatus& status, int64_t now) {
       return;
     }
     const std::string lib = read_lib();
-    // No stock henchman gold share in a campaign: player 2 gained 1 gold every
-    // ~2 min on its own (live session, 2026-10-27), merged into the shared
-    // purse. Its own pickups still count (purse_tick).
-    const std::string no_wage =
-        "local ok, e = pcall(Debug.SetHenchmanGoldValue, 0)\n"  // registered on Debug, not Multiplayer (rig probe)
-        "print('[coop] henchman gold share 0: ' .. tostring(ok) .. ' ' .. tostring(e))\n";
-    if (lib.empty() || !fable2::luaconsole::RunChunk(lib + "\n" + no_wage + campaign)) return;  // again next tick
+    if (lib.empty() || !fable2::luaconsole::RunChunk(lib + "\n" + campaign)) return;  // again next tick
     g_applied_epoch = epoch;
     g_applied_ip = 0;
     g_applied_rev = 2;
@@ -810,6 +806,18 @@ extern "C" void sub_8231EEE0(PPCContext& ctx, uint8_t* base) {
               lobby_female >= 0 ? "from the lobby"
               : known < 0       ? "from co-op screen"
                                 : "from hero profile");
+}
+
+// The stock henchman wage (r3 = the henchman's player component): gold per
+// minute played by "HenchmanJobLevels" / "GoldEarnedPerMinute", the fraction
+// kept at +1064 and the whole part paid with the add-money sub_8239E698. In a
+// co-op campaign player 2 is a player, not a hired henchman: it paid player 2
+// 1 gold every ~2 min into the shared purse (live session; caller found with
+// coop_gold_watch, rig 2026-10-27). Skipped while a campaign's player 2 is set up.
+extern "C" void __imp__sub_824A6FD8(PPCContext& ctx, uint8_t* base);
+extern "C" void sub_824A6FD8(PPCContext& ctx, uint8_t* base) {
+  if (fable2::coophero::g_campaign_on.load(std::memory_order_relaxed)) return;
+  __imp__sub_824A6FD8(ctx, base);
 }
 
 // Stats.AddUnlockedTitle native (also reached from ModifyFat & co). Our own
