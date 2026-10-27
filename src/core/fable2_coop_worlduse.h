@@ -177,8 +177,8 @@ inline bool joiner_in_campaign() {
   return fable2::coopfrontend::g_purse_host_xuid.load() != 0 && lobby::GetLobbyStatus().joined_host_ip != 0;
 }
 
-// The joiner's Lua: the nearest closed chest, closed door or lever within
-// 2.5 m of player 2 and in front of it (anything within 0.8 m counts). pick:
+// The joiner's Lua: the nearest closed chest or closed door within 2.5 m of
+// player 2 and in front of it (anything within 0.8 m counts). pick:
 // print it for the host; else show the A hint (a box the game draws, the
 // text shown as is: an id the text bank lacks is shown as itself).
 inline std::string joiner_chunk(bool pick) {
@@ -208,7 +208,9 @@ inline std::string joiner_chunk(bool pick) {
   c += "end\n";
   c += "for _, o in pairs(search(Chest.GetECType())) do if not Chest.IsOpen(o) then consider(o, 'chest') end end\n";
   c += "for _, o in pairs(search(Door.GetECType())) do if not Door.IsOpen(o) then consider(o, 'door') end end\n";
-  c += "for _, o in pairs(search(nil)) do if Switch.IsAvailable(o) then consider(o, 'switch') end end\n";
+  // No lever search here: an unfiltered object search on the joiner crashed
+  // it twice (rig 2026-10-27, guest reads of 0x5 and 0x3A000008, each right
+  // after the chunk). Levers need a filtered search first (none in the rig's world).
   if (pick) {
     c += "if not best then return string.format('nothing to use (%d seen, nearest %.1f m, facing %.2f)', seen, near, ndot) end\n";
     c += "local q = best:GetPosition()\n";
