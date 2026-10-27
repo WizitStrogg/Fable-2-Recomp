@@ -186,44 +186,25 @@ inline bool joiner_in_campaign() {
 // the "A: Open" hint wait until each is proven on its own.
 inline std::string joiner_chunk() {
   std::string c;
-  c += "local ok, err = pcall(function()
-";
-  c += "  local me = GetPlayerHenchman()
-";
-  c += "  if not me or not me:IsAlive() then return 'no player 2' end
-";
-  c += "  local p, f = me:GetPosition(), Physics.GetFacingVector(me)
-";
-  c += "  local best, bd, seen, near = nil, 1e9, 0, 1e9
-";
-  c += "  local s = SearchTools.GetSearchResults(SearchTools.FilterWithEC(SearchTools.StartNewSearch('object'), Chest.GetECType()))
-";
-  c += "  for _, o in pairs(s) do
-";
-  c += "    local d = o:GetPosition() - p
-";
-  c += "    local dist = d:GetLength()
-";
-  c += "    seen = seen + 1
-";
-  c += "    if dist < near then near = dist end
-";
-  c += "    if dist <= 2.5 and (dist <= 0.8 or (d:GetX() * f:GetX() + d:GetY() * f:GetY()) / dist >= 0.3) and
-";
-  c += "       dist < bd and not Chest.IsOpen(o) then best, bd = o, dist end
-";
-  c += "  end
-";
-  c += "  if not best then return string.format('nothing to use (%d chests, nearest %.1f m)', seen, near) end
-";
-  c += "  local q = best:GetPosition()
-";
-  c += "  print(string.format('COOPWUSE pick chest %.3f %.3f %.3f', q:GetX(), q:GetY(), q:GetZ()))
-";
-  c += "end)
-";
-  c += "if not ok or err then print('[coop] world use (partner): ' .. tostring(err)) end
-";
+  c += "local ok, err = pcall(function()\n";
+  c += "  local me = GetPlayerHenchman()\n";
+  c += "  if not me or not me:IsAlive() then return 'no player 2' end\n";
+  c += "  local p, f = me:GetPosition(), Physics.GetFacingVector(me)\n";
+  c += "  local best, bd, seen, near = nil, 1e9, 0, 1e9\n";
+  c += "  local s = SearchTools.GetSearchResults(SearchTools.FilterWithEC(SearchTools.StartNewSearch('object'), Chest.GetECType()))\n";
+  c += "  for _, o in pairs(s) do\n";
+  c += "    local d = o:GetPosition() - p\n";
+  c += "    local dist = d:GetLength()\n";
+  c += "    seen = seen + 1\n";
+  c += "    if dist < near then near = dist end\n";
+  c += "    if dist <= 2.5 and (dist <= 0.8 or (d:GetX() * f:GetX() + d:GetY() * f:GetY()) / dist >= 0.3) and\n";
+  c += "       dist < bd and not Chest.IsOpen(o) then best, bd = o, dist end\n";
+  c += "  end\n";
+  c += "  if not best then return string.format('nothing to use (%d chests, nearest %.1f m)', seen, near) end\n";
+  c += "  local q = best:GetPosition()\n";
+  c += "  print(string.format('COOPWUSE pick chest %.3f %.3f %.3f', q:GetX(), q:GetY(), q:GetZ()))\n";
+  c += "end)\n";
+  c += "if not ok or err then print('[coop] world use (partner): ' .. tostring(err)) end\n";
   return c;
 }
 
