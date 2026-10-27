@@ -181,13 +181,17 @@ inline bool joiner_in_campaign() {
 // text shown as is: an id the text bank lacks is shown as itself).
 inline std::string joiner_chunk(bool pick) {
   std::string c;
+  c += "local ok, err = pcall(function()\n";
   c += "local me = GetPlayerHenchman()\n";
-  c += "if not me or not me:IsAlive() then return end\n";
+  c += "if not me or not me:IsAlive() then return 'no player 2' end\n";
   c += "local p, f = me:GetPosition(), Physics.GetFacingVector(me)\n";
   c += "local best, bk, bd = nil, nil, 1e9\n";
+  c += "local seen, near, ndot = 0, 1e9, 0\n";
   c += "local function consider(o, kind)\n";
   c += "  local d = o:GetPosition() - p\n";
   c += "  local dist = d:GetLength()\n";
+  c += "  seen = seen + 1\n";
+  c += "  if dist < near then near, ndot = dist, dist > 0 and (d:GetX() * f:GetX() + d:GetY() * f:GetY()) / dist or 1 end\n";
   c += "  if dist > 2.5 then return end\n";
   c += "  if dist > 0.8 and (d:GetX() * f:GetX() + d:GetY() * f:GetY()) / dist < 0.3 then return end\n";
   c += "  if dist < bd then best, bk, bd = o, kind, dist end\n";
@@ -201,16 +205,20 @@ inline std::string joiner_chunk(bool pick) {
   c += "for _, o in pairs(search(Chest.GetECType())) do if not Chest.IsOpen(o) then consider(o, 'chest') end end\n";
   c += "for _, o in pairs(search(Door.GetECType())) do if not Door.IsOpen(o) then consider(o, 'door') end end\n";
   c += "for _, o in pairs(search(nil)) do if Switch.IsAvailable(o) then consider(o, 'switch') end end\n";
-  c += "if not best then return end\n";
   if (pick) {
+    c += "if not best then return string.format('nothing to use (%d seen, nearest %.1f m, facing %.2f)', seen, near, ndot) end\n";
     c += "local q = best:GetPosition()\n";
     c += "print(string.format('COOPWUSE pick %s %.3f %.3f %.3f', bk, q:GetX(), q:GetY(), q:GetZ()))\n";
   } else {
-    c += "if GUI.IsDisplayBoxActive() then return end\n";
+    c += "if not best or GUI.IsDisplayBoxActive() then return end\n";
     c += "local text = ({chest = 'Open the chest', door = 'Open the door', switch = 'Pull the lever'})[bk]\n";
     c += "GUI.DisplayInfoBoxParams({ShowAButton = true, ShowYButton = false, "
          "DisplayBoxStyle = EDisplayBoxStyle.DBS_INFO_BOX, LifeTime = 2}, text)\n";
   }
+  c += "end)\n";
+  // A pick that found nothing, or any error, is logged (the hint stays quiet).
+  c += pick ? "if not ok or err then print('[coop] world use (partner): ' .. tostring(err)) end\n"
+            : "if not ok then print('[coop] world use hint error: ' .. tostring(err)) end\n";
   return c;
 }
 
@@ -247,6 +255,7 @@ inline void joiner_tick(int64_t now) {
     return;
   }
   if (g_a_pressed.exchange(false)) {
+    REXSYS_INFO("[coop] world use: the partner's A, looking for a chest, door or lever");
     fable2::luaconsole::RunChunk(joiner_chunk(true));
   } else if (now >= g_next_hint_ms && !fable2::coopkit::g_menu_up.load()) {
     g_next_hint_ms = now + 1500;
