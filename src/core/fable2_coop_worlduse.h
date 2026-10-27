@@ -21,6 +21,12 @@
 //   COOPWUSE:v1|n=<nonce>|kind=near
 // Testing: coop_world_use = "<kind>:<x>,<y>,<z>" runs the host's part on the
 // host itself (kind chest, door or switch: the nearest of that kind to the spot).
+//
+// The hint: the host looks in front of player 2 every kHintMs and publishes
+// what an A would open (lobby data "coop_whint", on change):
+//   COOPWHINT:v1|n=<nonce>|what=chest|door|none
+// and the partner shows "A: Open the chest" / "A: Open the door" as a small
+// overlay line (the SDK's rex_ui_set_toast; the joiner runs no Lua for it).
 
 #pragma once
 
@@ -52,11 +58,47 @@ namespace fable2::coopworlduse {
 
 namespace lobby = rex::kernel::xam::lobby;
 
+// Lua (host), shared by the A and the hint: coop_near(p2) returns the nearest
+// closed chest or unlocked closed door within 2.5 m in front of player 2
+// (anything within 0.8 m counts) and its kind, or nil. coop_owned(o): someone
+// else's (the stock handler's theft test: an owner building that is not the
+// hero's, or rented).
+inline const char* const kNearLua = R"lua(
+local function coop_near(p2)
+  local p, f = p2:GetPosition(), Physics.GetFacingVector(p2)
+  local best, bd, kind = nil, 1e9, nil
+  local function pick(ec, closed, k)
+    local s = SearchTools.StartNewSearch('object')
+    SearchTools.FilterWithinDistanceOfPos(s, p, 2.5)
+    SearchTools.FilterWithEC(s, ec)
+    for _, o in pairs(SearchTools.GetSearchResults(s)) do
+      local d = o:GetPosition() - p
+      local dist = d:GetLength()
+      if closed(o) and dist < bd and (dist <= 0.8 or (d:GetX() * f:GetX() + d:GetY() * f:GetY()) / dist >= 0.3) then
+        best, bd, kind = o, dist, k
+      end
+    end
+  end
+  pick(Chest.GetECType(), function(o) return not Chest.IsOpen(o) end, 'chest')
+  pick(Door.GetECType(), function(o) return not Door.IsOpen(o) and not Door.IsLocked(o) end, 'door')
+  return best, kind
+end
+local function coop_owned(o)
+  if not OwnedEntity.IsAvailable(o) then return false end
+  local owner = OwnedEntity.GetOwner(o)
+  return owner and owner:IsAlive() and Building.IsAvailable(owner) and
+         (not PlayerProperties.IsOwnedByPlayer(GetPlayerHero(), owner) or PlayerProperties.GetIsRentalProperty(GetPlayerHero(), owner)) or false
+end
+local function coop_cutscene()
+  return (GUI.IsFullCutscenePlaying and GUI.IsFullCutscenePlaying()) or (GUI.IsMoviePlaying and GUI.IsMoviePlaying())
+end
+)lua";
+
 // The host's part: find the object and open it for player 2 (Lua, host).
 inline std::string host_chunk(const std::string& kind, float x, float y, float z) {
   char pos[96];
   std::snprintf(pos, sizeof(pos), "CVector3(%.3f, %.3f, %.3f)", x, y, z);
-  std::string c;
+  std::string c = kNearLua;
   c += "local ok, e = pcall(function()\n";
   c += "  local kind, p, p2 = '" + kind + "', " + pos + ", GetPlayerHenchman()\n";
   c += "  local best, bd = nil, 1e9\n";
@@ -67,25 +109,8 @@ inline std::string host_chunk(const std::string& kind, float x, float y, float z
   c += "    if not p2 or not p2:IsAlive() then return 'no player 2' end\n";
   // A cutscene or movie: the world is not the players' (the joiner cannot ask
   // safely; its GUI calls were among the chunks that crashed it).
-  c += "    if (GUI.IsFullCutscenePlaying and GUI.IsFullCutscenePlaying()) or (GUI.IsMoviePlaying and GUI.IsMoviePlaying()) then\n";
-  c += "      return 'a cutscene or movie is playing: nothing used'\n";
-  c += "    end\n";
-  c += "    p = p2:GetPosition()\n";
-  c += "    local f = Physics.GetFacingVector(p2)\n";
-  c += "    local function pick(ec, closed, k)\n";
-  c += "      local s = SearchTools.StartNewSearch('object')\n";
-  c += "      SearchTools.FilterWithinDistanceOfPos(s, p, 2.5)\n";
-  c += "      SearchTools.FilterWithEC(s, ec)\n";
-  c += "      for _, o in pairs(SearchTools.GetSearchResults(s)) do\n";
-  c += "        local d = o:GetPosition() - p\n";
-  c += "        local dist = d:GetLength()\n";
-  c += "        if closed(o) and dist < bd and (dist <= 0.8 or (d:GetX() * f:GetX() + d:GetY() * f:GetY()) / dist >= 0.3) then\n";
-  c += "          best, bd, kind = o, dist, k\n";
-  c += "        end\n";
-  c += "      end\n";
-  c += "    end\n";
-  c += "    pick(Chest.GetECType(), function(o) return not Chest.IsOpen(o) end, 'chest')\n";
-  c += "    pick(Door.GetECType(), function(o) return not Door.IsOpen(o) and not Door.IsLocked(o) end, 'door')\n";
+  c += "    if coop_cutscene() then return 'a cutscene or movie is playing: nothing used' end\n";
+  c += "    best, kind = coop_near(p2)\n";
   c += "    if not best then return 'nothing to use in front of player 2' end\n";
   c += "  else\n";
   c += "    local s = SearchTools.StartNewSearch('object')\n";
@@ -122,13 +147,7 @@ inline std::string host_chunk(const std::string& kind, float x, float y, float z
   // Someone's chest (the stock handler's theft test: an owner building that is
   // not the hero's, or rented): refused until the theft check is carried over;
   // no silent theft and no crime pinned on the host.
-  c += "    if OwnedEntity.IsAvailable(best) then\n";
-  c += "      local owner = OwnedEntity.GetOwner(best)\n";
-  c += "      if owner and owner:IsAlive() and Building.IsAvailable(owner) and\n";
-  c += "         (not PlayerProperties.IsOwnedByPlayer(GetPlayerHero(), owner) or PlayerProperties.GetIsRentalProperty(GetPlayerHero(), owner)) then\n";
-  c += "        return 'chest belongs to someone: not opened (taking from it is not supported yet)'\n";
-  c += "      end\n";
-  c += "    end\n";
+  c += "    if coop_owned(best) then return 'chest belongs to someone: not opened (taking from it is not supported yet)' end\n";
   c += "    CoopWUse = coroutine.create(function()\n";
   c += "      Chest.Open(best)\n";
   c += "      local n = 0\n";
@@ -232,6 +251,58 @@ inline void test_tick() {
   run_on_host(v.substr(0, colon), x, y, z, "coop_world_use");
 }
 
+// --- the hint -----------------------------------------------------------------
+// Host: what an A from player 2 would open now (printed only when it changes;
+// CoopWHintLast is reset with each new player 2).
+constexpr int64_t kHintMs = 750;
+inline std::string hint_chunk(bool reset) {
+  std::string c = kNearLua;
+  if (reset) c += "CoopWHintLast = nil\n";
+  c += R"lua(local ok, e = pcall(function()
+  local p2 = GetPlayerHenchman()
+  if not p2 or not p2:IsAlive() or coop_cutscene() then return 'none' end
+  local o, k = coop_near(p2)
+  if not o or (k == 'chest' and (Chest.IsLocked(o) or coop_owned(o))) then return 'none' end
+  return k
+end)
+local what = ok and e or 'none'
+if what ~= CoopWHintLast then CoopWHintLast = what print('COOPWHINT:' .. what) end
+)lua";
+  return c;
+}
+
+inline std::mutex g_hint_mtx;
+inline std::string g_hint = "none";  // the host's latest, from the line
+inline std::string g_hint_sent;      // as published
+inline int64_t g_next_hint_ms = 0;
+inline uint32_t g_hint_epoch = ~0u;
+inline void on_hint_line(std::string_view line) {
+  std::lock_guard<std::mutex> l(g_hint_mtx);
+  g_hint = std::string(line.substr(std::string_view("COOPWHINT:").size()));
+}
+
+inline void host_hint_tick(int64_t now, bool partner_here) {
+  std::string what;
+  {
+    std::lock_guard<std::mutex> l(g_hint_mtx);
+    if (!partner_here) g_hint = "none";
+    what = g_hint;
+  }
+  if (what != g_hint_sent) {
+    g_hint_sent = what;
+    char rec[96];
+    std::snprintf(rec, sizeof(rec), "COOPWHINT:v1|n=%lld|what=%s", static_cast<long long>(now), what.c_str());
+    lobby::PublishData("coop_whint", rec);
+  }
+  // One chunk at a time, never while a chest use runs or chunks wait.
+  if (!partner_here || now < g_next_hint_ms || g_driving.load() || fable2::f5lua::g_queued.load() > 0) return;
+  g_next_hint_ms = now + kHintMs;
+  const uint32_t epoch = fable2::coophero::g_spawn_epoch.load();
+  const bool reset = epoch != g_hint_epoch;
+  g_hint_epoch = epoch;
+  fable2::luaconsole::RunChunk(hint_chunk(reset));
+}
+
 // --- the joiner's part --------------------------------------------------------
 // A campaign partner in the host's world (the purse mirror's host is set at
 // the go and cleared on leaving).
@@ -279,8 +350,35 @@ inline bool joiner_settled(int64_t now) {
   return p2 && now - g_p2_since_ms > kSettleMs && !fable2::f5lua::saving() &&
          !(loaded && now - loaded < kSettleMs);
 }
+// The partner: the host's hint as a toast, refreshed every tick while it holds
+// (it hides on its own kToastMs after the last), off in the pause wheel.
+extern "C" void rex_ui_set_toast(const char* text, int ms);
+constexpr int kToastMs = 1500;
+inline bool g_toast_up = false;
+inline void joiner_hint_tick(int64_t now) {
+  std::string what;
+  if (joiner_in_campaign() && joiner_settled(now) && !fable2::coopkit::g_wheel_open.load()) {
+    const uint64_t hxuid = fable2::coopfrontend::g_purse_host_xuid.load();
+    const uint32_t hip = lobby::GetLobbyStatus().joined_host_ip;
+    for (const auto& d : lobby::GetPeerData("coop_whint")) {
+      if (d.xuid ? d.xuid != hxuid : d.ip != hip) continue;
+      const auto at = d.value.find("|what=");
+      if (d.value.rfind("COOPWHINT:v1|", 0) == 0 && at != std::string::npos) what = d.value.substr(at + 6);
+    }
+  }
+  const char* text = what == "chest" ? "A: Open the chest" : what == "door" ? "A: Open the door" : nullptr;
+  if (text) {
+    rex_ui_set_toast(text, kToastMs);
+    g_toast_up = true;
+  } else if (g_toast_up) {
+    rex_ui_set_toast("", 0);
+    g_toast_up = false;
+  }
+}
+
 inline void joiner_tick(int64_t now) {
   if (!joiner_in_campaign()) fable2::coopkit::g_wheel_open = false;  // never left up by a lost session
+  joiner_hint_tick(now);
   if (!g_a_pressed.exchange(false)) return;
   if (!joiner_in_campaign() || !joiner_settled(now)) return;
   char rec[96];
@@ -293,10 +391,9 @@ inline void joiner_tick(int64_t now) {
 // The partner's latest coop_wuse record; one seen when player 2 arrived is old.
 inline std::string g_seen_record;
 inline uint32_t g_seen_epoch = ~0u;
-inline void host_tick() {
-  if (!fable2::coophero::g_campaign_on.load()) return;
+inline void host_tick(int64_t now) {
   const auto status = lobby::GetLobbyStatus();
-  if (!status.in_world || status.joined_host_ip != 0) return;
+  const bool hosting = fable2::coophero::g_campaign_on.load() && status.in_world && status.joined_host_ip == 0;
   uint64_t pxuid = 0;
   uint32_t pip = 0;
   {
@@ -304,6 +401,8 @@ inline void host_tick() {
     pxuid = fable2::coopfrontend::S().partner_xuid;
     pip = fable2::coopfrontend::S().partner_ip;
   }
+  host_hint_tick(now, hosting && (pxuid || pip) && fable2::coopcam::g_p2_entity.load() != 0);
+  if (!hosting) return;
   std::string rec;
   for (const auto& d : lobby::GetPeerData("coop_wuse")) {
     if (pxuid && d.xuid ? d.xuid != pxuid : d.ip != pip) continue;
@@ -339,7 +438,7 @@ inline void OnFrame() {
   if (!fable2::f5lua::ready()) return;
   test_tick();
   joiner_tick(now);
-  host_tick();
+  host_tick(now);
 }
 
 // Chains onto the per-frame hook and the game's pad hook (main.cpp includes
@@ -350,6 +449,7 @@ inline bool Install() {
   g_prev_pad_hook = fable2::cooplobby::g_game_pad_hook;
   fable2::cooplobby::g_game_pad_hook = &pad_hook;
   fable2::luaconsole::AddLineHandler("[coop] world use done", [](std::string_view) { g_driving = false; });
+  fable2::luaconsole::AddLineHandler("COOPWHINT:", on_hint_line);
   return true;
 }
 inline const bool g_installed = Install();
