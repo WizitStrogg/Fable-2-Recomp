@@ -3051,6 +3051,81 @@ def lf_use1():
             g.stop()
         relay.kill()
 
+
+def lf_hero_has_starter(a):
+    """QC060's own test (IsHeroPacking): the host's hero holds the adult starter melee."""
+    out = lua_lines(a, "print('LFPACK ' .. tostring(Inventory.GetNumberOfItemsOfType(GetPlayerHero(), "
+                       "Gameflow.WeaponNames.AdultStarterMelee)) .. ' ' .. tostring(Inventory.GetNumberOfItems(GetPlayerHero())))",
+                    "LFPACK", 10)
+    return out[-1] if out else "?"
+
+
+def lf_use23():
+    """Path 2b, steps 2 and 3: the partner presses A at the caravan quest chest
+    (QC060), another chest and a door; the host uses each for player 2. Checks:
+    the hint shows, the object opens, the contents reach the host's hero (the
+    stock co-op rule) and QC060's test passes, the purses agree; the partner's
+    A on nothing still works (no record)."""
+    tag = "lf_use23"
+    a, b, relay, ok = lf_start_campaign(tag)
+    try:
+        if not ok:
+            return
+        time.sleep(10)
+        chests = lf_chests(a, 150)
+        door = lf_find(a, "door", 150)
+        targets = [("chest", c[:3], f"chest{i}") for i, c in enumerate(chests[:2])]
+        if door:
+            targets.append(("door", door[:3], "door"))
+        for kind, (x, y, z), label in targets:
+            if not lf_p2_to(b, x, y, z, kind):
+                note("FAIL", f"{tag}: {label}: the partner could not get to it")
+                continue
+            time.sleep(3.5)
+            b.shot(f"{tag}_{label}_hint.png")
+            before = lf_state(a, kind, x, y, z)
+            pack0 = lf_hero_has_starter(a)
+            purse0 = read_purses(a, b, f"{tag}_{label}_before")
+            p2inv0 = inv_dump(a, f"{tag}_{label}_p2_before")
+            na, nb = len(a.lines()), len(b.lines())
+            b.send("press A 200")
+            t = time.time()
+            while time.time() - t < 25:
+                if kind != "chest" or any("world use done" in l for l in a.lines()[na:]):
+                    break
+                time.sleep(1)
+            time.sleep(3)
+            b.shot(f"{tag}_{label}_partner_after.png")
+            a.shot(f"{tag}_{label}_host_after.png")
+            after = lf_state(a, kind, x, y, z)
+            pack1 = lf_hero_has_starter(a)
+            purse1 = read_purses(a, b, f"{tag}_{label}_after")
+            p2inv1 = inv_dump(a, f"{tag}_{label}_p2_after")
+            sent = [l[24:200] for l in b.lines()[nb:] if "world use" in l]
+            done = [l[24:200] for l in a.lines()[na:] if "world use" in l]
+            note("PASS" if after == "true" else "FAIL",
+                 f"{tag}: {label}: partner's A -> open {before} -> {after}; partner {sent}; host {done}")
+            note("INFO", f"{tag}: {label}: host hero starter melee / items {pack0} -> {pack1}; purses {purse0} -> {purse1}; "
+                         f"player 2 items {p2inv0[1] if p2inv0 else '?'} -> {p2inv1[1] if p2inv1 else '?'}")
+            if label == "chest0":
+                note("PASS" if pack1.split()[0] not in ("0", "?") else "FAIL",
+                     f"{tag}: the caravan chest's starter weapon reached the host's hero (QC060 IsHeroPacking): {pack0} -> {pack1}")
+        # The partner's A at nothing: no record, nothing on the host.
+        lua_lines(b, ("local me = GetPlayerHenchman(); local p = me:GetPosition(); "
+                      "Physics.TeleportToPosition(me, CVector3(p:GetX() + 12, p:GetY() + 12, p:GetZ())); print('LFAWAY ok')"),
+                  "LFAWAY", 10)
+        time.sleep(2)
+        na, nb = len(a.lines()), len(b.lines())
+        b.send("press A 200")
+        time.sleep(4)
+        stray = [l[24:200] for l in b.lines()[nb:] + a.lines()[na:] if "world use" in l]
+        note("PASS" if not stray else "FAIL", f"{tag}: the partner's A away from objects sends nothing ({stray})")
+    finally:
+        for g in (a, b):
+            g.stop()
+        relay.kill()
+
+
 def run_livefix():
     phases = sys.argv[sys.argv.index("--phases") + 1].split(",") if "--phases" in sys.argv else ["empty", "male", "female"]
     if "empty" in phases:
@@ -3067,6 +3142,8 @@ def run_livefix():
         lf_use()
     if "use1" in phases:
         lf_use1()
+    if "use23" in phases:
+        lf_use23()
 
 
 def run_dynsync():

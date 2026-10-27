@@ -494,6 +494,7 @@ inline void on_partner_go(uint32_t ip) {
   }
   fable2::coophero::g_campaign_p2_female.store(p2_female ? 1 : 0);
   lobby::PublishData("coop_leave", "");  // a leave from an earlier session is not news
+  lobby::PublishData("coop_wuse", "");   // nor a use (fable2_coop_worlduse.h)
   {
     std::lock_guard<std::mutex> l(S().m);
     S().s = Session::kPartnerJoining;
