@@ -891,6 +891,7 @@ inline void purse_tick(int64_t now) {
   // would take every console slot); the next tick after the pause syncs.
   if (fable2::f5lua::g_queued.load() > 0) return;
   g_next_purse_ms = now + kPurseEveryMs;
+  if (fable2::coophero::g_hold_purse.load()) return;  // testing: coop_gold_watch
   const uint32_t epoch = fable2::coophero::g_spawn_epoch.load();
   const bool reset = epoch != g_purse_epoch;
   g_purse_epoch = epoch;

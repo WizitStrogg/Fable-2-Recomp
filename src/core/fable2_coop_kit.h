@@ -692,8 +692,22 @@ inline uint16_t pad_hook(uint16_t buttons) {
   if (g_mask_start.load()) buttons &= ~kPadStart;
   return buttons;
 }
+// The partner chose Quit on its wheel (sub_8240EAA0 below): once the wheel is
+// down, it leaves for its front end with the game's own QuitToFrontEnd; the
+// host sees the partner go (the partner-lost path: it saves and waits in the
+// campaign's lobby).
+inline std::atomic<bool> g_leave_pending{false};
+inline void leave_tick() {
+  if (!g_leave_pending.load() || g_menu_up.load() || g_b_left.load() > 0) return;
+  if (fable2::luaconsole::RunChunk(
+          "print('[coop] partner leaves: QuitToFrontEnd ' .. tostring(pcall(Debug.QuitToFrontEnd)))\n")) {
+    g_leave_pending = false;
+    REXSYS_INFO("[coopkit] partner: wheel closed, leaving the host's game");
+  }
+}
 // Render thread, every frame.
 inline void start_close_tick() {
+  leave_tick();
   if (g_b_left.load() <= 0) return;
   const int64_t now = fable2::f5lua::steady_ms();
   if (!g_menu_up.load()) {
@@ -961,6 +975,18 @@ extern "C" void sub_8240EAA0(PPCContext& ctx, uint8_t* base) {
     ck::be32(base, ev + 4, type);
     return;
   }
+  // The wheel's Quit row (Kick added as "HenchmanQuit", sub_824083C0 below):
+  // the stock henchman quit question opened from the full wheel takes no input
+  // (rig 2026-10-27, and L4 of the Save redirect), so the partner leaves our
+  // way: the wheel is closed (B, as for Start) and then QuitToFrontEnd.
+  if (type == ck::kPageChosen && str && std::strcmp(name, "HenchmanQuit") == 0) {
+    REXSYS_INFO("[coopkit] partner: Quit chosen on the wheel: closing it, then leaving");
+    ck::g_close_from_ms = fable2::f5lua::steady_ms();
+    ck::g_next_b_ms = 0;
+    ck::g_b_left = ck::kStartBs;
+    ck::g_leave_pending = true;
+    return;
+  }
   if (type != ck::kPageChosen || !str) {
     if (REXCVAR_GET(coop_kit_log_events))
       REXSYS_INFO("[coopkit] pause page event type {} name '{}'", type, name);
@@ -1011,12 +1037,11 @@ extern "C" void sub_8240F040(PPCContext& ctx, uint8_t* base) {
 // r10, stack +84), used by both builders: the host's sub_82842860 and the
 // henchman's sub_828436A8. In the joiner's full wheel (above) the host-only
 // rows are not the partner's: the Save row ("Saving": save and quit the host's
-// game) and its rows (parent "Saving") are left out, and Kick becomes the henchman's own Quit row, name
-// "HenchmanQuit" with the stock GUI_SCREEN_PAUSE_HENCHMAN_QUIT label, exactly
-// what sub_828436A8 adds. Choosing it is then an ordinary page choice that the
-// dispatcher sends to the henchman handler (any name with "Henchman"), the
-// stock "leave the game" question (live session 2026-10-27: Calvin had Kick,
-// which did nothing, and no way to leave).
+// game) and its rows (parent "Saving") are left out, and Kick becomes the
+// henchman's own Quit row, name "HenchmanQuit" with the stock
+// GUI_SCREEN_PAUSE_HENCHMAN_QUIT label, exactly what sub_828436A8 adds.
+// Choosing it closes the wheel and leaves (sub_8240EAA0 above) (live session
+// 2026-10-27: Calvin had Kick, which did nothing, and no way to leave).
 extern "C" void __imp__sub_824083C0(PPCContext& ctx, uint8_t* base);
 extern "C" void ConstructRefCounted_8222CF18(PPCContext& ctx, uint8_t* base);
 extern "C" void DestructRefCounted_82214F08(PPCContext& ctx, uint8_t* base);

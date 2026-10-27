@@ -32,6 +32,7 @@ namespace fable2::camwatch {
 
 constexpr uintptr_t kPage = 0x1000;
 inline std::atomic<uintptr_t> g_page{0};      // armed page (host address), 0 = not armed
+inline std::atomic<uintptr_t> g_last_page{0};  // the last page armed (late faults on it are retried)
 inline std::atomic<uintptr_t> g_view_host{0};  // the view struct (host address)
 inline std::atomic<DWORD> g_own_tid{0};       // the follow camera's thread (its writes are ours)
 inline std::atomic<int> g_samples{0};
@@ -62,8 +63,15 @@ inline LONG CALLBACK handler(PEXCEPTION_POINTERS info) {
     return EXCEPTION_CONTINUE_SEARCH;
   const uintptr_t page = g_page.load();
   const uintptr_t addr = r->ExceptionInformation[1];
-  if (!page || addr < page || addr >= page + kPage) return EXCEPTION_CONTINUE_SEARCH;
+  const uintptr_t last = g_last_page.load();
   DWORD old = 0;
+  if (!page && last && addr >= last && addr < last + kPage) {
+    // Disarmed while this write was faulting (rig 2026-10-27: the partner
+    // crashed on such a write): writable again, retry it.
+    VirtualProtect(reinterpret_cast<void*>(last), kPage, PAGE_READWRITE, &old);
+    return EXCEPTION_CONTINUE_EXECUTION;
+  }
+  if (!page || addr < page || addr >= page + kPage) return EXCEPTION_CONTINUE_SEARCH;
   VirtualProtect(reinterpret_cast<void*>(page), kPage, PAGE_READWRITE, &old);
   const DWORD tid = GetCurrentThreadId();
   const int64_t offset = static_cast<int64_t>(addr) - static_cast<int64_t>(g_view_host.load());
@@ -89,9 +97,10 @@ inline LONG CALLBACK handler(PEXCEPTION_POINTERS info) {
 
 // From the follow camera, right before its own write (render thread): disarm.
 inline void before_write() {
-  const uintptr_t page = g_page.exchange(0);
+  const uintptr_t page = g_page.load();
   DWORD old = 0;
-  if (page) VirtualProtect(reinterpret_cast<void*>(page), kPage, PAGE_READWRITE, &old);
+  if (page) VirtualProtect(reinterpret_cast<void*>(page), kPage, PAGE_READWRITE, &old);  // writable first,
+  g_page.store(0);                                                                       // then disarmed
 }
 
 // From the follow camera, right after it wrote the view (render thread).
@@ -115,6 +124,7 @@ inline void after_write(uintptr_t view_host, uintptr_t target_host, int64_t now_
     return;  // not a plain read-write page (the SDK may be watching it): leave it alone
   }
   g_steps.store(0);
+  g_last_page.store(page);
   g_page.store(page);
   DWORD old = 0;
   if (!VirtualProtect(reinterpret_cast<void*>(page), kPage, PAGE_READONLY, &old)) {

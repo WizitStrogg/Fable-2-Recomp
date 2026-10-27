@@ -3,8 +3,9 @@
 // 1 gold every ~2 minutes in a co-op campaign (live session and rig,
 // 2026-10-27; Debug.SetHenchmanGoldValue(0) does not stop it). Steps, each a
 // value of the coop_gold_watch cvar (test input: "cvar coop_gold_watch find:9871"):
-//   find:<n>    after Money.Set(player 2, n) from Lua: log every 4-byte
-//               big-endian n in player 2's entity and its components
+//   find:<n>    after Money.Set(player 2, n) from Lua: every 4-byte
+//               big-endian n in the game heap (the shared purse merge is
+//               held from the first step on)
 //   pick:<n>    after Money.Set(player 2, n): keep the candidates now n
 //   watch       arm a write watch on the one candidate left (or watch:<hex>)
 // A write to it logs the thread and the host instruction (exe-relative;
@@ -85,26 +86,21 @@ inline void scan(const uint8_t* base, uint32_t from, uint32_t len, uint32_t valu
 
 inline void step(const std::string& cmd) {
   const uint8_t* base = fable2::f5lua::g_base;
-  const uint32_t entity = fable2::coopcam::g_p2_entity.load();
-  if (!base || !entity) {
-    REXSYS_INFO("[goldwatch] no player 2 entity yet");
-    return;
-  }
+  if (!base) return;
+  fable2::coophero::g_hold_purse.store(true);  // the purse merge would copy the value to the host
   const auto colon = cmd.find(':');
   const std::string verb = cmd.substr(0, colon);
   const std::string arg = colon == std::string::npos ? "" : cmd.substr(colon + 1);
   if (verb == "find") {
+    // The game heap (0x40000000..0x50000000, as find_view): player 2's entity
+    // is not known on the host (its CECPlayer setup is not ours to see there).
     const uint32_t value = static_cast<uint32_t>(std::strtoul(arg.c_str(), nullptr, 10));
     g_candidates.clear();
-    scan(base, entity, 0x800, value, g_candidates);
-    const uint32_t b = rd(base, entity + 72), e = rd(base, entity + 76);
-    for (uint32_t p = b; p && p < e && p - b < 8 * 512; p += 8) {
-      const uint32_t comp = rd(base, p + 4);
-      if (comp) scan(base, comp, 0x800, value, g_candidates);
+    for (uint64_t page = 0x40000000; page < 0x50000000 && g_candidates.size() < 4096; page += 0x10000) {
+      const uint32_t p = static_cast<uint32_t>(page);
+      if (ta::rdable2(base, p, 0x10000)) scan(base, p, 0x10000, value, g_candidates);
     }
-    std::string list;
-    for (uint32_t a : g_candidates) list += fmt::format(" {:08X}", a);
-    REXSYS_INFO("[goldwatch] find {}: {} candidate(s) in entity 0x{:08X}:{}", value, g_candidates.size(), entity, list);
+    REXSYS_INFO("[goldwatch] find {}: {} candidate(s) in the heap", value, g_candidates.size());
   } else if (verb == "pick") {
     const uint32_t value = static_cast<uint32_t>(std::strtoul(arg.c_str(), nullptr, 10));
     std::vector<uint32_t> keep;

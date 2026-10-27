@@ -214,6 +214,13 @@ inline Vec3 g_written_pos;       // what we last wrote (to tell network updates 
 inline Vec3 g_host_pos, g_host_fwd;  // last camera received from the host
 inline int64_t g_next_find_ms = 0;
 inline bool g_logged_active = false;
+// Shared with the game thread's view hooks (below the namespace): our last
+// camera, and the host's camera as the view setter last received it.
+inline std::mutex g_pose_mu;
+inline Vec3 g_our_pos, g_our_up, g_our_fwd;
+inline bool g_have_ours = false;
+inline Vec3 g_net_host_pos, g_net_host_fwd;
+inline bool g_net_host_new = false;
 
 constexpr float kDistance = 5.5f, kHeight = 2.3f, kLookHeight = 1.5f, kTurnRate = 0.04f;
 constexpr float kOrbitSpeed = 4.0f;          // radians per second at full look input
@@ -269,6 +276,16 @@ inline void follow_tick(bool enabled) {
   if (dot(d, d) > 1e-4f) {
     g_host_pos = seen;
     g_host_fwd = read_vec(base, view + kViewTarget + 0x20);
+  }
+  {
+    // The host's camera as the view setter received it (game thread, below):
+    // the blocks themselves hold ours again by the time we read them.
+    std::lock_guard<std::mutex> l(g_pose_mu);
+    if (g_net_host_new) {
+      g_host_pos = g_net_host_pos;
+      g_host_fwd = g_net_host_fwd;
+      g_net_host_new = false;
+    }
   }
   if (!g_have_yaw) {
     g_yaw = std::atan2(-g_host_fwd.y, -g_host_fwd.x);  // start where the host camera is
@@ -353,6 +370,13 @@ inline void follow_tick(bool enabled) {
     write_vec(base, view + block + 0x20, fwd);
   }
   g_written_pos = pos;
+  {
+    std::lock_guard<std::mutex> l(g_pose_mu);
+    g_our_pos = pos;
+    g_our_up = up;
+    g_our_fwd = fwd;
+    g_have_ours = true;
+  }
   g_active.store(true);
   if (g_after_write) {
     g_after_write(static_cast<uintptr_t>(ta::host_addr(base, view)),
@@ -365,7 +389,56 @@ inline void follow_tick(bool enabled) {
   }
 }
 
+// Our camera into both view blocks again, on the thread that just wrote them.
+inline void rewrite_view(uint8_t* base, uint32_t view) {
+  if (!g_active.load() || !view || view != g_view.load()) return;
+  Vec3 pos, up, fwd;
+  {
+    std::lock_guard<std::mutex> l(g_pose_mu);
+    if (!g_have_ours) return;
+    pos = g_our_pos;
+    up = g_our_up;
+    fwd = g_our_fwd;
+  }
+  for (uint32_t block : {kViewCurrent, kViewTarget}) {
+    if (!ta::wr2(base, view + block, 0x30)) return;
+    write_vec(base, view + block, pos);
+    write_vec(base, view + block + 0x10, up);
+    write_vec(base, view + block + 0x20, fwd);
+  }
+}
+
 }  // namespace fable2::coopcam
+
+// The joiner's view is written on the game thread by the view setter
+// sub_82423800(r3 = view, r4 = new view: position, up +0x10, forward +0x20,
+// FOV +0x30), which the host's camera arriving over the network goes through,
+// and the per-frame view update sub_824244F0(r3 = view) (coop_cam_watch, rig
+// 2026-10-27). The follow camera writes from the render thread, so a host
+// update landing between its writes showed the host's camera for a frame
+// while the host moved (the jitter). While our camera is active both are
+// followed at once by ours on the same thread; the setter's input is kept as
+// the host's camera. The FOV is left as the host's (cutscene hand-back).
+extern "C" void __imp__sub_82423800(PPCContext& ctx, uint8_t* base);
+extern "C" void sub_82423800(PPCContext& ctx, uint8_t* base) {
+  namespace cc = fable2::coopcam;
+  const uint32_t view = ctx.r3.u32, src = ctx.r4.u32;
+  const bool ours = cc::g_active.load() && view && view == cc::g_view.load();
+  if (ours && cc::ta::rdable2(base, src, 0x30)) {
+    std::lock_guard<std::mutex> l(cc::g_pose_mu);
+    cc::g_net_host_pos = cc::read_vec(base, src);
+    cc::g_net_host_fwd = cc::read_vec(base, src + 0x20);
+    cc::g_net_host_new = true;
+  }
+  __imp__sub_82423800(ctx, base);
+  if (ours) cc::rewrite_view(base, view);
+}
+extern "C" void __imp__sub_824244F0(PPCContext& ctx, uint8_t* base);
+extern "C" void sub_824244F0(PPCContext& ctx, uint8_t* base) {
+  const uint32_t view = ctx.r3.u32;
+  __imp__sub_824244F0(ctx, base);
+  fable2::coopcam::rewrite_view(base, view);
+}
 
 // CECPlayer setup (one per player creature, also on a joiner): r3 = player
 // component, r4 = creature entity, r5 = player slot (1 = player 2). Camera

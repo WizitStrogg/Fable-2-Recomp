@@ -110,6 +110,9 @@ inline std::map<int, std::string>& story_parts() {
   return m;
 }
 inline std::atomic<int64_t> g_spawned_at_ms{0};  // last henchman spawn
+// Testing (coop_gold_watch, src/diagnostics/fable2_gold_watch.h): the shared
+// purse merge waits, so player 2's gold moves only by what pays it.
+inline std::atomic<bool> g_hold_purse{false};
 inline std::atomic<uint32_t> g_spawn_epoch{0};   // increments per spawn
 
 // Host-side apply bookkeeping (game thread only).
