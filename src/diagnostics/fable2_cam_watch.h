@@ -68,7 +68,7 @@ inline LONG CALLBACK handler(PEXCEPTION_POINTERS info) {
   const DWORD tid = GetCurrentThreadId();
   const int64_t offset = static_cast<int64_t>(addr) - static_cast<int64_t>(g_view_host.load());
   const bool in_blocks = offset >= 0xE0 && offset < 0x170;
-  if (in_blocks && tid != g_own_tid.load()) {
+  if (in_blocks) {
     g_page.store(0);
     if (!g_last.ready.load()) {
       g_last.rip = static_cast<uintptr_t>(info->ContextRecord->Rip) -
@@ -77,22 +77,30 @@ inline LONG CALLBACK handler(PEXCEPTION_POINTERS info) {
       g_last.offset = offset;
       g_last.ready.store(true);
     }
-  } else if (tid != g_own_tid.load() && g_steps.fetch_add(1) < 5000) {
-    // Someone else's field on the page: let this one write through, then arm again.
+  } else if (g_steps.fetch_add(1) < 5000) {
+    // Another field on the page: let this one write through, then arm again.
     t_reprotect = page;
     info->ContextRecord->EFlags |= 0x100u;
   } else {
-    g_page.store(0);  // our own write (the follow camera), or too many: the arm ends
+    g_page.store(0);  // too many: the arm ends
   }
   return EXCEPTION_CONTINUE_EXECUTION;
+}
+
+// From the follow camera, right before its own write (render thread): disarm.
+inline void before_write() {
+  const uintptr_t page = g_page.exchange(0);
+  DWORD old = 0;
+  if (page) VirtualProtect(reinterpret_cast<void*>(page), kPage, PAGE_READWRITE, &old);
 }
 
 // From the follow camera, right after it wrote the view (render thread).
 inline void after_write(uintptr_t view_host, uintptr_t target_host, int64_t now_ms) {
   if (g_last.ready.load()) {
-    REXSYS_INFO("[camwatch] view written by thread {} at exe+0x{:X}, view+0x{:X}", g_last.tid, g_last.rip,
-                g_last.offset);
+    REXSYS_INFO("[camwatch] view written by thread {}{} at exe+0x{:X}, view+0x{:X}", g_last.tid,
+                g_last.tid == g_own_tid.load() ? " (the follow camera's)" : "", g_last.rip, g_last.offset);
     g_last.ready.store(false);
+    g_samples.fetch_add(1);  // 60 catches per session
   }
   if (!REXCVAR_GET(coop_cam_watch) || g_page.load() || now_ms < g_next_arm_ms || g_samples.load() >= 60) return;
   static const bool installed = AddVectoredExceptionHandler(1, &handler) != nullptr;
@@ -113,11 +121,11 @@ inline void after_write(uintptr_t view_host, uintptr_t target_host, int64_t now_
     g_page.store(0);
     return;
   }
-  g_samples.fetch_add(1);
 }
 
 inline const bool g_hooked = [] {
   fable2::coopcam::g_after_write = &after_write;
+  fable2::coopcam::g_before_write = &before_write;
   return true;
 }();
 

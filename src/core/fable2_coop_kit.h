@@ -1011,7 +1011,7 @@ extern "C" void sub_8240F040(PPCContext& ctx, uint8_t* base) {
 // r10, stack +84), used by both builders: the host's sub_82842860 and the
 // henchman's sub_828436A8. In the joiner's full wheel (above) the host-only
 // rows are not the partner's: the Save row ("Saving": save and quit the host's
-// game) is left out, and Kick becomes the henchman's own Quit row, name
+// game) and its rows (parent "Saving") are left out, and Kick becomes the henchman's own Quit row, name
 // "HenchmanQuit" with the stock GUI_SCREEN_PAUSE_HENCHMAN_QUIT label, exactly
 // what sub_828436A8 adds. Choosing it is then an ordinary page choice that the
 // dispatcher sends to the henchman handler (any name with "Henchman"), the
@@ -1026,14 +1026,17 @@ extern "C" void sub_824083C0(PPCContext& ctx, uint8_t* base) {
   namespace ta = fable2::textappend;
   namespace ck = fable2::coopkit;
   if (!ck::t_joiner_wheel) return __imp__sub_824083C0(ctx, base);
-  const uint32_t slot = ctx.r4.u32;
-  const uint32_t buf = slot && ta::rdable2(base, slot, 4) ? ta::load_be(base, slot) : 0;
-  const uint32_t str = buf && ta::rdable2(base, buf, 4) ? ta::load_be(base, buf) : 0;
-  char name[32] = {};
-  if (str && ta::rdable2(base, str, sizeof(name) - 1))
-    std::memcpy(name, reinterpret_cast<const void*>(ta::host_addr(base, str)), sizeof(name) - 1);
-  if (std::strcmp(name, "Saving") == 0) {
-    REXSYS_INFO("[coopkit] partner wheel: Save row left out");
+  auto slot_text = [&](uint32_t slot, char (&out)[32]) {
+    const uint32_t buf = slot && ta::rdable2(base, slot, 4) ? ta::load_be(base, slot) : 0;
+    const uint32_t str = buf && ta::rdable2(base, buf, 4) ? ta::load_be(base, buf) : 0;
+    if (str && ta::rdable2(base, str, sizeof(out) - 1))
+      std::memcpy(out, reinterpret_cast<const void*>(ta::host_addr(base, str)), sizeof(out) - 1);
+  };
+  char name[32] = {}, parent[32] = {};
+  slot_text(ctx.r4.u32, name);
+  slot_text(ctx.r7.u32, parent);
+  if (std::strcmp(name, "Saving") == 0 || std::strcmp(parent, "Saving") == 0) {
+    REXSYS_INFO("[coopkit] partner wheel: Save row '{}' left out", name);
     return;
   }
   if (std::strcmp(name, "Kick") != 0) {

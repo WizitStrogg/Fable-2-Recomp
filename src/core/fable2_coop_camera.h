@@ -229,6 +229,7 @@ inline int64_t g_trace_until_ms = 0;
 // Testing (coop_cam_watch, src/diagnostics/fable2_cam_watch.h): called after
 // each write with the view's and its target block's host addresses.
 inline void (*g_after_write)(uintptr_t view, uintptr_t target, int64_t now_ms) = nullptr;
+inline void (*g_before_write)() = nullptr;
 
 inline void follow_tick(bool enabled) {
   uint8_t* base = fable2::f5lua::g_base;
@@ -344,6 +345,7 @@ inline void follow_tick(bool enabled) {
     }
   }
   const Vec3 up = normalized(Vec3{0, 0, 1} - fwd * fwd.z);
+  if (g_before_write) g_before_write();  // testing: the watched page writable for our own write
   for (uint32_t block : {kViewCurrent, kViewTarget}) {
     if (!ta::wr2(base, view + block, 0x30)) return;
     write_vec(base, view + block, pos);
