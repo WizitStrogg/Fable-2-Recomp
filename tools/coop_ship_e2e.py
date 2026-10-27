@@ -3074,9 +3074,8 @@ def lf_use23():
         time.sleep(20)  # the partner acts only 15 s after player 2 arrives (fable2_coop_worlduse.h)
         chests = lf_chests(a, 150)
         door = lf_find(a, "door", 150)
+        # Chests only: the partner's door pick waits until its search is proven on the joiner.
         targets = [("chest", c[:3], f"chest{i}") for i, c in enumerate(chests[:2])]
-        if door:
-            targets.append(("door", door[:3], "door"))
         for kind, (x, y, z), label in targets:
             if not lf_p2_to(b, x, y, z, kind):
                 note("FAIL", f"{tag}: {label}: the partner could not get to it")

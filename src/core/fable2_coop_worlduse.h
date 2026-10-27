@@ -177,54 +177,53 @@ inline bool joiner_in_campaign() {
   return fable2::coopfrontend::g_purse_host_xuid.load() != 0 && lobby::GetLobbyStatus().joined_host_ip != 0;
 }
 
-// The joiner's Lua: the nearest closed chest or closed door within 2.5 m of
-// player 2 and in front of it (anything within 0.8 m counts). pick:
-// print it for the host; else show the A hint (a box the game draws, the
-// text shown as is: an id the text bank lacks is shown as itself).
-inline std::string joiner_chunk(bool pick) {
+// The joiner's Lua, on the partner's A: the nearest closed chest within 2.5 m
+// of player 2 and in front of it (anything within 0.8 m counts), printed for
+// the host. Only calls proven on the joiner: the chest search by component,
+// positions, the facing (rig 2026-10-27). A distance-filtered search, the door
+// search and the GUI calls (movie checks, the hint box) each crashed it once
+// or ran just before a crash (guest reads of 0x5 / 0x3A000008), so doors and
+// the "A: Open" hint wait until each is proven on its own.
+inline std::string joiner_chunk() {
   std::string c;
-  c += "local ok, err = pcall(function()\n";
-  c += "if (GUI.IsMoviePlaying and GUI.IsMoviePlaying()) or (GUI.IsFullCutscenePlaying and GUI.IsFullCutscenePlaying()) "
-       "then return 'a movie or cutscene is playing' end\n";
-  c += "local me = GetPlayerHenchman()\n";
-  c += "if not me or not me:IsAlive() then return 'no player 2' end\n";
-  c += "local p, f = me:GetPosition(), Physics.GetFacingVector(me)\n";
-  c += "local best, bk, bd = nil, nil, 1e9\n";
-  c += "local seen, near, ndot = 0, 1e9, 0\n";
-  c += "local function consider(o, kind)\n";
-  c += "  local d = o:GetPosition() - p\n";
-  c += "  local dist = d:GetLength()\n";
-  c += "  seen = seen + 1\n";
-  c += "  if dist < near then near, ndot = dist, dist > 0 and (d:GetX() * f:GetX() + d:GetY() * f:GetY()) / dist or 1 end\n";
-  c += "  if dist > 2.5 then return end\n";
-  c += "  if dist > 0.8 and (d:GetX() * f:GetX() + d:GetY() * f:GetY()) / dist < 0.3 then return end\n";
-  c += "  if dist < bd then best, bk, bd = o, kind, dist end\n";
-  c += "end\n";
-  c += "local function search(ec)\n";
-  c += "  local s = SearchTools.StartNewSearch('object')\n";
-  c += "  SearchTools.FilterWithinDistanceOfPos(s, p, 2.5)\n";
-  c += "  if ec then SearchTools.FilterWithEC(s, ec) end\n";
-  c += "  return SearchTools.GetSearchResults(s)\n";
-  c += "end\n";
-  c += "for _, o in pairs(search(Chest.GetECType())) do if not Chest.IsOpen(o) then consider(o, 'chest') end end\n";
-  c += "for _, o in pairs(search(Door.GetECType())) do if not Door.IsOpen(o) then consider(o, 'door') end end\n";
-  // No lever search here: an unfiltered object search on the joiner crashed
-  // it twice (rig 2026-10-27, guest reads of 0x5 and 0x3A000008, each right
-  // after the chunk). Levers need a filtered search first (none in the rig's world).
-  if (pick) {
-    c += "if not best then return string.format('nothing to use (%d seen, nearest %.1f m, facing %.2f)', seen, near, ndot) end\n";
-    c += "local q = best:GetPosition()\n";
-    c += "print(string.format('COOPWUSE pick %s %.3f %.3f %.3f', bk, q:GetX(), q:GetY(), q:GetZ()))\n";
-  } else {
-    c += "if not best or GUI.IsDisplayBoxActive() then return end\n";
-    c += "local text = ({chest = 'Open the chest', door = 'Open the door', switch = 'Pull the lever'})[bk]\n";
-    c += "GUI.DisplayInfoBoxParams({ShowAButton = true, ShowYButton = false, "
-         "DisplayBoxStyle = EDisplayBoxStyle.DBS_INFO_BOX, LifeTime = 2}, text)\n";
-  }
-  c += "end)\n";
-  // A pick that found nothing, or any error, is logged (the hint stays quiet).
-  c += pick ? "if not ok or err then print('[coop] world use (partner): ' .. tostring(err)) end\n"
-            : "if not ok then print('[coop] world use hint error: ' .. tostring(err)) end\n";
+  c += "local ok, err = pcall(function()
+";
+  c += "  local me = GetPlayerHenchman()
+";
+  c += "  if not me or not me:IsAlive() then return 'no player 2' end
+";
+  c += "  local p, f = me:GetPosition(), Physics.GetFacingVector(me)
+";
+  c += "  local best, bd, seen, near = nil, 1e9, 0, 1e9
+";
+  c += "  local s = SearchTools.GetSearchResults(SearchTools.FilterWithEC(SearchTools.StartNewSearch('object'), Chest.GetECType()))
+";
+  c += "  for _, o in pairs(s) do
+";
+  c += "    local d = o:GetPosition() - p
+";
+  c += "    local dist = d:GetLength()
+";
+  c += "    seen = seen + 1
+";
+  c += "    if dist < near then near = dist end
+";
+  c += "    if dist <= 2.5 and (dist <= 0.8 or (d:GetX() * f:GetX() + d:GetY() * f:GetY()) / dist >= 0.3) and
+";
+  c += "       dist < bd and not Chest.IsOpen(o) then best, bd = o, dist end
+";
+  c += "  end
+";
+  c += "  if not best then return string.format('nothing to use (%d chests, nearest %.1f m)', seen, near) end
+";
+  c += "  local q = best:GetPosition()
+";
+  c += "  print(string.format('COOPWUSE pick chest %.3f %.3f %.3f', q:GetX(), q:GetY(), q:GetZ()))
+";
+  c += "end)
+";
+  c += "if not ok or err then print('[coop] world use (partner): ' .. tostring(err)) end
+";
   return c;
 }
 
@@ -288,18 +287,14 @@ inline bool joiner_settled(int64_t now) {
          !(loaded && now - loaded < kSettleMs);
 }
 
-inline int64_t g_next_hint_ms = 0;
 inline void joiner_tick(int64_t now) {
   if (!joiner_in_campaign() || !joiner_settled(now)) {
     g_a_pressed = false;
     return;
   }
   if (g_a_pressed.exchange(false)) {
-    REXSYS_INFO("[coop] world use: the partner's A, looking for a chest, door or lever");
-    fable2::luaconsole::RunChunk(joiner_chunk(true));
-  } else if (now >= g_next_hint_ms && fable2::f5lua::g_queued.load() == 0) {  // none piling up while paused
-    g_next_hint_ms = now + 1500;
-    fable2::luaconsole::RunChunk(joiner_chunk(false));
+    REXSYS_INFO("[coop] world use: the partner's A, looking for a chest");
+    fable2::luaconsole::RunChunk(joiner_chunk());
   }
 }
 
