@@ -8,7 +8,7 @@
 // as a record of our own, and the host opens the object with the game's own
 // bindings (the ones the quest scripts use):
 //   chest   Chest.Open(chest)                       (the open takes no user)
-//   door    Door.SetOpenForEntity(door, player 2, true)
+//   door    Door.SetOpenForEntity(door, player 2, true), Door.SetOpen(door, true, true)
 //   lever   Switch.Use(switch, player 2)            (OnActionUseSwitch's call)
 // The object is found on the host by kind and position (both copies place the
 // level's objects alike): the nearest of that kind within 2.5 m.
@@ -65,8 +65,11 @@ inline std::string host_chunk(const std::string& kind, float x, float y, float z
   c += "    return 'chest opened (open ' .. tostring(Chest.IsOpen(best)) .. ')'\n";
   c += "  elseif kind == 'door' then\n";
   c += "    if Door.IsLocked(best) then return 'door locked' end\n";
+  // SetOpenForEntity alone only lets the door open for player 2 (it stayed
+  // shut, rig 2026-10-27); SetOpen opens it now, as the quest triggers do.
   c += "    Door.SetOpenForEntity(best, p2, true)\n";
-  c += "    return 'door opened for player 2'\n";
+  c += "    Door.SetOpen(best, true, true)\n";
+  c += "    return 'door opened for player 2 (open ' .. tostring(Door.IsOpen(best)) .. ')'\n";
   c += "  else\n";
   c += "    Switch.Use(best, p2)\n";
   c += "    return 'lever used by player 2'\n";

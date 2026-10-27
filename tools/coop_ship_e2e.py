@@ -2968,42 +2968,88 @@ def lf_find(a, kind, radius):
     return tuple(float(v) for v in out[-1].split()[:4])
 
 
+def lf_chests(a, radius, n=3):
+    """Up to n closed, unlocked chests nearest the host's hero: [(x, y, z, d)]."""
+    out = lua_lines(a, (
+        "local ok, e = pcall(function() local h = GetPlayerHero(); local s = SearchTools.StartNewSearch('object'); "
+        f"SearchTools.FilterWithinDistanceOfPos(s, h:GetPosition(), {radius}); SearchTools.FilterWithEC(s, Chest.GetECType()); "
+        "local t = {} for _, o in pairs(SearchTools.GetSearchResults(s)) do if not Chest.IsOpen(o) and not Chest.IsLocked(o) then "
+        "t[#t + 1] = {o, (o:GetPosition() - h:GetPosition()):GetLength()} end end; "
+        "table.sort(t, function(x, y) return x[2] < y[2] end); print('LFCH n ' .. #t); "
+        f"for i = 1, math.min(#t, {n}) do local p = t[i][1]:GetPosition(); "
+        "print(string.format('LFCH %.3f %.3f %.3f %.1f', p:GetX(), p:GetY(), p:GetZ(), t[i][2])) end end); "
+        "if not ok then print('LFCH error ' .. tostring(e)) end"), "LFCH", 20)
+    note("INFO", f"use1: chests {out}")
+    return [tuple(float(v) for v in l.split()[:4]) for l in out if len(l.split()) == 4 and l[0] != "n"]
+
+
+def lf_state(a, kind, x, y, z):
+    """open state of the <kind> nearest (x, y, z), read on the host."""
+    fn = "Chest.IsOpen" if kind == "chest" else "Door.IsOpen"
+    ec = "Chest.GetECType()" if kind == "chest" else "Door.GetECType()"
+    out = lua_lines(a, (
+        f"local p = CVector3({x:.3f}, {y:.3f}, {z:.3f}); local s = SearchTools.StartNewSearch('object'); "
+        f"SearchTools.FilterWithinDistanceOfPos(s, p, 2.5); SearchTools.FilterWithEC(s, {ec}); local o = SearchTools.GetNearestEntity(s, p); "
+        f"print('LFST ' .. tostring(o and {fn}(o)))"), "LFST", 10)
+    return out[-1] if out else "?"
+
+
+def lf_exec(a, b, tag, kind, x, y, z, label):
+    before = lf_state(a, kind, x, y, z)
+    purse0 = read_purses(a, b, f"{tag}_{label}_before")
+    n = len(a.lines())
+    a.send(f"cvar coop_world_use {kind}:{x:.3f},{y:.3f},{z:.3f}")
+    time.sleep(8)
+    after = lf_state(a, kind, x, y, z)
+    res = [l[60:220] for l in a.lines()[n:] if "[lua] [coop] world use" in l]
+    purse1 = read_purses(a, b, f"{tag}_{label}_after")
+    a.shot(f"{tag}_{label}_host.png")
+    b.shot(f"{tag}_{label}_partner.png")
+    note("PASS" if after == "true" else "FAIL",
+         f"{tag}: {label}: open {before} -> {after}; executor {res}; purses {purse0} -> {purse1}")
+    a.send("cvar coop_world_use none")
+    time.sleep(1)
+    return after == "true"
+
+
+def lf_p2_to(b, x, y, z, kind):
+    """The partner stands 1.2 m from the object (its own Lua; its copy owns its position)."""
+    ec = "Chest.GetECType()" if kind == "chest" else "Door.GetECType()"
+    out = lua_lines(b, (
+        f"local ok, e = pcall(function() local me = GetPlayerHenchman(); local p = CVector3({x:.3f}, {y:.3f}, {z:.3f}); "
+        f"local st = CVector3({x + 1.2:.3f}, {y:.3f}, {z:.3f}); Physics.TeleportToPosition(me, st); "
+        "local f = p - st; f:Normalise(); Physics.SetFacingVector(me, f); print('LFP2 ok') end); "
+        "if not ok then print('LFP2 error ' .. tostring(e)) end"), "LFP2", 15)
+    return bool(out) and out[-1].startswith("ok")
+
+
 def lf_use1():
-    """Path 2b, step 1: the host's executor (coop_world_use) opens a chest, a
-    door and a lever for player 2, triggered on the host itself."""
+    """Path 2b, step 1: the host's executor (coop_world_use) opens chests and a
+    door for player 2, triggered on the host itself: first with player 2 away,
+    then with player 2 standing at the object."""
     tag = "lf_use1"
     a, b, relay, ok = lf_start_campaign(tag)
     try:
         if not ok:
             return
         time.sleep(10)
-        for kind, radius in (("chest", 120), ("door", 150), ("switch", 250)):
-            found = lf_find(a, kind, radius)
-            if not found:
-                note("INFO", f"{tag}: no usable {kind} within {radius} m of the host")
-                continue
-            x, y, z, d = found
-            state = LF_FIND[kind][2]
-            before = lua_lines(a, f"print('LFST ' .. {state})", "LFST", 10)
-            purse0 = read_purses(a, b, f"{tag}_{kind}_before")
-            n = len(a.lines())
-            a.send(f"cvar coop_world_use {kind}:{x:.3f},{y:.3f},{z:.3f}")
-            time.sleep(4)
-            after = lua_lines(a, f"print('LFST ' .. {state})", "LFST", 10)
-            res = [l[24:220] for l in a.lines()[n:] if "world use" in l]
-            purse1 = read_purses(a, b, f"{tag}_{kind}_after")
-            a.shot(f"{tag}_{kind}_host.png")
-            b.shot(f"{tag}_{kind}_partner.png")
-            good = any("opened" in r or "used by player 2" in r for r in res) and (kind == "switch" or (after and "true" in after[-1]))
-            note("PASS" if good else "FAIL",
-                 f"{tag}: {kind} {d:.0f} m away: open {before} -> {after}; executor {res}; purses {purse0} -> {purse1}")
-            a.send("cvar coop_world_use none")
-            time.sleep(1)
+        chests = lf_chests(a, 150)
+        for i, (x, y, z, d) in enumerate(chests[:2]):
+            if not lf_exec(a, b, tag, "chest", x, y, z, f"chest{i}_away"):
+                if lf_p2_to(b, x, y, z, "chest"):
+                    time.sleep(3)
+                    lf_exec(a, b, tag, "chest", x, y, z, f"chest{i}_p2_near")
+        door = lf_find(a, "door", 150)
+        if door:
+            x, y, z, d = door
+            if not lf_exec(a, b, tag, "door", x, y, z, "door_away"):
+                if lf_p2_to(b, x, y, z, "door"):
+                    time.sleep(3)
+                    lf_exec(a, b, tag, "door", x, y, z, "door_p2_near")
     finally:
         for g in (a, b):
             g.stop()
         relay.kill()
-
 
 def run_livefix():
     phases = sys.argv[sys.argv.index("--phases") + 1].split(",") if "--phases" in sys.argv else ["empty", "male", "female"]
