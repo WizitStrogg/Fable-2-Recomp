@@ -124,6 +124,8 @@ inline void on_stdout_text(const char* text, size_t len) {
 // --- commands --------------------------------------------------------------
 
 inline std::atomic<int> g_next_slot{0};
+// Bit n: a RunChunk call has picked console_<n>.lua and not queued it yet.
+inline std::atomic<uint32_t> g_writing_slots{0};
 
 inline std::filesystem::path recomp_dir() {
   return fable2::f5lua::g_data_root / "data" / "scripts" / "recomp";
@@ -173,15 +175,29 @@ inline bool RunChunk(const std::string& chunk) {
   // The run queue holds file names, so a slot rewritten while an older entry for
   // it still waits would run the new text twice (L2 15:44Z: queued while the
   // game was paused, one co-op kit command ran 7 times). Take a free slot only.
-  std::string name;
-  for (int tries = 0; tries < kSlots && name.empty(); ++tries) {
-    const std::string n = "console_" + std::to_string(g_next_slot.fetch_add(1) % kSlots) + ".lua";
-    if (!fable2::f5lua::is_queued("scripts/recomp/" + n)) name = n;
+  // Callers on other threads can pick the same slot before its entry is
+  // queued, so a slot is reserved (g_writing_slots) from the pick until
+  // request_run has queued it.
+  int slot = -1;
+  for (int tries = 0; tries < kSlots && slot < 0; ++tries) {
+    const int n = static_cast<int>(static_cast<unsigned>(g_next_slot.fetch_add(1)) % kSlots);
+    const uint32_t bit = 1u << n;
+    if (g_writing_slots.fetch_or(bit) & bit) continue;  // another thread is writing it
+    if (fable2::f5lua::is_queued("scripts/recomp/console_" + std::to_string(n) + ".lua")) {
+      g_writing_slots.fetch_and(~bit);
+      continue;
+    }
+    slot = n;
   }
-  if (name.empty()) {
+  if (slot < 0) {
     REXSYS_WARN("lua: all {} console slots are still waiting to run; not queued", kSlots);
     return false;
   }
+  struct Release {
+    uint32_t bit;
+    ~Release() { g_writing_slots.fetch_and(~bit); }
+  } release{1u << slot};
+  const std::string name = "console_" + std::to_string(slot) + ".lua";
   const auto file = recomp_dir() / name;
   {
     std::ofstream out(file, std::ios::binary | std::ios::trunc);
