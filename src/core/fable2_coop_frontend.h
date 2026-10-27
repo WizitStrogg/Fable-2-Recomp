@@ -903,6 +903,48 @@ inline void partner_purse_tick(int64_t now) {
   if (fresh) REXSYS_INFO("[coop] purse: host total {} (seq {})", best->total, best->seq);
 }
 
+// Partner: after the campaign session ends (the host quit, or this PC left),
+// the game goes back to its front end. Once it did not (rig 2026-10-27, 1 of
+// 2 runs after the host's Save and Quit): the session ended, the front end's
+// load never started and the game ran no Lua at all, a black screen. Nothing
+// from Lua can help then. If within kReturnMs the state probe has not moved
+// off the state it had at the session's end (the good run: MainMenu ->
+// MainMenuMovie at once) and no main menu was built, the cover card tells the
+// player what to do instead of a black screen.
+constexpr int64_t kReturnMs = 25000;
+inline bool g_return_watch_joined = false;
+inline int64_t g_return_since_ms = 0;
+inline int g_return_state = -1;
+inline void partner_return_watchdog(int64_t now) {
+  const bool joined = lobby::GetLobbyStatus().joined_host_ip != 0;
+  if (joined) {
+    // A campaign partner (its purse mirror has the host) in the host's world.
+    if (g_purse_host_xuid.load() != 0) g_return_watch_joined = true;
+    g_return_since_ms = 0;
+    return;
+  }
+  if (g_return_watch_joined) {
+    g_return_watch_joined = false;
+    g_return_since_ms = now;
+    g_return_state = fable2::stateprobe::CurrentState();
+    g_menu_built.store(false);
+    REXSYS_INFO("[coop] partner: the campaign session ended; waiting for the front end (state {})",
+                fable2::stateprobe::StateName(g_return_state));
+  }
+  if (!g_return_since_ms) return;
+  if (g_menu_built.load() || fable2::stateprobe::CurrentState() != g_return_state) {
+    REXSYS_INFO("[coop] partner: back at the front end after {} ms", now - g_return_since_ms);
+    g_return_since_ms = 0;
+    return;
+  }
+  if (now - g_return_since_ms > kReturnMs) {
+    g_return_since_ms = 0;
+    REXSYS_WARN("[coop] partner: no front end {} s after the session ended; telling the player to restart",
+                kReturnMs / 1000);
+    ShowCover2("The co-op game has ended", "Fable II did not get back to the menu: please close it and start it again");
+  }
+}
+
 inline void purse_tick(int64_t now) {
   if (now < g_next_purse_ms) return;
   // Paused, queued scripts wait: do not stack syncs behind each other (they
@@ -1460,6 +1502,7 @@ inline void OnFrame() {
   }
   session_tick();
   partner_purse_tick(fable2::f5lua::steady_ms());
+  partner_return_watchdog(fable2::f5lua::steady_ms());
   test_input_tick();
 }
 
