@@ -33,6 +33,8 @@
 #include <rex/kernel/xam/lan_lobby.h>
 #include <rex/logging.h>
 
+#include "fable2_coop_busy.h"
+#include "fable2_coop_camera.h"
 #include "fable2_coop_frontend.h"
 #include "fable2_coop_hero.h"
 #include "fable2_coop_kit.h"
@@ -261,9 +263,25 @@ inline void on_pick_line(std::string_view line) {
   REXSYS_INFO("[coop] world use: asked the host to use the {} at {:.2f} {:.2f} {:.2f}", kind, x, y, z);
 }
 
+// Only once player 2's creature has been on this PC for kSettleMs and the
+// game is not busy (movie, cutscene, load): the join screens' own A presses
+// ran the pick before player 2 existed, and a chunk run while the world was
+// still settling crashed the partner (read of guest 0x5, rig 2026-10-27).
+constexpr int64_t kSettleMs = 15000;
+inline uint32_t g_p2_seen = 0;
+inline int64_t g_p2_since_ms = 0;
+inline bool joiner_settled(int64_t now) {
+  const uint32_t p2 = fable2::coopcam::g_p2_entity.load();
+  if (p2 != g_p2_seen) {
+    g_p2_seen = p2;
+    g_p2_since_ms = now;
+  }
+  return p2 && now - g_p2_since_ms > kSettleMs && fable2::coopbusy::Busy().empty();
+}
+
 inline int64_t g_next_hint_ms = 0;
 inline void joiner_tick(int64_t now) {
-  if (!joiner_in_campaign()) {
+  if (!joiner_in_campaign() || !joiner_settled(now)) {
     g_a_pressed = false;
     return;
   }

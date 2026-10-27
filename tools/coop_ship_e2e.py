@@ -3071,7 +3071,7 @@ def lf_use23():
     try:
         if not ok:
             return
-        time.sleep(10)
+        time.sleep(20)  # the partner acts only 15 s after player 2 arrives (fable2_coop_worlduse.h)
         chests = lf_chests(a, 150)
         door = lf_find(a, "door", 150)
         targets = [("chest", c[:3], f"chest{i}") for i, c in enumerate(chests[:2])]
