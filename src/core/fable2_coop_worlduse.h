@@ -111,7 +111,18 @@ inline std::string host_chunk(const std::string& kind, float x, float y, float z
   // safely; its GUI calls were among the chunks that crashed it).
   c += "    if coop_cutscene() then return 'a cutscene or movie is playing: nothing used' end\n";
   c += "    best, kind = coop_near(p2)\n";
-  c += "    if not best then return 'nothing to use in front of player 2' end\n";
+  c += "    if not best then\n";
+  c += "      local q = p2:GetPosition()\n";
+  c += "      local s = SearchTools.StartNewSearch('object')\n";
+  c += "      SearchTools.FilterWithinDistanceOfPos(s, q, 6)\n";
+  c += "      local near = 'none'\n";
+  c += "      for _, o in pairs(SearchTools.GetSearchResults(s)) do\n";
+  c += "        if Chest.IsAvailable(o) or Door.IsAvailable(o) then\n";
+  c += "          near = string.format('%s %.1f m', Chest.IsAvailable(o) and 'chest' or 'door', (o:GetPosition() - q):GetLength())\n";
+  c += "        end\n";
+  c += "      end\n";
+  c += "      return string.format('nothing to use in front of player 2 (at %.1f %.1f %.1f; within 6 m: %s)', q:GetX(), q:GetY(), q:GetZ(), near)\n";
+  c += "    end\n";
   c += "  else\n";
   c += "    local s = SearchTools.StartNewSearch('object')\n";
   c += "    SearchTools.FilterWithinDistanceOfPos(s, p, 2.5)\n";
@@ -198,6 +209,7 @@ inline std::string host_chunk(const std::string& kind, float x, float y, float z
 // Resumes the chest's coroutine (host, every frame while it runs).
 inline std::string drive_chunk() {
   std::string c;
+  c += "if not CoopWUse then print('[coop] world use done') return end\n";
   c += "if CoopWUse then\n";
   c += "  if coroutine.status(CoopWUse) == 'suspended' then\n";
   c += "    local ok, e = coroutine.resume(CoopWUse)\n";
@@ -401,7 +413,9 @@ inline void host_tick(int64_t now) {
     pxuid = fable2::coopfrontend::S().partner_xuid;
     pip = fable2::coopfrontend::S().partner_ip;
   }
-  host_hint_tick(now, hosting && (pxuid || pip) && fable2::coopcam::g_p2_entity.load() != 0);
+  // Not coopcam's g_p2_entity: the host runs no CECPlayer setup for player 2
+  // (only slot 0, rig 2026-10-27). The chunk itself checks player 2.
+  host_hint_tick(now, hosting && (pxuid || pip));
   if (!hosting) return;
   std::string rec;
   for (const auto& d : lobby::GetPeerData("coop_wuse")) {

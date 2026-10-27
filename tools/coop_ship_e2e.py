@@ -3161,6 +3161,179 @@ def lf_use23():
         relay.kill()
 
 
+
+def lf_xp_general(g, who):
+    out = lua_lines(g, ("local ok, e = pcall(function() return math.floor(Experience.Get(" + who +
+                        ", EExperienceType.EXPERIENCE_GENERAL)) end); print('LFXP ' .. tostring(ok and e or ('error ' .. tostring(e))))"),
+                    "LFXP", 10)
+    return out[-1] if out else "?"
+
+
+def lf_host_pos(a):
+    out = lua_lines(a, ("local p = GetPlayerHero():GetPosition(); "
+                        "print(string.format('LFHP %.3f %.3f %.3f', p:GetX(), p:GetY(), p:GetZ()))"), "LFHP", 10)
+    if not out or len(out[-1].split()) != 3:
+        return None
+    return tuple(float(v) for v in out[-1].split())
+
+
+def lf_next():
+    """001-next batch in Josh's Oakfield copy: the host's hero as the partner
+    sees it (T-pose, idle and walking); the experience mirror; the 'A: Open'
+    hint and the partner's A at a door/chest; a lever used for player 2 on the
+    host; then the host's Save and Quit: the partner back at its front end (B
+    watchdog; A: its chunks held during the teardown)."""
+    tag = "lf_next"
+    setup_tomls()
+    relay_log = open(os.path.join(OUT, f"relay_{tag}.log"), "w")
+    relay = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                           "coop_relay.py")], stdout=relay_log, stderr=relay_log)
+    a, b = Game("mod-a", "host"), Game("mod-b", "partner")
+    a.start({"FABLE2_TEST_INPUT": "1"})
+    b.start({"FABLE2_TEST_INPUT": "1"})
+    try:
+        if not oak_join(a, b, tag):
+            return
+        time.sleep(20)  # past the partner's 15 s settle
+        # --- T-pose: the host's hero on the partner's screen, idle then walking.
+        hp = lf_host_pos(a)
+        note("INFO", f"{tag}: host hero at {hp}")
+        if hp:
+            lua_lines(b, (f"local me = GetPlayerHenchman(); local h = CVector3({hp[0]:.3f}, {hp[1]:.3f}, {hp[2]:.3f}); "
+                          f"local st = CVector3({hp[0] + 3.5:.3f}, {hp[1]:.3f}, {hp[2]:.3f}); Physics.TeleportToPosition(me, st); "
+                          "local f = h - st; f:Normalise(); Physics.SetFacingVector(me, f); print('LFTP ok')"), "LFTP", 10)
+            time.sleep(4)
+            b.shot(f"{tag}_tpose_partner_idle.png")
+            a.shot(f"{tag}_tpose_host_idle.png")
+            a.send("stick L 0 1 2500")
+            time.sleep(1.2)
+            b.shot(f"{tag}_tpose_partner_walking.png")
+            a.shot(f"{tag}_tpose_host_walking.png")
+            time.sleep(3)
+            b.shot(f"{tag}_tpose_partner_after_walk.png")
+            note("INFO", f"{tag}: T-pose screenshots taken (idle, walking, after); host hero now at {lf_host_pos(a)}")
+        # --- XP: the host gives player 2 experience; the partner's record follows.
+        xp_b0, xp_h0 = lf_xp_general(b, "GetPlayerHero()"), lf_xp_general(a, "GetPlayerHenchman()")
+        na, nb = len(a.lines()), len(b.lines())
+        lua_lines(a, ("local ok, e = pcall(function() Experience.Modify(GetPlayerHenchman(), EExperienceType.EXPERIENCE_GENERAL, 250) end); "
+                      "print('LFXPADD ' .. tostring(ok or e))"), "LFXPADD", 10)
+        time.sleep(15)
+        xp_b1, xp_h1 = lf_xp_general(b, "GetPlayerHero()"), lf_xp_general(a, "GetPlayerHenchman()")
+        xa = [l[24:200] for l in a.lines()[na:] if "COOPXP" in l][:3]
+        xb = [l[24:200] for l in b.lines()[nb:] if "xp" in l.lower() and "coop" in l.lower()][:3]
+        try:
+            ok = int(xp_b1) - int(xp_b0) == 250
+        except ValueError:
+            ok = False
+        note("PASS" if ok else "FAIL", f"{tag}: XP: host's player 2 {xp_h0} -> {xp_h1}; partner's hero {xp_b0} -> {xp_b1}; host {xa}; partner {xb}")
+        b.shot(f"{tag}_xp_partner.png")
+        # (No partner-side probe of GetPlayerHenchman's experience: reading it
+        # there crashed the joiner, guest read of 0x5, rig 2026-10-27 run 3.)
+        hx = lua_lines(a, ("local t = EExperienceType.EXPERIENCE_GENERAL; print('LFXPH hero ' .. math.floor(Experience.Get(GetPlayerHero(), t)) .. "
+                           "' hench ' .. math.floor(Experience.Get(GetPlayerHenchman(), t)))"), "LFXPH", 10)
+        note("INFO", f"{tag}: XP on the host {hx}")
+        # The partner's Abilities page (the wheel opens on it): which XP it shows.
+        b.send("press Start 200")
+        time.sleep(2.5)
+        b.send("press A 200")
+        time.sleep(3)
+        b.shot(f"{tag}_xp_partner_abilities.png")
+        b.send("press B 200")
+        time.sleep(1.5)
+        b.send("press B 200")
+        time.sleep(2)
+        # --- hint + A: a door and a chest near the host.
+        targets = []
+        door = lf_find(a, "door", 80)
+        if door:
+            targets.append(("door", door[:3]))
+        ch = lf_chests(a, 80, 1)
+        if ch:
+            targets.append(("chest", ch[0][:3]))
+        for kind, (x, y, z) in targets:
+            na, nb = len(a.lines()), len(b.lines())
+            if not lf_p2_to(b, x, y, z, kind):
+                note("FAIL", f"{tag}: {kind}: the partner could not get to it")
+                continue
+            time.sleep(7)
+            b.shot(f"{tag}_{kind}_hint.png")
+            hints = [l[24:200] for l in a.lines()[na:] if "COOPWHINT" in l]
+            note("PASS" if any(f"COOPWHINT:{kind}" in h for h in hints) else "FAIL",
+                 f"{tag}: {kind}: the host's hint for player 2 {hints[-3:]} (partner screenshot {tag}_{kind}_hint.png)")
+            before = lf_state(a, kind, x, y, z)
+            na = len(a.lines())
+            b.send("press A 200")
+            t = time.time()
+            while time.time() - t < 25:
+                if kind != "chest" or any("world use done" in l for l in a.lines()[na:]):
+                    break
+                time.sleep(1)
+            time.sleep(3)
+            if kind == "chest" and any("game paused" in l for l in a.lines()[na:]):
+                a.send("press A 200")
+            after = lf_state(a, kind, x, y, z)
+            done = [l[24:200] for l in a.lines()[na:] if "world use" in l][:4]
+            b.shot(f"{tag}_{kind}_after_a.png")
+            note("PASS" if after == "true" else "FAIL", f"{tag}: {kind}: partner's A -> open {before} -> {after}; host {done}")
+            time.sleep(2)
+            b.shot(f"{tag}_{kind}_hint_after_open.png")
+        # The hint goes away from everything.
+        lua_lines(b, ("local me = GetPlayerHenchman(); local p = me:GetPosition(); "
+                      "Physics.TeleportToPosition(me, CVector3(p:GetX() + 12, p:GetY() + 12, p:GetZ())); print('LFAWAY ok')"), "LFAWAY", 10)
+        time.sleep(4)
+        last = [l[24:200] for l in a.lines() if "COOPWHINT" in l][-1:]
+        b.shot(f"{tag}_hint_away.png")
+        note("PASS" if last and "COOPWHINT:none" in last[0] else "FAIL", f"{tag}: the hint clears away from objects ({last})")
+        # --- lever: used for player 2 on the host (not reachable from the A).
+        sw = lf_find(a, "switch", 150)
+        if sw:
+            na = len(a.lines())
+            a.send(f"cvar coop_world_use switch:{sw[0]:.3f},{sw[1]:.3f},{sw[2]:.3f}")
+            time.sleep(6)
+            res = [l[24:220] for l in a.lines()[na:] if "world use" in l][:4]
+            a.shot(f"{tag}_lever_host.png")
+            note("PASS" if any("lever used by player 2" in r for r in res) else "FAIL", f"{tag}: lever at {sw}: {res}")
+            a.send("cvar coop_world_use none")
+        else:
+            note("INFO", f"{tag}: no lever (Switch) within 150 m of the host in Oakfield")
+        # --- the host's Save and Quit: B + A on the partner.
+        fe = r"\[state\].*-> (MainMenu|MainMenuMovie|PressAScreen)"
+        na, nb = len(a.lines()), len(b.lines())
+        a.send("press Start 200")
+        time.sleep(2.5)
+        a.send("press Up 150")
+        time.sleep(1)
+        a.send("press A 200")
+        time.sleep(2.5)
+        a.send("press Down 150")
+        time.sleep(1)
+        a.shot(f"{tag}_host_on_save_and_quit.png")
+        a.send("press A 200")
+        time.sleep(3)
+        a.send("press A 200")
+        t = time.time()
+        while time.time() - t < 150:
+            if any("chunk hold ended" in l for l in b.lines()[nb:]) and any(re.search(fe, l) for l in a.lines()[na:]):
+                break
+            time.sleep(2)
+        time.sleep(6)
+        b.shot(f"{tag}_partner_after_host_quit.png")
+        a.shot(f"{tag}_host_after_quit.png")
+        keys = ("XSession", "co-op session is ending", "chunk hold", "front end", "[state]", "restart", "Unhandled")
+        pl = [l[24:200] for l in b.lines()[nb:] if any(k in l for k in keys)]
+        note("INFO", f"{tag}: partner after the host's Save and Quit {pl[:16]}")
+        note("INFO", f"{tag}: A: XSessionEnd on the partner {any('XSessionEnd' in l for l in pl)}; "
+                     f"hold {[l for l in pl if 'session is ending' in l or 'chunk hold' in l][:3]}")
+        note("PASS" if any(re.search(fe, l) for l in b.lines()[nb:]) and b.proc.is_running() else "FAIL",
+             f"{tag}: the host's Save and Quit returns the partner to its front end")
+        note("PASS" if not any("telling the player to restart" in l for l in b.lines()[nb:]) else "FAIL",
+             f"{tag}: B watchdog: no black screen (no restart card)")
+    finally:
+        for g in (a, b):
+            g.stop()
+        relay.kill()
+
+
 def run_livefix():
     phases = sys.argv[sys.argv.index("--phases") + 1].split(",") if "--phases" in sys.argv else ["empty", "male", "female"]
     if "empty" in phases:
@@ -3179,6 +3352,8 @@ def run_livefix():
         lf_use1()
     if "use23" in phases:
         lf_use23()
+    if "next" in phases:
+        lf_next()
 
 
 def run_dynsync():
