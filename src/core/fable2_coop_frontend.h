@@ -1011,8 +1011,15 @@ inline void teardown_hold_tick(int64_t now) {
   const int s = fable2::stateprobe::CurrentState();
   const bool front = s == fable2::stateprobe::kMainMenuMovie || s == fable2::stateprobe::kPressAScreen;
   if (!fl::g_teardown_hold.load()) {
-    if (in_campaign) fl::g_hold_on_session_end.store(true);
-    else if (front || g_menu_built.load()) fl::g_hold_on_session_end.store(false);
+    if (in_campaign) {
+      fl::g_hold_on_session_end.store(true);
+    } else if (front || g_menu_built.load()) {
+      fl::g_hold_on_session_end.store(false);
+      fl::g_seen_not_ending.store(false);
+    }
+    // The flag goes up only on the game thread's drain; while armed in the
+    // world, read it here too so an idle runner still sees it low first.
+    if (fl::g_hold_on_session_end.load() && !fl::rex_session_ending()) fl::g_seen_not_ending.store(true);
     return;
   }
   if (!g_hold_since_ms) {
@@ -1028,6 +1035,7 @@ inline void teardown_hold_tick(int64_t now) {
               resumed ? "the session started again" : back ? "back at the front end" : "timed out", dropped);
   g_hold_since_ms = 0;
   fl::g_hold_on_session_end.store(resumed);
+  fl::g_seen_not_ending.store(resumed);
   fl::g_teardown_hold.store(false);
 }
 

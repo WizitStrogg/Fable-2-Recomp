@@ -409,13 +409,21 @@ inline bool saving() {
 // can slip a chunk in first. The co-op layer ends the hold when the front end
 // is back and drops what waited (campaign chunks, stale in the menu).
 extern "C" int rex_session_ending();
+// Only a rise of the flag seen while armed counts (an edge): one still up from an
+// earlier session can never hold chunks. g_seen_not_ending: armed and read 0
+// since (cleared by the co-op layer when it disarms).
 inline std::atomic<bool> g_hold_on_session_end{false};
+inline std::atomic<bool> g_seen_not_ending{false};
 inline std::atomic<bool> g_teardown_hold{false};
 inline bool teardown_held() {
-  if (!g_teardown_hold.load() && g_hold_on_session_end.load() && rex_session_ending()) {
-    g_teardown_hold.store(true);
-    REXSYS_INFO("[lua] the co-op session is ending: holding {} script(s) and {} native task(s)",
-                g_queued.load(), g_native_count.load());
+  if (!g_teardown_hold.load() && g_hold_on_session_end.load()) {
+    if (!rex_session_ending()) {
+      g_seen_not_ending.store(true);
+    } else if (g_seen_not_ending.load()) {
+      g_teardown_hold.store(true);
+      REXSYS_INFO("[lua] the co-op session is ending: holding {} script(s) and {} native task(s)",
+                  g_queued.load(), g_native_count.load());
+    }
   }
   return g_teardown_hold.load();
 }
