@@ -108,9 +108,16 @@ constexpr uint32_t kMenuIdleDcalls = 2000;
 inline bool world_lua_busy() {
   static uint32_t last_hits = 0;
   static bool busy = false;
+  static int idle_samples = 0;
   const uint32_t hits = fable2::f5lua::g_dcall_hits.load(std::memory_order_relaxed);
-  busy = hits - last_hits > 500;  // since the last sample, ~1 s ago
+  const bool active = hits - last_hits > 500;  // since the last sample, ~1 s ago
   last_hits = hits;
+  // Busy at once; idle only after 3 quiet samples in a row (a pause menu or a
+  // short load in the world dipped below the bar and resumed the scans: 7
+  // toggles in one 001pl boots session).
+  idle_samples = active ? 0 : idle_samples + 1;
+  if (active) busy = true;
+  else if (idle_samples >= 3) busy = false;
   return busy;
 }
 inline const bool g_world_busy_installed = [] {
