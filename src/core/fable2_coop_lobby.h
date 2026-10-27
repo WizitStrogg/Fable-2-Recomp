@@ -572,13 +572,17 @@ inline void apply_analog(rex::input::X_INPUT_STATE* state) {
 // calls first. While the lobby is open, presses drive the lobby and the game
 // sees an idle pad.
 inline void input_filter(uint32_t user_index, rex::input::X_INPUT_STATE* state) {
-  if (state && user_index == 0) apply_analog(state);  // test input: before the camera reads the look
+  // Injected presses (our own, and the test input source) count like the pad's,
+  // also for the lobby panel and the camera (R3), so they go in first.
+  uint16_t inj = 0;
+  if (state && user_index == 0) {
+    apply_analog(state);  // test input: before the camera reads the look
+    inj = injected_now();
+    if (inj) state->gamepad.buttons.set(static_cast<uint16_t>(state->gamepad.buttons | inj));
+  }
   fable2::coopcam::input_filter(user_index, state);
   if (!state || user_index != 0) return;
-  // Injected presses (our own, and the test input source) count like the pad's,
-  // also for the lobby panel.
-  const uint16_t inj = injected_now();
-  const uint16_t now = static_cast<uint16_t>(state->gamepad.buttons | inj);
+  const uint16_t now = static_cast<uint16_t>(state->gamepad.buttons);
   if (!g_open.load()) {
     g_prev_buttons = now;
     const uint16_t game = g_game_pad_hook ? g_game_pad_hook(now) : now;

@@ -36,7 +36,8 @@ struct Command {
 inline uint16_t ButtonMask(std::string_view name) {
   static const std::pair<const char*, uint16_t> kNames[] = {
       {"Up", 0x0001},    {"Down", 0x0002}, {"Left", 0x0004}, {"Right", 0x0008}, {"Start", 0x0010},
-      {"Back", 0x0020},  {"A", 0x1000},    {"B", 0x2000},    {"X", 0x4000},     {"Y", 0x8000}};
+      {"Back", 0x0020},  {"LS", 0x0040},   {"RS", 0x0080},   {"A", 0x1000},     {"B", 0x2000},
+      {"X", 0x4000},     {"Y", 0x8000}};
   for (const auto& [n, m] : kNames)
     if (name == n) return m;
   return 0;
