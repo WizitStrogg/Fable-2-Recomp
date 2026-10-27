@@ -101,14 +101,20 @@ inline std::string host_chunk(const std::string& kind, float x, float y, float z
   c += "    if not best then return 'no ' .. kind .. ' there' end\n";
   c += "  end\n";
   // A chest: the giving part of the stock use handler OnActionUseTakeItems,
-  // run as a coroutine the host drives (drive_chunk): the lid, then the items
-  // to the hero and the gold through Money.Modify (then the shared purse).
-  // The hero, by the handler's own co-op rule ("a henchman is there: the hero
-  // receives"); the caravan chest's starter melee must reach the host's hero
-  // for QC060 to go on. Not the whole handler: it moves player 2 and sets its
-  // open-chest action and interaction mode, which reached the joiner's copy
-  // and crashed it (rig 2026-10-27, a guest write 110 ms after). Chest.Open
-  // alone opens only the lid. Not done: the handler's theft check on owned chests.
+  // run as a coroutine the host drives (drive_chunk): the lid, then the items,
+  // then the gold through Money.Modify on the hero (then the shared purse).
+  // Not the whole handler: it moves player 2 and sets its open-chest action
+  // and interaction mode, which reached the joiner's copy and crashed it (rig
+  // 2026-10-27, a guest write 110 ms after). Chest.Open alone opens only the
+  // lid. Not done: the handler's theft check (someone's chest is refused).
+  // Who gets the items: each player has a hero and an inventory of their own
+  // (feature 002), so a chest player 2 opens fills player 2's inventory (the
+  // kit's mirror shows it on the partner's pages), with no "received" box on
+  // the host's screen. A quest's chest (named for its quest, like
+  // QC060_HeroChest: QC/QO/QD/QJ/QR/QS/QT and digits) still gives to the hero,
+  // the handler's own co-op rule: quests test the hero's inventory (QC060 goes
+  // on when the host's hero holds the starter melee). A name that cannot be
+  // read keeps that rule too.
   c += "  if kind == 'chest' then\n";
   c += "    if Chest.IsOpen(best) then return 'chest already open' end\n";
   c += "    if Chest.IsLocked(best) then return 'chest locked' end\n";
@@ -128,13 +134,20 @@ inline std::string host_chunk(const std::string& kind, float x, float y, float z
   c += "      local n = 0\n";
   c += "      while not Chest.IsOpen(best) and n < 600 do n = n + 1 coroutine.yield() end\n";
   c += "      local hero = GetPlayerHero()\n";
+  c += "      local okn, name = pcall(function() return best:GetName() end)\n";
+  c += "      name = okn and type(name) == 'string' and name or ''\n";
+  c += "      local quest = name == '' or name:match('^Q[CODJRST]%d%d%d') ~= nil\n";
+  c += "      local to, who = hero, 'the hero'\n";
+  c += "      if not quest and p2 and p2:IsAlive() and Inventory.IsAvailable(p2) then to, who = p2, 'player 2' end\n";
   c += "      local items, gold = 0, 0\n";
-  c += "      if Inventory.IsAvailable(hero) and Inventory.IsAvailable(best) then\n";
+  c += "      if Inventory.IsAvailable(to) and Inventory.IsAvailable(best) then\n";
   c += "        for i = 0, Inventory.GetNumberOfItems(best) - 1 do\n";
-  c += "          local added = Inventory.AddItem(hero, Inventory.GetItemByIndex(best, i))\n";
+  c += "          local added = Inventory.AddItem(to, Inventory.GetItemByIndex(best, i))\n";
   c += "          items = items + 1\n";
-  c += "          GUI.DisplayReceivedItem(added)\n";
-  c += "          while GUI.IsUIActive() do coroutine.yield() end\n";
+  c += "          if to == hero then\n";
+  c += "            GUI.DisplayReceivedItem(added)\n";
+  c += "            while GUI.IsUIActive() do coroutine.yield() end\n";
+  c += "          end\n";
   c += "        end\n";
   c += "        Inventory.Clear(best)\n";
   c += "      end\n";
@@ -143,7 +156,8 @@ inline std::string host_chunk(const std::string& kind, float x, float y, float z
   c += "        Money.Modify(hero, gold)\n";
   c += "        Money.Set(best, 0)\n";
   c += "      end\n";
-  c += "      print('[coop] world use: chest gave ' .. items .. ' item(s) and ' .. gold .. ' gold to the hero')\n";
+  c += "      print('[coop] world use: chest ' .. (name ~= '' and name or '?') .. ' gave ' .. items .. ' item(s) to ' .. who ..\n";
+  c += "            ' and ' .. gold .. ' gold to the shared purse')\n";
   c += "    end)\n";
   c += "    return 'chest: opening it for player 2'\n";
   c += "  elseif kind == 'door' then\n";
