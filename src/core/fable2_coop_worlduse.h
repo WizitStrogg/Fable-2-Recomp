@@ -225,19 +225,32 @@ inline std::string joiner_chunk(bool pick) {
 // The partner's A (input thread), counted only in the world with no menu up;
 // the game still gets the press: pickups and attacks keep the stock path (and
 // at a chest the stock A does nothing on the joiner).
+// Not gated on the kit's menu flag: the join screens raise it and nothing
+// lowers it (rig 2026-10-27: no A ever counted). An A in a menu is dropped
+// instead by time: its pick runs only after the unpause (scripts wait while
+// paused) and comes back late.
 inline std::atomic<bool> g_a_pressed{false};
+inline std::atomic<int64_t> g_a_ms{0};
+constexpr int64_t kPickFreshMs = 1500;
 inline uint16_t g_prev_buttons = 0;
 inline uint16_t (*g_prev_pad_hook)(uint16_t) = nullptr;
 inline uint16_t pad_hook(uint16_t buttons) {
   constexpr uint16_t kPadA = 0x1000;
   const uint16_t game = g_prev_pad_hook ? g_prev_pad_hook(buttons) : buttons;
-  if ((game & kPadA) && !(g_prev_buttons & kPadA) && !fable2::coopkit::g_menu_up.load()) g_a_pressed = true;
+  if ((game & kPadA) && !(g_prev_buttons & kPadA)) {
+    g_a_ms = fable2::f5lua::steady_ms();
+    g_a_pressed = true;
+  }
   g_prev_buttons = game;
   return game;
 }
 
 // "COOPWUSE pick <kind> <x> <y> <z>" (the joiner's Lua) -> the record.
 inline void on_pick_line(std::string_view line) {
+  if (fable2::f5lua::steady_ms() - g_a_ms.load() > kPickFreshMs) {
+    REXSYS_INFO("[coop] world use: a late pick dropped (the A was in a menu)");
+    return;
+  }
   char kind[16] = {};
   float x = 0, y = 0, z = 0;
   if (std::sscanf(std::string(line).c_str(), "COOPWUSE pick %15s %f %f %f", kind, &x, &y, &z) != 4) return;
@@ -257,7 +270,7 @@ inline void joiner_tick(int64_t now) {
   if (g_a_pressed.exchange(false)) {
     REXSYS_INFO("[coop] world use: the partner's A, looking for a chest, door or lever");
     fable2::luaconsole::RunChunk(joiner_chunk(true));
-  } else if (now >= g_next_hint_ms && !fable2::coopkit::g_menu_up.load()) {
+  } else if (now >= g_next_hint_ms && fable2::f5lua::g_queued.load() == 0) {  // none piling up while paused
     g_next_hint_ms = now + 1500;
     fable2::luaconsole::RunChunk(joiner_chunk(false));
   }
