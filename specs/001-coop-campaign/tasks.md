@@ -212,3 +212,4 @@ switches to its fallback; only a failed fallback is raised to Josh.
 - [x] T055 Reinstall v14 into D:\Fable2-LAN\mod (backup) and rebuild the friend zip after T054 passes (done: reinstall 2026-10-25, backup 20261025-130039-pre-v14; zip rebuilt from staging-v14)
 - [x] T056 Shared purse on the partner's screen: the host publishes its total (coop_purse), the partner mirrors it (tools/coop_lobby_test.cpp purse checks pass); proof launch pending
 - [ ] T057 Joiner camera felt buggy/glitchy in Josh's 2026-10-25 one-PC playtest; needs further testing on two PCs
+- [ ] T058 [JOSH] Manual check at the next two-PC session: the PARTNER opens a chest and picks up gold with its own A; both screens show the same purse and each change once (the rig cannot drive it: a teleported partner does not turn to the chest, and host-spawned or moved objects are not in the partner's world; a chest the host opens does show open on the partner's copy, 2026-10-27)
