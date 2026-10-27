@@ -11,14 +11,16 @@
 //           OnActionUseTakeItems (contents to the hero by its co-op rule;
 //           quest chests go on); player 2 itself is not moved or animated
 //   door    Door.SetOpenForEntity(door, player 2, true), Door.SetOpen(door, true, true)
-//   lever   Switch.Use(switch, player 2)            (OnActionUseSwitch's call)
-// The object is found on the host by kind and position (both copies place the
-// level's objects alike): the nearest of that kind within 2.5 m.
+//   lever   Switch.Use(switch, player 2)            (OnActionUseSwitch's call;
+//           not reachable from the partner's A yet)
+// The partner's A says only that (the joiner runs no Lua for it: its pick
+// chunks crashed it); the host finds the nearest closed chest or door within
+// 2.5 m in front of its own copy of player 2.
 //
 // Record (lobby data "coop_wuse", published by the joiner):
-//   COOPWUSE:v1|n=<nonce>|kind=<chest|door|switch>|x=<x>|y=<y>|z=<z>
+//   COOPWUSE:v1|n=<nonce>|kind=near
 // Testing: coop_world_use = "<kind>:<x>,<y>,<z>" runs the host's part on the
-// host itself.
+// host itself (kind chest, door or switch: the nearest of that kind to the spot).
 
 #pragma once
 
@@ -57,18 +59,42 @@ inline std::string host_chunk(const std::string& kind, float x, float y, float z
   std::string c;
   c += "local ok, e = pcall(function()\n";
   c += "  local kind, p, p2 = '" + kind + "', " + pos + ", GetPlayerHenchman()\n";
-  c += "  local s = SearchTools.StartNewSearch('object')\n";
-  c += "  SearchTools.FilterWithinDistanceOfPos(s, p, 2.5)\n";
-  c += "  if kind == 'chest' then SearchTools.FilterWithEC(s, Chest.GetECType())\n";
-  c += "  elseif kind == 'door' then SearchTools.FilterWithEC(s, Door.GetECType()) end\n";
   c += "  local best, bd = nil, 1e9\n";
-  c += "  for _, o in pairs(SearchTools.GetSearchResults(s)) do\n";
-  c += "    if kind ~= 'switch' or Switch.IsAvailable(o) then\n";
-  c += "      local d = (o:GetPosition() - p):GetLength()\n";
-  c += "      if d < bd then best, bd = o, d end\n";
+  // "near": the partner pressed A; what it can use is found here, from the
+  // host's own copy of player 2 (position, facing): the nearest closed chest
+  // or door within 2.5 m in front of it (anything within 0.8 m counts).
+  c += "  if kind == 'near' then\n";
+  c += "    if not p2 or not p2:IsAlive() then return 'no player 2' end\n";
+  c += "    p = p2:GetPosition()\n";
+  c += "    local f = Physics.GetFacingVector(p2)\n";
+  c += "    local function pick(ec, closed, k)\n";
+  c += "      local s = SearchTools.StartNewSearch('object')\n";
+  c += "      SearchTools.FilterWithinDistanceOfPos(s, p, 2.5)\n";
+  c += "      SearchTools.FilterWithEC(s, ec)\n";
+  c += "      for _, o in pairs(SearchTools.GetSearchResults(s)) do\n";
+  c += "        local d = o:GetPosition() - p\n";
+  c += "        local dist = d:GetLength()\n";
+  c += "        if closed(o) and dist < bd and (dist <= 0.8 or (d:GetX() * f:GetX() + d:GetY() * f:GetY()) / dist >= 0.3) then\n";
+  c += "          best, bd, kind = o, dist, k\n";
+  c += "        end\n";
+  c += "      end\n";
   c += "    end\n";
+  c += "    pick(Chest.GetECType(), function(o) return not Chest.IsOpen(o) end, 'chest')\n";
+  c += "    pick(Door.GetECType(), function(o) return not Door.IsOpen(o) and not Door.IsLocked(o) end, 'door')\n";
+  c += "    if not best then return 'nothing to use in front of player 2' end\n";
+  c += "  else\n";
+  c += "    local s = SearchTools.StartNewSearch('object')\n";
+  c += "    SearchTools.FilterWithinDistanceOfPos(s, p, 2.5)\n";
+  c += "    if kind == 'chest' then SearchTools.FilterWithEC(s, Chest.GetECType())\n";
+  c += "    elseif kind == 'door' then SearchTools.FilterWithEC(s, Door.GetECType()) end\n";
+  c += "    for _, o in pairs(SearchTools.GetSearchResults(s)) do\n";
+  c += "      if kind ~= 'switch' or Switch.IsAvailable(o) then\n";
+  c += "        local d = (o:GetPosition() - p):GetLength()\n";
+  c += "        if d < bd then best, bd = o, d end\n";
+  c += "      end\n";
+  c += "    end\n";
+  c += "    if not best then return 'no ' .. kind .. ' there' end\n";
   c += "  end\n";
-  c += "  if not best then return 'no ' .. kind .. ' there' end\n";
   // A chest: the giving part of the stock use handler OnActionUseTakeItems,
   // run as a coroutine the host drives (drive_chunk): the lid, then the items
   // to the hero and the gold through Money.Modify (then the shared purse).
@@ -137,7 +163,9 @@ inline std::string drive_chunk() {
   return c;
 }
 
-inline bool valid_kind(const std::string& k) { return k == "chest" || k == "door" || k == "switch"; }
+inline bool valid_kind(const std::string& k) {
+  return k == "near" || k == "chest" || k == "door" || k == "switch";
+}
 
 inline std::atomic<bool> g_driving{false};
 inline int64_t g_drive_since_ms = 0;
@@ -145,7 +173,7 @@ inline void run_on_host(const std::string& kind, float x, float y, float z, cons
   if (!valid_kind(kind)) return;
   REXSYS_INFO("[coop] world use {} at {:.2f} {:.2f} {:.2f} ({})", kind, x, y, z, why);
   fable2::luaconsole::RunChunkOrKeep(host_chunk(kind, x, y, z));
-  if (kind == "chest") {
+  if (kind == "chest" || kind == "near") {  // a chest may be what "near" finds
     g_driving = true;
     g_drive_since_ms = fable2::f5lua::steady_ms();
   }
@@ -182,101 +210,29 @@ inline bool joiner_in_campaign() {
   return fable2::coopfrontend::g_purse_host_xuid.load() != 0 && lobby::GetLobbyStatus().joined_host_ip != 0;
 }
 
-// The joiner's Lua, on the partner's A: the nearest closed chest within 2.5 m
-// of player 2 and in front of it (anything within 0.8 m counts), printed for
-// the host. Exactly the harness's partner search, proven on the joiner (rig
-// 2026-10-27): the chest search by component, positions, the facing (a plain
-// object search finds no chest there). No Chest.* call on the joiner's chest
-// copies: every chunk that made one (Chest.IsOpen, Chest.IsAvailable) on a
-// chest crashed the joiner 3 ms after the chunk (guest read of 0x5); the
-// component filter is the type check, the host checks the open state. Doors
-// and the "A: Open" hint wait until proven on their own.
-inline std::string joiner_chunk() {
-  std::string c;
-  c += "local ok, err = pcall(function()\n";
-  c += "  local me = GetPlayerHenchman()\n";
-  c += "  if not me or not me:IsAlive() then return 'no player 2' end\n";
-  c += "  local p, f = me:GetPosition(), Physics.GetFacingVector(me)\n";
-  c += "  local best, bd, seen, near = nil, 1e9, 0, 1e9\n";
-  c += "  for _, o in pairs(SearchTools.GetSearchResults(SearchTools.FilterWithEC(SearchTools.StartNewSearch('object'), "
-       "Chest.GetECType()))) do\n";
-  c += "    do\n";
-  c += "    local d = o:GetPosition() - p\n";
-  c += "    local dist = d:GetLength()\n";
-  c += "    seen = seen + 1\n";
-  c += "    if dist < near then near = dist end\n";
-  c += "    if dist <= 2.5 and (dist <= 0.8 or (d:GetX() * f:GetX() + d:GetY() * f:GetY()) / dist >= 0.3) and\n";
-  c += "       dist < bd then best, bd = o, dist end\n";
-  c += "    end\n";
-  c += "  end\n";
-  c += "  if not best then return string.format('nothing to use (%d chests, nearest %.1f m)', seen, near) end\n";
-  c += "  local q = best:GetPosition()\n";
-  c += "  print(string.format('COOPWUSE pick chest %.3f %.3f %.3f', q:GetX(), q:GetY(), q:GetZ()))\n";
-  c += "end)\n";
-  c += "if not ok or err then print('[coop] world use (partner): ' .. tostring(err)) end\n";
-  return c;
-}
-
-// The partner's A (input thread), counted only in the world with no menu up;
-// the game still gets the press: pickups and attacks keep the stock path (and
-// at a chest the stock A does nothing on the joiner).
-// Not gated on the kit's menu flag: the join screens raise it and nothing
-// lowers it (rig 2026-10-27: no A ever counted). An A in a menu is dropped
-// instead by time: its pick runs only after the unpause (scripts wait while
-// paused) and comes back late.
+// The partner's A (input thread). The joiner runs no Lua for it: every pick
+// chunk run there after a real A next to a chest crashed it (guest reads of
+// 0x5 and 0x3A000008 a few ms after the chunk, rig 2026-10-27), even ones that
+// called nothing the harness had not run there safely. So the joiner only
+// says "A" (kind=near) and the host finds what is in front of its own copy of
+// player 2. The game still gets the press: pickups and attacks keep the stock
+// path (at a chest the stock A does nothing on the joiner).
+// A menu is open when the kit saw one go up after player 2 settled: the join
+// screens' pause raised its flag and nothing lowered it.
 inline std::atomic<bool> g_a_pressed{false};
-inline std::atomic<int64_t> g_a_ms{0};
-constexpr int64_t kPickDelayMs = 300;   // the game's own A handling first (joiner_chunk)
-constexpr int64_t kPickFreshMs = 1800;
 inline uint16_t g_prev_buttons = 0;
 inline uint16_t (*g_prev_pad_hook)(uint16_t) = nullptr;
 inline uint16_t pad_hook(uint16_t buttons) {
   constexpr uint16_t kPadA = 0x1000;
   const uint16_t game = g_prev_pad_hook ? g_prev_pad_hook(buttons) : buttons;
-  if ((game & kPadA) && !(g_prev_buttons & kPadA)) {
-    g_a_ms = fable2::f5lua::steady_ms();
-    g_a_pressed = true;
-  }
+  if ((game & kPadA) && !(g_prev_buttons & kPadA)) g_a_pressed = true;
   g_prev_buttons = game;
   return game;
 }
 
-// "COOPWUSE pick <kind> <x> <y> <z>" (the joiner's Lua) -> the record.
-// The handler runs on the game thread inside the chunk's print, in the middle
-// of the game's Lua call: it only keeps the record. Publishing it there
-// crashed the joiner 1 ms later, every time (rig 2026-10-27); it is
-// published from the frame hook (publish_tick).
-inline std::mutex g_pick_mu;
-inline std::string g_pick_record;
-inline void on_pick_line(std::string_view line) {
-  if (fable2::f5lua::steady_ms() - g_a_ms.load() > kPickFreshMs) {
-    REXSYS_INFO("[coop] world use: a late pick dropped (the A was in a menu)");
-    return;
-  }
-  char kind[16] = {};
-  float x = 0, y = 0, z = 0;
-  if (std::sscanf(std::string(line).c_str(), "COOPWUSE pick %15s %f %f %f", kind, &x, &y, &z) != 4) return;
-  char rec[160];
-  std::snprintf(rec, sizeof(rec), "COOPWUSE:v1|n=%lld|kind=%s|x=%.3f|y=%.3f|z=%.3f",
-                static_cast<long long>(fable2::f5lua::steady_ms()), kind, x, y, z);
-  std::lock_guard<std::mutex> l(g_pick_mu);
-  g_pick_record = rec;
-}
-inline void publish_tick() {
-  std::string rec;
-  {
-    std::lock_guard<std::mutex> l(g_pick_mu);
-    rec.swap(g_pick_record);
-  }
-  if (rec.empty()) return;
-  lobby::PublishData("coop_wuse", rec);
-  REXSYS_INFO("[coop] world use: asked the host ({})", rec);
-}
-
-// Only once player 2's creature has been on this PC for kSettleMs and the
-// game is not busy (movie, cutscene, load): the join screens' own A presses
-// ran the pick before player 2 existed, and a chunk run while the world was
-// still settling crashed the partner (read of guest 0x5, rig 2026-10-27).
+// Only once player 2's creature has been on this PC for kSettleMs, with no
+// save running and no fresh level load (coopbusy::Busy() cannot say: its probe
+// does not run while visiting).
 constexpr int64_t kSettleMs = 15000;
 inline uint32_t g_p2_seen = 0;
 inline int64_t g_p2_since_ms = 0;
@@ -286,24 +242,22 @@ inline bool joiner_settled(int64_t now) {
     g_p2_seen = p2;
     g_p2_since_ms = now;
   }
-  // Not coopbusy::Busy(): its probe does not run while visiting (it always said
-  // "no recent probe" here, rig 2026-10-27). Saving and a fresh level load are
-  // known on this PC; movies and cutscenes are checked in the chunks.
   const int64_t loaded = fable2::f5lua::g_load_at_ms.load();
   return p2 && now - g_p2_since_ms > kSettleMs && !fable2::f5lua::saving() &&
          !(loaded && now - loaded < kSettleMs);
 }
+inline bool menu_open() {
+  return fable2::coopkit::g_menu_up.load() &&
+         fable2::coopkit::g_menu_event_ms.load() > g_p2_since_ms + kSettleMs;
+}
 
 inline void joiner_tick(int64_t now) {
-  if (!joiner_in_campaign() || !joiner_settled(now)) {
-    g_a_pressed = false;
-    return;
-  }
-  if (g_a_pressed.load() && now - g_a_ms.load() >= kPickDelayMs) {
-    g_a_pressed = false;
-    REXSYS_INFO("[coop] world use: the partner's A, looking for a chest");
-    fable2::luaconsole::RunChunk(joiner_chunk());
-  }
+  if (!g_a_pressed.exchange(false)) return;
+  if (!joiner_in_campaign() || !joiner_settled(now) || menu_open()) return;
+  char rec[96];
+  std::snprintf(rec, sizeof(rec), "COOPWUSE:v1|n=%lld|kind=near", static_cast<long long>(now));
+  lobby::PublishData("coop_wuse", rec);
+  REXSYS_INFO("[coop] world use: the partner's A, the host looks in front of player 2 ({})", rec);
 }
 
 // --- the host's part ----------------------------------------------------------
@@ -351,7 +305,6 @@ inline void OnFrame() {
   if (g_prev_frame_hook) g_prev_frame_hook();
   const int64_t now = fable2::f5lua::steady_ms();
   if (fable2::f5lua::ready()) drive_tick(now);
-  publish_tick();  // render thread, not inside the game's Lua
   if (now < g_next_tick_ms && !g_a_pressed.load()) return;
   g_next_tick_ms = now + 250;
   if (!fable2::f5lua::ready()) return;
@@ -367,7 +320,6 @@ inline bool Install() {
   fable2::f5lua::g_frame_hook = &OnFrame;
   g_prev_pad_hook = fable2::cooplobby::g_game_pad_hook;
   fable2::cooplobby::g_game_pad_hook = &pad_hook;
-  fable2::luaconsole::AddLineHandler("COOPWUSE pick", on_pick_line);
   fable2::luaconsole::AddLineHandler("[coop] world use done", [](std::string_view) { g_driving = false; });
   return true;
 }

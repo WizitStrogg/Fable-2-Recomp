@@ -3074,8 +3074,9 @@ def lf_use23():
         time.sleep(20)  # the partner acts only 15 s after player 2 arrives (fable2_coop_worlduse.h)
         chests = lf_chests(a, 150)
         door = lf_find(a, "door", 150)
-        # Chests only: the partner's door pick waits until its search is proven on the joiner.
         targets = [("chest", c[:3], f"chest{i}") for i, c in enumerate(chests[:2])]
+        if door:
+            targets.append(("door", door[:3], "door"))
         for kind, (x, y, z), label in targets:
             if not lf_p2_to(b, x, y, z, kind):
                 note("FAIL", f"{tag}: {label}: the partner could not get to it")
@@ -3117,8 +3118,10 @@ def lf_use23():
         na, nb = len(a.lines()), len(b.lines())
         b.send("press A 200")
         time.sleep(4)
-        stray = [l[24:200] for l in b.lines()[nb:] + a.lines()[na:] if "world use" in l]
-        note("PASS" if not stray else "FAIL", f"{tag}: the partner's A away from objects sends nothing ({stray})")
+        acted = [l[24:200] for l in a.lines()[na:] if "world use" in l and ("opening it" in l or "opened" in l)]
+        said = [l[24:200] for l in a.lines()[na:] if "nothing to use" in l]
+        note("PASS" if not acted else "FAIL",
+             f"{tag}: the partner's A away from objects uses nothing on the host ({said or acted})")
     finally:
         for g in (a, b):
             g.stop()
