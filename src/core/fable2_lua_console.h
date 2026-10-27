@@ -254,6 +254,13 @@ inline void RunFileOrKeep(const std::string& name) {
   text << in.rdbuf();
   RunChunkOrKeep(text.str());
 }
+// Drops the kept chunks (the co-op teardown hold's end). Returns how many.
+inline size_t DropKept() {
+  std::lock_guard<std::mutex> l(kept_mtx());
+  const size_t n = kept().size();
+  kept().clear();
+  return n;
+}
 // Every frame (at most every 250 ms: a full queue logs each refusal): queue
 // the kept chunks, oldest first, while slots are free.
 inline void RetryKept() {

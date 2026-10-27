@@ -996,6 +996,41 @@ inline void partner_return_watchdog(int64_t now) {
   }
 }
 
+// A: the partner's chunks wait while its campaign session is torn down (the
+// runner latches the hold, fable2_f5_lua.h teardown_held). Armed while the
+// partner is in the host's campaign and until it is back in the front end. The
+// hold ends when the main menu is built or the menu movie or title shows (the
+// probe already says MainMenu at the session's end), or after kTeardownHoldMs;
+// what waited is dropped then. A new XSessionStart while still joined was no
+// teardown: the hold ends and the chunks run.
+constexpr int64_t kTeardownHoldMs = 60000;
+inline int64_t g_hold_since_ms = 0;
+inline void teardown_hold_tick(int64_t now) {
+  namespace fl = fable2::f5lua;
+  const bool in_campaign = g_purse_host_xuid.load() != 0 && lobby::GetLobbyStatus().joined_host_ip != 0;
+  const int s = fable2::stateprobe::CurrentState();
+  const bool front = s == fable2::stateprobe::kMainMenuMovie || s == fable2::stateprobe::kPressAScreen;
+  if (!fl::g_teardown_hold.load()) {
+    if (in_campaign) fl::g_hold_on_session_end.store(true);
+    else if (front || g_menu_built.load()) fl::g_hold_on_session_end.store(false);
+    return;
+  }
+  if (!g_hold_since_ms) {
+    g_hold_since_ms = now;
+    g_menu_built.store(false);  // built before the campaign: not the way back
+  }
+  const bool resumed = in_campaign && !fl::rex_session_ending();
+  const bool back = g_menu_built.load() || front;
+  if (!resumed && !back && now - g_hold_since_ms <= kTeardownHoldMs) return;
+  size_t dropped = 0;
+  if (!resumed) dropped = fl::drop_queued() + fable2::luaconsole::DropKept();
+  REXSYS_INFO("[coop] partner: chunk hold ended after {} ms ({}); {} chunk(s) dropped", now - g_hold_since_ms,
+              resumed ? "the session started again" : back ? "back at the front end" : "timed out", dropped);
+  g_hold_since_ms = 0;
+  fl::g_hold_on_session_end.store(resumed);
+  fl::g_teardown_hold.store(false);
+}
+
 inline void purse_tick(int64_t now) {
   if (now < g_next_purse_ms) return;
   // Paused, queued scripts wait: do not stack syncs behind each other (they
@@ -1565,6 +1600,7 @@ inline void OnFrame() {
   session_tick();
   partner_purse_tick(fable2::f5lua::steady_ms());
   partner_return_watchdog(fable2::f5lua::steady_ms());
+  teardown_hold_tick(fable2::f5lua::steady_ms());
   partner_xp_tick(fable2::f5lua::steady_ms());
   test_input_tick();
 }
