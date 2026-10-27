@@ -7,8 +7,9 @@
 // own A, CECChest's open ran on the host). So player 2's use goes to the host
 // as a record of our own, and the host uses the object for player 2 the
 // game's own way:
-//   chest   the stock use handler OnActionUseTakeItems, player 2 the user
-//           (contents to the hero by its co-op rule; quest chests go on)
+//   chest   the lid and the giving part of the stock use handler
+//           OnActionUseTakeItems (contents to the hero by its co-op rule;
+//           quest chests go on); player 2 itself is not moved or animated
 //   door    Door.SetOpenForEntity(door, player 2, true), Door.SetOpen(door, true, true)
 //   lever   Switch.Use(switch, player 2)            (OnActionUseSwitch's call)
 // The object is found on the host by kind and position (both copies place the
@@ -68,23 +69,42 @@ inline std::string host_chunk(const std::string& kind, float x, float y, float z
   c += "    end\n";
   c += "  end\n";
   c += "  if not best then return 'no ' .. kind .. ' there' end\n";
-  // A chest: the stock use handler OnActionUseTakeItems with player 2 as the
-  // user, run as a coroutine the host drives (drive_chunk). It gives the
-  // contents to the hero when a henchman is there (its own co-op rule: the
-  // caravan chest's starter weapons must reach the host's hero for QC060 to
-  // go on), the gold through Money.Modify (then the shared purse), and keeps
-  // the locked and silver key checks. Chest.Open alone opened only the lid.
-  // The canned chest camera would turn the host's view: off while it runs.
+  // A chest: the giving part of the stock use handler OnActionUseTakeItems,
+  // run as a coroutine the host drives (drive_chunk): the lid, then the items
+  // to the hero and the gold through Money.Modify (then the shared purse).
+  // The hero, by the handler's own co-op rule ("a henchman is there: the hero
+  // receives"); the caravan chest's starter melee must reach the host's hero
+  // for QC060 to go on. Not the whole handler: it moves player 2 and sets its
+  // open-chest action and interaction mode, which reached the joiner's copy
+  // and crashed it (rig 2026-10-27, a guest write 110 ms after). Chest.Open
+  // alone opens only the lid. Not done: the handler's theft check on owned chests.
   c += "  if kind == 'chest' then\n";
   c += "    if Chest.IsOpen(best) then return 'chest already open' end\n";
+  c += "    if Chest.IsLocked(best) then return 'chest locked' end\n";
   c += "    if CoopWUse then return 'chest: a use is still running' end\n";
-  c += "    if not OnActionUseTakeItems then Chest.Open(best) return 'chest opened (lid only)' end\n";
-  c += "    CoopWUseCam = {CannedActionCamera.SwitchOn, CannedActionCamera.SwitchOff}\n";
-  c += "    CannedActionCamera.SwitchOn = function() end\n";
-  c += "    CannedActionCamera.SwitchOff = function() end\n";
-  c += "    CoopWUseChest = best\n";
-  c += "    CoopWUse = coroutine.create(function() OnActionUseTakeItems:Create(best, p2):Update() end)\n";
-  c += "    return 'chest: player 2 uses it (stock take items)'\n";
+  c += "    CoopWUse = coroutine.create(function()\n";
+  c += "      Chest.Open(best)\n";
+  c += "      local n = 0\n";
+  c += "      while not Chest.IsOpen(best) and n < 600 do n = n + 1 coroutine.yield() end\n";
+  c += "      local hero = GetPlayerHero()\n";
+  c += "      local items, gold = 0, 0\n";
+  c += "      if Inventory.IsAvailable(hero) and Inventory.IsAvailable(best) then\n";
+  c += "        for i = 0, Inventory.GetNumberOfItems(best) - 1 do\n";
+  c += "          local added = Inventory.AddItem(hero, Inventory.GetItemByIndex(best, i))\n";
+  c += "          items = items + 1\n";
+  c += "          GUI.DisplayReceivedItem(added)\n";
+  c += "          while GUI.IsUIActive() do coroutine.yield() end\n";
+  c += "        end\n";
+  c += "        Inventory.Clear(best)\n";
+  c += "      end\n";
+  c += "      if Money.IsAvailable(hero) and Money.IsAvailable(best) then\n";
+  c += "        gold = Money.Get(best)\n";
+  c += "        Money.Modify(hero, gold)\n";
+  c += "        Money.Set(best, 0)\n";
+  c += "      end\n";
+  c += "      print('[coop] world use: chest gave ' .. items .. ' item(s) and ' .. gold .. ' gold to the hero')\n";
+  c += "    end)\n";
+  c += "    return 'chest: opening it for player 2'\n";
   c += "  elseif kind == 'door' then\n";
   c += "    if Door.IsLocked(best) then return 'door locked' end\n";
   // SetOpenForEntity alone only lets the door open for player 2 (it stayed
@@ -101,25 +121,16 @@ inline std::string host_chunk(const std::string& kind, float x, float y, float z
   return c;
 }
 
-// Resumes the chest's use coroutine (host, every frame while it runs); when it
-// ends, the canned camera comes back. lid: the open action set on player 2
-// (driven from the other PC) may never play, and the handler waits for the
-// lid: open it, the handler then gives the contents.
-inline std::string drive_chunk(bool lid) {
+// Resumes the chest's coroutine (host, every frame while it runs).
+inline std::string drive_chunk() {
   std::string c;
-  if (lid) {
-    c += "if CoopWUseChest and not Chest.IsOpen(CoopWUseChest) then Chest.Open(CoopWUseChest) "
-         "print('[coop] world use: lid opened for player 2') end\n";
-  }
   c += "if CoopWUse then\n";
   c += "  if coroutine.status(CoopWUse) == 'suspended' then\n";
   c += "    local ok, e = coroutine.resume(CoopWUse)\n";
   c += "    if not ok then print('[coop] world use error: ' .. tostring(e)) end\n";
   c += "  end\n";
   c += "  if coroutine.status(CoopWUse) == 'dead' then\n";
-  c += "    CoopWUse, CoopWUseChest = nil, nil\n";
-  c += "    if CoopWUseCam then CannedActionCamera.SwitchOn, CannedActionCamera.SwitchOff = CoopWUseCam[1], CoopWUseCam[2] end\n";
-  c += "    CoopWUseCam = nil\n";
+  c += "    CoopWUse = nil\n";
   c += "    print('[coop] world use done')\n";
   c += "  end\n";
   c += "end\n";
@@ -130,7 +141,6 @@ inline bool valid_kind(const std::string& k) { return k == "chest" || k == "door
 
 inline std::atomic<bool> g_driving{false};
 inline int64_t g_drive_since_ms = 0;
-inline bool g_lid_sent = false;
 inline void run_on_host(const std::string& kind, float x, float y, float z, const char* why) {
   if (!valid_kind(kind)) return;
   REXSYS_INFO("[coop] world use {} at {:.2f} {:.2f} {:.2f} ({})", kind, x, y, z, why);
@@ -138,24 +148,19 @@ inline void run_on_host(const std::string& kind, float x, float y, float z, cons
   if (kind == "chest") {
     g_driving = true;
     g_drive_since_ms = fable2::f5lua::steady_ms();
-    g_lid_sent = false;
   }
 }
 
 // Host, every frame while a chest use runs (one chunk queued at a time).
 inline void drive_tick(int64_t now) {
   if (!g_driving.load() || fable2::f5lua::g_queued.load() > 0) return;
-  const bool lid = !g_lid_sent && now - g_drive_since_ms > 3000;
-  if (lid) g_lid_sent = true;
-  if (now - g_drive_since_ms > 60000) {  // gave up: put the camera back
+  if (now - g_drive_since_ms > 60000) {
     g_driving = false;
     REXSYS_WARN("[coop] world use: the chest use did not finish in 60 s");
-    fable2::luaconsole::RunChunk(
-        "if CoopWUseCam then CannedActionCamera.SwitchOn, CannedActionCamera.SwitchOff = CoopWUseCam[1], "
-        "CoopWUseCam[2] end CoopWUse, CoopWUseChest, CoopWUseCam = nil, nil, nil");
+    fable2::luaconsole::RunChunk("CoopWUse = nil");
     return;
   }
-  fable2::luaconsole::RunChunk(drive_chunk(lid));
+  fable2::luaconsole::RunChunk(drive_chunk());
 }
 
 // Testing trigger: coop_world_use = "<kind>:<x>,<y>,<z>" (host).
