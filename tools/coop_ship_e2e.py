@@ -2817,6 +2817,194 @@ def lf_partner_ui_gold(b, tag):
     note("INFO", f"{tag}: partner purses after the mark {out} (screenshot {tag}_partner_pause_hero4242.png)")
 
 
+
+def lf_chest_open(a):
+    out = lua_lines(a, "print('LFOPEN ' .. tostring(LFC and Chest.IsOpen(LFC)))", "LFOPEN", 10)
+    return out[-1] if out else "?"
+
+
+def lf_use_try(g, a, other, who, tag):
+    """g presses A facing the chest (twice if still closed: a tutorial line can
+    take the first); the chest's state on the host before and after, and the
+    probe lines of both PCs from then on."""
+    na, nb = len(g.lines()), len(other.lines())
+    before = lf_chest_open(a)
+    for k in range(2):
+        g.send("press A 200")
+        time.sleep(5)
+        g.shot(f"{tag}_{who}_after_A{k}.png")
+        after = lf_chest_open(a)
+        note("INFO", f"{tag}: {who} A #{k + 1}: chest open {before} -> {after}")
+        if after == "true":
+            break
+    other.shot(f"{tag}_{who}_after_A_other.png")
+    for x, name in ((g, who), (other, "other")):
+        lines = [l[24:300] for l in x.lines()[na if x is g else nb:] if "[useprobe]" in l]
+        note("INFO", f"{tag}: {who} pressed A; {name} PC useprobe: {lines[:30]}")
+
+
+def lf_use():
+    """Item 7, experiment 1 (coop_use_probe): the partner, then the host, press
+    A at the same closed chest; where does the partner's use stop?"""
+    tag = "lf_use"
+    setup_tomls()
+    for folder in ("mod-a", "mod-b"):
+        with open(os.path.join(ROOT, folder, "fable_2.toml"), "a", encoding="utf-8", newline="\n") as f:
+            f.write("coop_use_probe = true\n")
+    relay_log = open(os.path.join(OUT, f"relay_{tag}.log"), "w")
+    relay = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                           "coop_relay.py")], stdout=relay_log, stderr=relay_log)
+    a, b = Game("mod-a", "host"), Game("mod-b", "partner")
+    a.start({"FABLE2_TEST_INPUT": "1"})
+    b.start({"FABLE2_TEST_INPUT": "1"})
+    try:
+        for g in (a, b):
+            g.n_menu = g.count(r"main menu: Co-op entry added")
+            g.past_title()
+        menu_then_coop(a, tag, a.n_menu)
+        host_new_campaign(a, tag)
+        menu_then_coop(b, tag, b.n_menu)
+        wait_row(b, "Join TestA", f"{tag}: the host's lobby is listed")
+        partner_joins(b, "Join TestA", tag)
+        wait_row(a, "Start", f"{tag}: host lobby shows the partner")
+        if not both_ready_and_start(a, b, tag) or not join_phase(a, b, tag):
+            return
+        time.sleep(10)
+        # The closed chest nearest the host's hero.
+        out = lua_lines(a, (
+            "local ok, e = pcall(function() local h = GetPlayerHero(); local best, bd = nil, 1e9; "
+            "for _, o in pairs(SearchTools.GetSearchResults(SearchTools.FilterWithEC("
+            "SearchTools.StartNewSearch('object'), Chest.GetECType()))) do "
+            "if not Chest.IsOpen(o) and not Chest.IsLocked(o) then local d = (o:GetPosition() - h:GetPosition()):GetLength(); "
+            "if d < bd then best, bd = o, d end end end; "
+            "if not best then print('LFCHEST none') return end; LFC = best; local p = best:GetPosition(); "
+            "print(string.format('LFCHEST %.2f %.2f %.2f %.1f', p:GetX(), p:GetY(), p:GetZ(), bd)) end); "
+            "if not ok then print('LFCHEST error ' .. tostring(e)) end"), "LFCHEST", 15)
+        note("INFO", f"{tag}: nearest chest {out}")
+        if not out or len(out[-1].split()) < 4:
+            return
+        x, y, z = (float(v) for v in out[-1].split()[:3])
+        # The partner first, at the closed chest, from its own Lua (its copy owns its position).
+        out = lua_lines(b, (
+            f"local ok, e = pcall(function() local me = GetPlayerHenchman(); local best, bd = nil, 1e9; "
+            f"for _, o in pairs(SearchTools.GetSearchResults(SearchTools.FilterWithEC("
+            f"SearchTools.StartNewSearch('object'), Chest.GetECType()))) do "
+            f"local d = (o:GetPosition() - CVector3({x}, {y}, {z})):GetLength(); "
+            f"if d < bd then best, bd = o, d end end; "
+            f"if not best or bd > 3 then print('LFPTP none ' .. tostring(bd)) return end; local p = best:GetPosition(); "
+            f"local st = CVector3(p:GetX() + 1.2, p:GetY(), p:GetZ()); Physics.TeleportToPosition(me, st); "
+            f"local f = p - st; f:Normalise(); Physics.SetFacingVector(me, f); "
+            f"print(string.format('LFPTP ok (%.1f m from the host spot)', bd)) end); "
+            f"if not ok then print('LFPTP error ' .. tostring(e)) end"), "LFPTP", 15)
+        note("INFO", f"{tag}: partner to the chest: {out}")
+        if out and out[-1].startswith("ok"):
+            time.sleep(2)
+            b.shot(f"{tag}_partner_at_chest.png")
+            lf_use_try(b, a, a, "partner", tag)
+        # Then the host at the same chest (its own copy: the teleport sticks).
+        lua_lines(a, (f"local h = GetPlayerHero(); local st = CVector3({x + 1.2:.2f}, {y:.2f}, {z:.2f}); "
+                      f"Physics.TeleportToPosition(h, st); local f = CVector3({x:.2f}, {y:.2f}, {z:.2f}) - st; "
+                      f"f:Normalise(); Physics.SetFacingVector(h, f); print('LFHOSTAT ok')"), "LFHOSTAT", 10)
+        time.sleep(3)
+        a.shot(f"{tag}_host_at_chest.png")
+        lf_use_try(a, a, b, "host", tag)
+    finally:
+        for g in (a, b):
+            g.stop()
+        relay.kill()
+
+
+
+def lf_start_campaign(tag, extra_toml=()):
+    """Host (mod-a) + partner (mod-b) in a new campaign; (a, b, relay) or None."""
+    setup_tomls()
+    for folder in ("mod-a", "mod-b"):
+        if extra_toml:
+            with open(os.path.join(ROOT, folder, "fable_2.toml"), "a", encoding="utf-8", newline="\n") as f:
+                f.write("".join(line + "\n" for line in extra_toml))
+    relay_log = open(os.path.join(OUT, f"relay_{tag}.log"), "w")
+    relay = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                           "coop_relay.py")], stdout=relay_log, stderr=relay_log)
+    a, b = Game("mod-a", "host"), Game("mod-b", "partner")
+    a.start({"FABLE2_TEST_INPUT": "1"})
+    b.start({"FABLE2_TEST_INPUT": "1"})
+    for g in (a, b):
+        g.n_menu = g.count(r"main menu: Co-op entry added")
+        g.past_title()
+    menu_then_coop(a, tag, a.n_menu)
+    host_new_campaign(a, tag)
+    menu_then_coop(b, tag, b.n_menu)
+    wait_row(b, "Join TestA", f"{tag}: the host's lobby is listed")
+    partner_joins(b, "Join TestA", tag)
+    wait_row(a, "Start", f"{tag}: host lobby shows the partner")
+    if not both_ready_and_start(a, b, tag) or not join_phase(a, b, tag):
+        return a, b, relay, False
+    return a, b, relay, True
+
+
+LF_FIND = {
+    "chest": ("SearchTools.FilterWithEC(s, Chest.GetECType())",
+              "not Chest.IsOpen(o) and not Chest.IsLocked(o)", "tostring(Chest.IsOpen(LFO.chest))"),
+    "door": ("SearchTools.FilterWithEC(s, Door.GetECType())",
+             "not Door.IsLocked(o) and not Door.IsOpen(o)", "tostring(Door.IsOpen(LFO.door))"),
+    "switch": ("local _ = 0", "Switch.IsAvailable(o)", "'n/a'"),
+}
+
+
+def lf_find(a, kind, radius):
+    """The nearest usable <kind> to the host's hero within radius: (x, y, z, d) or None."""
+    filt, ok, _ = LF_FIND[kind]
+    out = lua_lines(a, (
+        "local ok, e = pcall(function() LFO = LFO or {}; local h = GetPlayerHero(); local s = SearchTools.StartNewSearch('object'); "
+        f"SearchTools.FilterWithinDistanceOfPos(s, h:GetPosition(), {radius}); {filt}; local best, bd = nil, 1e9; "
+        f"for _, o in pairs(SearchTools.GetSearchResults(s)) do if {ok} then "
+        "local d = (o:GetPosition() - h:GetPosition()):GetLength(); if d < bd then best, bd = o, d end end end; "
+        f"if not best then print('LFFIND none') return end; LFO.{kind} = best; local p = best:GetPosition(); "
+        "print(string.format('LFFIND %.3f %.3f %.3f %.1f', p:GetX(), p:GetY(), p:GetZ(), bd)) end); "
+        "if not ok then print('LFFIND error ' .. tostring(e)) end"), "LFFIND", 20)
+    note("INFO", f"use1: nearest {kind}: {out}")
+    if not out or len(out[-1].split()) < 4:
+        return None
+    return tuple(float(v) for v in out[-1].split()[:4])
+
+
+def lf_use1():
+    """Path 2b, step 1: the host's executor (coop_world_use) opens a chest, a
+    door and a lever for player 2, triggered on the host itself."""
+    tag = "lf_use1"
+    a, b, relay, ok = lf_start_campaign(tag)
+    try:
+        if not ok:
+            return
+        time.sleep(10)
+        for kind, radius in (("chest", 120), ("door", 150), ("switch", 250)):
+            found = lf_find(a, kind, radius)
+            if not found:
+                note("INFO", f"{tag}: no usable {kind} within {radius} m of the host")
+                continue
+            x, y, z, d = found
+            state = LF_FIND[kind][2]
+            before = lua_lines(a, f"print('LFST ' .. {state})", "LFST", 10)
+            purse0 = read_purses(a, b, f"{tag}_{kind}_before")
+            n = len(a.lines())
+            a.send(f"cvar coop_world_use {kind}:{x:.3f},{y:.3f},{z:.3f}")
+            time.sleep(4)
+            after = lua_lines(a, f"print('LFST ' .. {state})", "LFST", 10)
+            res = [l[24:220] for l in a.lines()[n:] if "world use" in l]
+            purse1 = read_purses(a, b, f"{tag}_{kind}_after")
+            a.shot(f"{tag}_{kind}_host.png")
+            b.shot(f"{tag}_{kind}_partner.png")
+            good = any("opened" in r or "used by player 2" in r for r in res) and (kind == "switch" or (after and "true" in after[-1]))
+            note("PASS" if good else "FAIL",
+                 f"{tag}: {kind} {d:.0f} m away: open {before} -> {after}; executor {res}; purses {purse0} -> {purse1}")
+            a.send("cvar coop_world_use none")
+            time.sleep(1)
+    finally:
+        for g in (a, b):
+            g.stop()
+        relay.kill()
+
+
 def run_livefix():
     phases = sys.argv[sys.argv.index("--phases") + 1].split(",") if "--phases" in sys.argv else ["empty", "male", "female"]
     if "empty" in phases:
@@ -2829,6 +3017,10 @@ def run_livefix():
         lf_oakfield()
     if "gold" in phases:
         lf_session(False, gold_only=True)
+    if "use" in phases:
+        lf_use()
+    if "use1" in phases:
+        lf_use1()
 
 
 def run_dynsync():
