@@ -65,6 +65,11 @@ inline std::string host_chunk(const std::string& kind, float x, float y, float z
   // or door within 2.5 m in front of it (anything within 0.8 m counts).
   c += "  if kind == 'near' then\n";
   c += "    if not p2 or not p2:IsAlive() then return 'no player 2' end\n";
+  // A cutscene or movie: the world is not the players' (the joiner cannot ask
+  // safely; its GUI calls were among the chunks that crashed it).
+  c += "    if (GUI.IsFullCutscenePlaying and GUI.IsFullCutscenePlaying()) or (GUI.IsMoviePlaying and GUI.IsMoviePlaying()) then\n";
+  c += "      return 'a cutscene or movie is playing: nothing used'\n";
+  c += "    end\n";
   c += "    p = p2:GetPosition()\n";
   c += "    local f = Physics.GetFacingVector(p2)\n";
   c += "    local function pick(ec, closed, k)\n";
@@ -108,6 +113,16 @@ inline std::string host_chunk(const std::string& kind, float x, float y, float z
   c += "    if Chest.IsOpen(best) then return 'chest already open' end\n";
   c += "    if Chest.IsLocked(best) then return 'chest locked' end\n";
   c += "    if CoopWUse then return 'chest: a use is still running' end\n";
+  // Someone's chest (the stock handler's theft test: an owner building that is
+  // not the hero's, or rented): refused until the theft check is carried over;
+  // no silent theft and no crime pinned on the host.
+  c += "    if OwnedEntity.IsAvailable(best) then\n";
+  c += "      local owner = OwnedEntity.GetOwner(best)\n";
+  c += "      if owner and owner:IsAlive() and Building.IsAvailable(owner) and\n";
+  c += "         (not PlayerProperties.IsOwnedByPlayer(GetPlayerHero(), owner) or PlayerProperties.GetIsRentalProperty(GetPlayerHero(), owner)) then\n";
+  c += "        return 'chest belongs to someone: not opened (taking from it is not supported yet)'\n";
+  c += "      end\n";
+  c += "    end\n";
   c += "    CoopWUse = coroutine.create(function()\n";
   c += "      Chest.Open(best)\n";
   c += "      local n = 0\n";
@@ -217,18 +232,19 @@ inline bool joiner_in_campaign() {
 // says "A" (kind=near) and the host finds what is in front of its own copy of
 // player 2. The game still gets the press: pickups and attacks keep the stock
 // path (at a chest the stock A does nothing on the joiner).
-// No menu check: the kit's menu flag also goes up with every pause of the
-// host's game (the join screens, the host's "received" boxes) and nothing
-// lowers it, so it blocked every A after the first chest (rig 2026-10-27).
-// An A on a pause menu row only uses something if a closed chest or door is
-// within 2.5 m in front of player 2.
+// An A while the partner's own pause wheel (or a page from it) is up is its
+// menu's, read at the press (choosing Quit closes the wheel before the tick):
+// the kit's g_wheel_open, from the wheel's builder to the pause screen's exit.
+// Not the kit's g_menu_up: every pause of the host's game raises it and
+// nothing lowers it (it blocked every A after the first chest, rig
+// 2026-10-27). Cutscenes and movies are the host's to see (host_chunk).
 inline std::atomic<bool> g_a_pressed{false};
 inline uint16_t g_prev_buttons = 0;
 inline uint16_t (*g_prev_pad_hook)(uint16_t) = nullptr;
 inline uint16_t pad_hook(uint16_t buttons) {
   constexpr uint16_t kPadA = 0x1000;
   const uint16_t game = g_prev_pad_hook ? g_prev_pad_hook(buttons) : buttons;
-  if ((game & kPadA) && !(g_prev_buttons & kPadA)) g_a_pressed = true;
+  if ((game & kPadA) && !(g_prev_buttons & kPadA) && !fable2::coopkit::g_wheel_open.load()) g_a_pressed = true;
   g_prev_buttons = game;
   return game;
 }
@@ -250,6 +266,7 @@ inline bool joiner_settled(int64_t now) {
          !(loaded && now - loaded < kSettleMs);
 }
 inline void joiner_tick(int64_t now) {
+  if (!joiner_in_campaign()) fable2::coopkit::g_wheel_open = false;  // never left up by a lost session
   if (!g_a_pressed.exchange(false)) return;
   if (!joiner_in_campaign() || !joiner_settled(now)) return;
   char rec[96];

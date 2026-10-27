@@ -667,6 +667,11 @@ inline void SendCommand(Op op, uint32_t id) {
 constexpr uint16_t kPadStart = 0x0010, kPadB = 0x2000;
 constexpr int kStartBs = 6;
 inline std::atomic<bool> g_menu_up{false}, g_mask_start{false};
+// The partner's own pause wheel (and every page opened from it), from its
+// builder to the pause screen's exit only: unlike g_menu_up, no pause of the
+// host's game raises it (fable2_coop_worlduse.h keeps the partner's A for its
+// menus out of the world).
+inline std::atomic<bool> g_wheel_open{false};
 inline std::atomic<int> g_b_left{0};
 inline std::atomic<int64_t> g_menu_event_ms{0}, g_next_b_ms{0}, g_close_from_ms{0};
 inline uint16_t g_prev_pad = 0;
@@ -954,6 +959,7 @@ extern "C" void sub_82336F98(PPCContext& ctx, uint8_t* base) {
 extern "C" void __imp__sub_825832B0(PPCContext& ctx, uint8_t* base);
 extern "C" void sub_825832B0(PPCContext& ctx, uint8_t* base) {
   __imp__sub_825832B0(ctx, base);
+  fable2::coopkit::g_wheel_open = false;
   if (fable2::coopkit::joiner_active()) fable2::coopkit::menu_event(false, "pause screen exit (sub_825832B0)");
 }
 
@@ -1032,6 +1038,7 @@ extern "C" void sub_8240F040(PPCContext& ctx, uint8_t* base) {
     if (fable2::coopkit::g_wheel_logged.fetch_add(1) < 20)
       REXSYS_INFO("[coopkit] pause menu: full wheel for player 2 (builder)");
     fable2::coopkit::menu_event(true, "full wheel built (sub_8240F040)");
+    fable2::coopkit::g_wheel_open = true;
     ctx.r4.u64 = 1;
   }
   fable2::coopkit::t_joiner_wheel = forced;
