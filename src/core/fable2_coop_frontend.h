@@ -445,6 +445,9 @@ inline void on_host_start() {
   }
   // T031: a continued campaign brings player 2 back from its file; otherwise
   // (new campaign, or no usable file) player 2 is seeded (T031a).
+  // Player 2's body (and so its head and hair) by the lobby's gender2, the same
+  // value the partner's PC uses (on_partner_go).
+  fable2::coophero::g_campaign_p2_female.store(rec.gender2 == fable2::cooplobby::Gender::kFemale ? 1 : 0);
   std::optional<std::string> restore = resume && slot ? restore_player2_chunk(slot->path) : std::nullopt;
   fable2::coophero::SetCampaignPlayer2(
       restore ? *restore : seed_player2_chunk(rec.gender2 == fable2::cooplobby::Gender::kMale));
@@ -477,12 +480,18 @@ inline void on_host_start() {
 inline void on_partner_go(uint32_t ip) {
   uint64_t host_xuid = 0;
   std::string host_name;
+  bool p2_female = false;
   {
     auto& lb = fable2::cooplobby::L();
     std::lock_guard<std::mutex> l(lb.m);
     host_xuid = lb.partner.host_xuid;
     host_name = lb.partner.seat.host;
+    // The host's record has the gender2 it started with; this seat's own choice
+    // is the same value (the partner owns gender) if the record is missing.
+    p2_female = (lb.partner.host_rec ? lb.partner.host_rec->gender2 : lb.partner.seat.gender) ==
+                fable2::cooplobby::Gender::kFemale;
   }
+  fable2::coophero::g_campaign_p2_female.store(p2_female ? 1 : 0);
   {
     std::lock_guard<std::mutex> l(S().m);
     S().s = Session::kPartnerJoining;

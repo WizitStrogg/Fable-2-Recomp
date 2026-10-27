@@ -188,17 +188,24 @@ inline std::string timestamp() {
   return buf;
 }
 
-// Gender of player 2's hero: 1 female, 0 male, -1 unknown. On the host it is
-// the partner's (from their published profile), on a joiner its own.
+// Gender of player 2's hero: 1 female, 0 male, -1 unknown. In a co-op campaign
+// it is the lobby's gender2 (the partner's seat choice) on both PCs; otherwise
+// on the host the partner's (from their published profile), on a joiner its
+// own. Without the lobby value the host had no profile yet at the spawn and
+// fell back to index 0 (female): a female head and hair under the male starter
+// outfit for a male seat (live session, 2026-10-27).
 inline std::atomic<int> g_partner_female{-1};
+inline std::atomic<int> g_campaign_p2_female{-1};  // set at host start / partner go, -1 at the menu
 inline int profile_female(std::string_view profile) {
   const auto p = profile.find("|g=");
   if (p == std::string_view::npos || p + 3 >= profile.size()) return -1;
   return profile[p + 3] == 'F' ? 1 : 0;
 }
 inline void update_partner_gender(const lobby::LobbyStatus& status) {
-  int female = -1;
-  if (status.in_world && status.joined_host_ip == 0) {
+  int female = g_campaign_p2_female.load();
+  if (female >= 0) {
+    // the lobby's choice
+  } else if (status.in_world && status.joined_host_ip == 0) {
     const lobby::PeerData* best = nullptr;
     const auto heroes = lobby::GetPeerData("hero");
     for (const auto& h : heroes) {
@@ -365,7 +372,12 @@ inline void host_apply(const lobby::LobbyStatus& status, int64_t now) {
       return;
     }
     const std::string lib = read_lib();
-    if (lib.empty() || !fable2::luaconsole::RunChunk(lib + "\n" + campaign)) return;  // again next tick
+    // No stock henchman gold share in a campaign: player 2 gained 1 gold every
+    // ~2 min on its own (live session, 2026-10-27), merged into the shared
+    // purse. Its own pickups still count (purse_tick).
+    const std::string no_wage =
+        "print('[coop] henchman gold share 0: ' .. tostring(pcall(Multiplayer.SetHenchmanGoldValue, 0)))\n";
+    if (lib.empty() || !fable2::luaconsole::RunChunk(lib + "\n" + no_wage + campaign)) return;  // again next tick
     g_applied_epoch = epoch;
     g_applied_ip = 0;
     g_applied_rev = 2;
@@ -767,7 +779,10 @@ extern "C" void sub_8231EEE0(PPCContext& ctx, uint8_t* base) {
     __imp__sub_8231EEE0(ctx, base);
     return;
   }
-  const int known = fable2::coophero::g_partner_female.load();
+  // The lobby's value first: the spawn can come before the per-frame
+  // update_partner_gender has copied it.
+  const int lobby_female = fable2::coophero::g_campaign_p2_female.load();
+  const int known = lobby_female >= 0 ? lobby_female : fable2::coophero::g_partner_female.load();
   const bool female = known >= 0 ? known == 1 : index <= 2;
   static uint32_t s_names[2] = {0, 0};
   uint32_t& name = s_names[female ? 1 : 0];
@@ -788,7 +803,9 @@ extern "C" void sub_8231EEE0(PPCContext& ctx, uint8_t* base) {
   ctx.r3.u32 = out;
   REXSYS_INFO("[coop] player 2 body: {} (selector index {}, gender {})",
               female ? "CreatureHeroFemale" : "CreatureHero", index,
-              known < 0 ? "from co-op screen" : "from hero profile");
+              lobby_female >= 0 ? "from the lobby"
+              : known < 0       ? "from co-op screen"
+                                : "from hero profile");
 }
 
 // Stats.AddUnlockedTitle native (also reached from ModifyFat & co). Our own

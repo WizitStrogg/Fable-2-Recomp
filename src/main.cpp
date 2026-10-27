@@ -34,6 +34,7 @@
 #include "fable2_menu_probe.h"  // main-menu input path (mod-menu hook points)
 #include "fable2_modmenu.h"  // 6th "MOD OPTION" selectable main-menu item
 #include "fable2_av_probe.h"  // self-installs a guest-PC AV logger (VEH)
+#include "fable2_cam_watch.h"  // testing: who writes the joiner camera's view (coop_cam_watch)
 #include "fable2_stall_dump.h"  // self-installs a render-stall thread dumper
 // #include "fable2_ui_render_probe.h"
 #include "keyboard_gamepad.h"

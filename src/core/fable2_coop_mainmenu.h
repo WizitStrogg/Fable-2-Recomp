@@ -14,7 +14,10 @@
 // With coop_campaign on, one more AddEntry call adds "Co-op" (parent "Root")
 // right after "Load Game" (after "New Game" when there are no saves), so the
 // game lays it out, highlights and animates it like the others and the rows
-// below move down. Choosing an entry calls the menu's handler (sub_826C81A0)
+// below move down. It is only ever added once a stock AddEntry has returned:
+// adding it at the start of the next entry's call (the old no-saves path), with
+// that entry's arguments already built, crashed every boot with empty saves
+// (read of guest 0x000DF668, mod-host fable_2_002.log, 2026-10-27). Choosing an entry calls the menu's handler (sub_826C81A0)
 // with an event {+0 name, +4 type}; it compares the name with the stock entries.
 // For "Co-op" the handler is not run: the co-op hub opens instead
 // (fable2::coopfrontend::OnCoopEntry). The host's Start later loads the
@@ -26,9 +29,11 @@
 #include <atomic>
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
 #include <string>
 
 #include <rex/cvar.h>
+#include <rex/filesystem.h>
 #include <rex/logging.h>
 #include <rex/ppc/context.h>
 
@@ -72,9 +77,24 @@ inline std::string slot_str(uint8_t* base, uint32_t slot) {
 inline uint32_t g_coop_cstr = 0;           // "Co-op" in guest memory (the game's allocator)
 inline std::atomic<uint32_t> g_menu{0};    // the main menu (from its last build / selection)
 inline uint32_t g_pending_menu = 0;        // "New Game" added, "Co-op" not yet
+inline uint32_t g_add_after = 0;           // no "Load Game" after all: add once this call returns
 inline std::atomic<uint32_t> g_select_type{0};  // the event type of a selection
 
 inline bool enabled() { return REXCVAR_GET(coop_campaign); }
+
+// Any save on disk (saves\<XUID>\4D5307F1\00000001\HeroNNN\mainsave.bin), i.e.
+// the game will add "Load Game". Read at each menu build: saves come and go.
+inline bool disk_has_saves() {
+  namespace fs = std::filesystem;
+  std::error_code ec;
+  for (const auto& x : fs::directory_iterator(rex::filesystem::GetExecutableFolder() / "saves", ec)) {
+    std::error_code ec2;
+    for (const auto& h : fs::directory_iterator(x.path() / "4D5307F1" / "00000001", ec2)) {
+      if (fs::exists(h.path() / "mainsave.bin", ec2)) return true;
+    }
+  }
+  return false;
+}
 
 // One more AddEntry with the same constant arguments the game passes, on a
 // scratch frame below the caller's stack. `in` = the registers of the game's
@@ -120,6 +140,7 @@ inline void add_coop_entry(PPCContext& ctx, uint8_t* base, const PPCContext& in)
     DestructRefCounted_82214F08(ctx, base);
   }
   ctx = saved;
+  fable2::coophero::g_campaign_p2_female.store(-1);  // back at the menu: no campaign
   fable2::coopfrontend::OnMenuBuilt();
   REXSYS_INFO("[coop] main menu: Co-op entry added");
 }
@@ -167,16 +188,29 @@ extern "C" void ProcessAndProcessAndProcess2440_826CB808(PPCContext& ctx, uint8_
   const PPCContext in = ctx;
   const std::string name = mm::slot_str(base, in.r4.u32);
   const bool root = mm::slot_str(base, in.r7.u32) == "Root";
-  // No saves (no "Load Game"): Co-op goes in before the next root entry.
+  // Saves on disk but the game added no "Load Game": Co-op goes in after this
+  // entry returns (never before it: see the top of this file).
   if (root && mm::g_pending_menu == in.r3.u32 && name != "Load Game" && name != mm::kCoop) {
     mm::g_pending_menu = 0;
-    mm::add_coop_entry(ctx, base, in);
+    mm::g_add_after = in.r3.u32;
+    REXSYS_WARN("[coop] main menu: no Load Game though saves are on disk; Co-op goes after '{}'", name);
   }
   __imp__ProcessAndProcessAndProcess2440_826CB808(ctx, base);
   if (!root) return;
+  if (mm::g_add_after == in.r3.u32 && name != mm::kCoop) {
+    mm::g_add_after = 0;
+    mm::add_coop_entry(ctx, base, in);
+    return;
+  }
   if (name == "New Game") {
-    mm::g_pending_menu = in.r3.u32;  // a (re)build of the menu starts
     mm::g_menu.store(in.r3.u32);
+    mm::g_add_after = 0;
+    if (mm::disk_has_saves()) {
+      mm::g_pending_menu = in.r3.u32;  // a (re)build of the menu starts; Co-op after "Load Game"
+    } else {
+      mm::g_pending_menu = 0;
+      mm::add_coop_entry(ctx, base, in);  // no saves: straight after "New Game"
+    }
   } else if (name == "Load Game" && mm::g_pending_menu == in.r3.u32) {
     mm::g_pending_menu = 0;
     mm::add_coop_entry(ctx, base, in);
