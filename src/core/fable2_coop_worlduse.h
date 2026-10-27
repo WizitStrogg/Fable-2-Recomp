@@ -184,6 +184,8 @@ inline bool joiner_in_campaign() {
 inline std::string joiner_chunk(bool pick) {
   std::string c;
   c += "local ok, err = pcall(function()\n";
+  c += "if (GUI.IsMoviePlaying and GUI.IsMoviePlaying()) or (GUI.IsFullCutscenePlaying and GUI.IsFullCutscenePlaying()) "
+       "then return 'a movie or cutscene is playing' end\n";
   c += "local me = GetPlayerHenchman()\n";
   c += "if not me or not me:IsAlive() then return 'no player 2' end\n";
   c += "local p, f = me:GetPosition(), Physics.GetFacingVector(me)\n";
@@ -276,7 +278,12 @@ inline bool joiner_settled(int64_t now) {
     g_p2_seen = p2;
     g_p2_since_ms = now;
   }
-  return p2 && now - g_p2_since_ms > kSettleMs && fable2::coopbusy::Busy().empty();
+  // Not coopbusy::Busy(): its probe does not run while visiting (it always said
+  // "no recent probe" here, rig 2026-10-27). Saving and a fresh level load are
+  // known on this PC; movies and cutscenes are checked in the chunks.
+  const int64_t loaded = fable2::f5lua::g_load_at_ms.load();
+  return p2 && now - g_p2_since_ms > kSettleMs && !fable2::f5lua::saving() &&
+         !(loaded && now - loaded < kSettleMs);
 }
 
 inline int64_t g_next_hint_ms = 0;
