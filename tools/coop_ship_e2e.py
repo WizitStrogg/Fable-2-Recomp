@@ -3113,6 +3113,16 @@ def lf_use23():
                  f"{tag}: {label}: partner's A -> open {before} -> {after}; partner {sent}; host {done}")
             note("INFO", f"{tag}: {label}: host hero starter melee / items {pack0} -> {pack1}; purses {purse0} -> {purse1}; "
                          f"player 2 items {p2inv0[1] if p2inv0 else '?'} -> {p2inv1[1] if p2inv1 else '?'}")
+            if kind == "chest" and label != "chest0" and p2inv0 and p2inv1:
+                # An ordinary chest: its items to player 2's own inventory, and the
+                # kit's mirror carries them to the partner's copy mid-session.
+                time.sleep(4)
+                mirror = [l[24:200] for l in b.lines()[nb:] if "[coopkit] mirror rev" in l]
+                gave = [l[60:220] for l in a.lines()[na:] if "gave" in l]
+                note("PASS" if p2inv1[1] > p2inv0[1] or "0 item(s)" in " ".join(gave) else "FAIL",
+                     f"{tag}: {label}: an ordinary chest's items went to player 2 ({p2inv0[1]} -> {p2inv1[1]} items; {gave})")
+                note("PASS" if any(re.search(r"\+[1-9]", m) for m in mirror) or "0 item(s)" in " ".join(gave) else "FAIL",
+                     f"{tag}: {label}: the kit's mirror put them on the partner's copy ({mirror[-2:]})")
             if label == "chest0":
                 note("PASS" if pack1.split()[0] not in ("0", "?") else "FAIL",
                      f"{tag}: the caravan chest's starter weapon reached the host's hero (QC060 IsHeroPacking): {pack0} -> {pack1}")
