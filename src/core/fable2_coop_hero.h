@@ -332,10 +332,11 @@ inline std::string campaign_player2() {
 }
 
 // Player 2's saved weapons, after the campaign chunk (it leaves CoopWeaponsDue):
-// every kWeaponsEveryMs until CoopHero.ApplyWeapons is done, the last try
-// final (adds what is still missing even if the slots stayed empty).
+// every kWeaponsEveryMs until CoopHero.ApplyWeapons is done (every saved
+// weapon is there); only the last try, ~30 s after the spawn, adds what is
+// still missing.
 constexpr int64_t kWeaponsEveryMs = 2000;
-constexpr int kWeaponsTries = 10;
+constexpr int kWeaponsTries = 15;
 inline uint32_t g_weapons_epoch = ~0u;
 inline int g_weapons_tries = kWeaponsTries;
 inline int64_t g_next_weapons_ms = 0;
