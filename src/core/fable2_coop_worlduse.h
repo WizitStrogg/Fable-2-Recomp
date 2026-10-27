@@ -184,12 +184,13 @@ inline bool joiner_in_campaign() {
 
 // The joiner's Lua, on the partner's A: the nearest closed chest within 2.5 m
 // of player 2 and in front of it (anything within 0.8 m counts), printed for
-// the host. Only calls proven on the joiner: the chest search by component,
-// positions, the facing (rig 2026-10-27). Every chunk that crashed it (guest
-// reads of 0x5 / 0x3A000008, right after the chunk) asked Chest.IsOpen or
-// Door.IsOpen of the joiner's copies; the last one 3 ms after a pick, before
-// the host had the record. So no IsOpen here (the host checks it), and doors
-// and the "A: Open" hint wait until proven on their own.
+// the host. Only calls proven on the joiner, the harness's partner search
+// (rig 2026-10-27): a plain object search with Chest.IsAvailable, positions,
+// the facing. Every chunk that crashed it (guest reads of 0x5 / 0x3A000008,
+// 3 ms after the chunk, before anything reached the host) searched with
+// SearchTools.FilterWithEC, and most asked Chest/Door.IsOpen of the joiner's
+// copies; neither is used here (the host checks the open state). Doors and
+// the "A: Open" hint wait until proven on their own.
 inline std::string joiner_chunk() {
   std::string c;
   c += "local ok, err = pcall(function()\n";
@@ -197,14 +198,15 @@ inline std::string joiner_chunk() {
   c += "  if not me or not me:IsAlive() then return 'no player 2' end\n";
   c += "  local p, f = me:GetPosition(), Physics.GetFacingVector(me)\n";
   c += "  local best, bd, seen, near = nil, 1e9, 0, 1e9\n";
-  c += "  local s = SearchTools.GetSearchResults(SearchTools.FilterWithEC(SearchTools.StartNewSearch('object'), Chest.GetECType()))\n";
-  c += "  for _, o in pairs(s) do\n";
+  c += "  for _, o in pairs(SearchTools.GetSearchResults(SearchTools.StartNewSearch('object'))) do\n";
+  c += "    if Chest.IsAvailable(o) then\n";
   c += "    local d = o:GetPosition() - p\n";
   c += "    local dist = d:GetLength()\n";
   c += "    seen = seen + 1\n";
   c += "    if dist < near then near = dist end\n";
   c += "    if dist <= 2.5 and (dist <= 0.8 or (d:GetX() * f:GetX() + d:GetY() * f:GetY()) / dist >= 0.3) and\n";
   c += "       dist < bd then best, bd = o, dist end\n";
+  c += "    end\n";
   c += "  end\n";
   c += "  if not best then return string.format('nothing to use (%d chests, nearest %.1f m)', seen, near) end\n";
   c += "  local q = best:GetPosition()\n";
