@@ -238,6 +238,12 @@ inline uint16_t pad_hook(uint16_t buttons) {
 }
 
 // "COOPWUSE pick <kind> <x> <y> <z>" (the joiner's Lua) -> the record.
+// The handler runs on the game thread inside the chunk's print, in the middle
+// of the game's Lua call: it only keeps the record. Publishing it there
+// crashed the joiner 1 ms later, every time (rig 2026-10-27); it is
+// published from the frame hook (publish_tick).
+inline std::mutex g_pick_mu;
+inline std::string g_pick_record;
 inline void on_pick_line(std::string_view line) {
   if (fable2::f5lua::steady_ms() - g_a_ms.load() > kPickFreshMs) {
     REXSYS_INFO("[coop] world use: a late pick dropped (the A was in a menu)");
@@ -249,8 +255,18 @@ inline void on_pick_line(std::string_view line) {
   char rec[160];
   std::snprintf(rec, sizeof(rec), "COOPWUSE:v1|n=%lld|kind=%s|x=%.3f|y=%.3f|z=%.3f",
                 static_cast<long long>(fable2::f5lua::steady_ms()), kind, x, y, z);
+  std::lock_guard<std::mutex> l(g_pick_mu);
+  g_pick_record = rec;
+}
+inline void publish_tick() {
+  std::string rec;
+  {
+    std::lock_guard<std::mutex> l(g_pick_mu);
+    rec.swap(g_pick_record);
+  }
+  if (rec.empty()) return;
   lobby::PublishData("coop_wuse", rec);
-  REXSYS_INFO("[coop] world use: asked the host to use the {} at {:.2f} {:.2f} {:.2f}", kind, x, y, z);
+  REXSYS_INFO("[coop] world use: asked the host ({})", rec);
 }
 
 // Only once player 2's creature has been on this PC for kSettleMs and the
@@ -330,6 +346,7 @@ inline void OnFrame() {
   if (g_prev_frame_hook) g_prev_frame_hook();
   const int64_t now = fable2::f5lua::steady_ms();
   if (fable2::f5lua::ready()) drive_tick(now);
+  publish_tick();  // render thread, not inside the game's Lua
   if (now < g_next_tick_ms && !g_a_pressed.load()) return;
   g_next_tick_ms = now + 250;
   if (!fable2::f5lua::ready()) return;
