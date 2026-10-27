@@ -702,7 +702,13 @@ inline void leave_tick() {
   if (fable2::luaconsole::RunChunk(
           "print('[coop] partner leaves: QuitToFrontEnd ' .. tostring(pcall(Debug.QuitToFrontEnd)))\n")) {
     g_leave_pending = false;
-    REXSYS_INFO("[coopkit] partner: wheel closed, leaving the host's game");
+    // The host would see a clean leave only as a still-talking peer: tell it
+    // (fable2_coop_frontend.h, kHostInWorld: it saves and goes to the lobby).
+    const std::string rec = "COOPLEAVE:v1|hxuid=" +
+                            fable2::cooplobby::XuidStr(fable2::coopfrontend::g_purse_host_xuid.load()) +
+                            "|n=" + std::to_string(fable2::f5lua::steady_ms());
+    lobby::PublishData("coop_leave", rec);
+    REXSYS_INFO("[coopkit] partner: wheel closed, leaving the host's game ({})", rec);
   }
 }
 // Render thread, every frame.

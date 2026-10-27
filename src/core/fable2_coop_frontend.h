@@ -183,6 +183,7 @@ struct SessionState {
   bool partner_spawned = false;
   bool host_female = false;
   bool quit_sent = false;  // host after a partner loss: QuitToFrontEnd requested
+  std::string leave_seen;  // host: the partner's coop_leave record when player 2 arrived (older ones are stale)
   // Partner: the host to join, the last join attempt, and since when joined.
   uint32_t host_ip = 0;
   uint64_t host_xuid = 0;  // the host is heard once per shared network: match by XUID
@@ -492,6 +493,7 @@ inline void on_partner_go(uint32_t ip) {
                 fable2::cooplobby::Gender::kFemale;
   }
   fable2::coophero::g_campaign_p2_female.store(p2_female ? 1 : 0);
+  lobby::PublishData("coop_leave", "");  // a leave from an earlier session is not news
   {
     std::lock_guard<std::mutex> l(S().m);
     S().s = Session::kPartnerJoining;
@@ -533,6 +535,17 @@ inline PeerView peer_view(uint64_t xuid, uint32_t ip) {
     }
   }
   return v;
+}
+
+// Host: the partner's latest coop_leave record ("COOPLEAVE:v1|hxuid=<host>|n=<nonce>",
+// published by the partner as it leaves from its wheel), "" if none.
+inline std::string partner_leave_record(const SessionState& s) {
+  std::string rec;
+  for (const auto& d : lobby::GetPeerData("coop_leave")) {
+    if (s.partner_xuid && d.xuid ? d.xuid != s.partner_xuid : d.ip != s.partner_ip) continue;
+    if (d.value.rfind("COOPLEAVE:v1|", 0) == 0) rec = d.value;
+  }
+  return rec;
 }
 
 inline void open_coop_hub();
@@ -1097,6 +1110,7 @@ end
     case Session::kHostInWorld: {
       if (!s.partner_spawned && fable2::coophero::g_spawn_epoch.load() != g_seen_spawn_epoch) {
         s.partner_spawned = true;
+        s.leave_seen = partner_leave_record(s);
         lobby::PublishData("coop_go", "");  // joined: a stale go must not pull a rejoin
         lobby::PublishData("coop_lobby", "");
         REXSYS_INFO("[coop] host: player 2 is in the world");
@@ -1141,11 +1155,23 @@ end
       p2_watch_tick(now, true);
       purse_tick(now);
       const int quiet = peer_view(s.partner_xuid, s.partner_ip).quiet;
-      if (quiet < 0 || quiet > 6) {
+      // The partner chose Quit (fable2_coop_kit.h): its coop_leave record names
+      // this host. A campaign is played only with both players (spec), so a
+      // clean leave goes the partner-lost way too.
+      const std::string leave = partner_leave_record(s);
+      const bool left = !leave.empty() && leave != s.leave_seen &&
+                        leave.find("|hxuid=" + fable2::cooplobby::XuidStr(fable2::cooplobby::MyXuid()) + "|") !=
+                            std::string::npos;
+      if (left) {
+        REXSYS_INFO("[coop] host: partner {} left the game ({}), saving", s.partner_name, leave);
+        ShowCoverMessage(s.partner_name + " left the game",
+                         "Saving, then back to the main menu (Co-op to continue together)", 10000);
+      }
+      if (left || quiet < 0 || quiet > 6) {
         // Partner lost (proof P6): save with the game's own autosave call
         // (QC060 uses AutoSaveGame(true, true)), then, once it has had time
         // to finish, back to the front end to wait in the campaign's lobby.
-        REXSYS_INFO("[coop] host: partner {} lost (quiet {} s), saving", s.partner_name, quiet);
+        if (!left) REXSYS_INFO("[coop] host: partner {} lost (quiet {} s), saving", s.partner_name, quiet);
         lobby::PublishData("coop_purse", "");
         s.s = Session::kHostPartnerLost;
         s.since_ms = now;
