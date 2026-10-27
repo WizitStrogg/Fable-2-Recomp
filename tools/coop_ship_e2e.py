@@ -2392,6 +2392,70 @@ def run_solowalk():
         a.stop()
 
 
+def run_dynsync():
+    """Do objects spawned in the host's world reach the partner? A gold bag is
+    spawned (Debug.CreateEntityAtPosition, the call the game's own quest scripts
+    use for NPCs) straight at a spot 1 m in front of the partner's hero, by its
+    own position and facing (a teleport of an existing object is not sent to
+    the partner, gold2 2026-10-26). Screenshots of both copies; the partner
+    presses A. Pass: the bag is gone on the host and the host purse, the host's
+    player 2 and the partner's mirror each move once by the same amount."""
+    setup_tomls()
+    relay_log = open(os.path.join(OUT, "relay_dynsync.log"), "w")
+    relay = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                           "coop_relay.py")], stdout=relay_log, stderr=relay_log)
+    a, b = Game("mod-a", "host"), Game("mod-b", "partner")
+    a.start({"FABLE2_TEST_INPUT": "1"})
+    b.start({"FABLE2_TEST_INPUT": "1"})
+    try:
+        for g in (a, b):
+            g.n_menu = g.count(r"main menu: Co-op entry added")
+            g.past_title()
+        menu_then_coop(a, "dyn", a.n_menu)
+        host_new_campaign(a, "dyn")
+        menu_then_coop(b, "dyn", b.n_menu)
+        wait_row(b, "Join TestA", "dyn: the host's lobby is listed")
+        partner_joins(b, "Join TestA", "dyn")
+        wait_row(a, "Start", "dyn: host lobby shows the partner")
+        if not both_ready_and_start(a, b, "dyn") or not join_phase(a, b, "dyn"):
+            return
+        time.sleep(8)
+        for k, dist in enumerate((1.0, 0.7, 1.3)):
+            pose = wg_partner_pose(b)
+            if not pose:
+                continue
+            x, y, z, fx, fy = pose
+            n = math.hypot(fx, fy) or 1.0
+            px, py = x + fx / n * dist, y + fy / n * dist
+            out = lua_lines(a, (
+                f"local ok, e = pcall(function() DYNB = Debug.CreateEntityAtPosition('ObjectInventoryGoldBag', "
+                f"'dynbag{k}', CVector3({px:.3f}, {py:.3f}, {z:.3f})); print('DYNSPAWN ' .. tostring(DYNB:IsAlive()) .. "
+                f"' gold=' .. tostring(Money.IsAvailable(DYNB) and Money.Get(DYNB) or -1)) end); "
+                f"if not ok then print('DYNSPAWN error ' .. tostring(e)) end"), "DYNSPAWN", 10)
+            note("INFO", f"dyn: bag {k} spawned {dist} m in front of the partner ({px:.1f}, {py:.1f}): {out}")
+            time.sleep(3)
+            a.shot(f"dyn_bag{k}_host.png")
+            b.shot(f"dyn_bag{k}_partner.png")
+            before = read_purses(a, b, f"dyn_before_{k}")
+            b.send("press A 200")
+            time.sleep(4)
+            wg_dismiss(a, b, b, f"dyn_{k}")
+            gone = lua_lines(a, "print('DYNPICK ' .. tostring(DYNB:IsAlive()))", "DYNPICK", 8)
+            after = read_purses(a, b, f"dyn_after_{k}")
+            b.shot(f"dyn_bag{k}_partner_after.png")
+            note("INFO", f"dyn: bag {k} alive after the partner's A: {gone}; purses {before} -> {after}")
+            if gone and "false" in gone[-1] and before and after:
+                d = [after[i] - before[i] for i in range(3)]
+                note("PASS" if d[0] == d[1] == d[2] > 0 else "FAIL",
+                     f"dyn: the partner picked up a host-spawned bag; each purse changed by {d} (once, the same)")
+                return
+        note("FAIL", "dyn: the partner did not pick up a host-spawned bag (see dyn_bag*_partner.png: is it there?)")
+    finally:
+        for g in (a, b):
+            g.stop()
+        relay.kill()
+
+
 def run_luaq_kept():
     """The kept / retry path (9cace5a): while the partner's pause holds, the host
     queues 12 numbered markers and a gold change (13 one-shots, 8 console slots):
@@ -2561,7 +2625,7 @@ def run_continue2():
 def main():
     os.makedirs(OUT, exist_ok=True)
     mode = sys.argv[1] if len(sys.argv) > 1 else "coop"
-    {"coop": run_coop, "solo": run_solo, "multi": run_multi, "menu": run_menu, "menu2": run_menu2, "err": run_err, "final": run_final, "last": run_last, "start": run_start, "purse": run_purse, "fps": run_fps, "combo": run_combo, "camera": run_camera, "luaq": run_luaq, "luaq_kept": run_luaq_kept, "continue2": run_continue2, "boots": run_boots, "worldgold": run_worldgold, "batch1": run_batch1, "savestress": run_savestress, "solowalk": run_solowalk}[mode]()
+    {"coop": run_coop, "solo": run_solo, "multi": run_multi, "menu": run_menu, "menu2": run_menu2, "err": run_err, "final": run_final, "last": run_last, "start": run_start, "purse": run_purse, "fps": run_fps, "combo": run_combo, "camera": run_camera, "luaq": run_luaq, "luaq_kept": run_luaq_kept, "continue2": run_continue2, "boots": run_boots, "worldgold": run_worldgold, "batch1": run_batch1, "savestress": run_savestress, "solowalk": run_solowalk, "dynsync": run_dynsync}[mode]()
     with open(os.path.join(OUT, f"results_{mode}.txt"), "w", encoding="utf-8") as f:
         f.write("\n".join(results) + "\n")
     return 0 if not any(r.startswith("FAIL") for r in results) else 1
