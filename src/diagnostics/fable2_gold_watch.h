@@ -24,6 +24,7 @@
 #include <fmt/format.h>
 #include <rex/cvar.h>
 #include <rex/logging.h>
+#include <rex/ppc/context.h>
 
 REXCVAR_DEFINE_STRING(coop_gold_watch, "", "Network",
                       "Testing: find and watch player 2's gold (find:<n>, pick:<n>, watch[:<hex>])");
@@ -163,3 +164,17 @@ inline const bool g_started = [] {
 }();
 
 }  // namespace fable2::goldwatch
+
+// The writer the watch found (rig 2026-10-27, exe+0xC9D068/0xC9D0C8) is the
+// game's add-money sub_8239E698(r3 = money component, gold at +12, r4 = amount),
+// which many callers use. While a gold address is watched, every add to it is
+// logged with its caller (the return address): the one that pays player 2 1
+// gold every ~2 minutes is the one to stop.
+extern "C" void __imp__sub_8239E698(PPCContext& ctx, uint8_t* base);
+extern "C" void sub_8239E698(PPCContext& ctx, uint8_t* base) {
+  const uint32_t watched = fable2::goldwatch::g_addr.load(std::memory_order_relaxed);
+  if (watched && ctx.r3.u32 + 12 == watched)
+    REXSYS_INFO("[goldwatch] add {} to the watched gold, caller 0x{:08X}", static_cast<int32_t>(ctx.r4.u32),
+                static_cast<uint32_t>(ctx.lr));
+  __imp__sub_8239E698(ctx, base);
+}
