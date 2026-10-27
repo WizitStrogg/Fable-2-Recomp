@@ -3116,6 +3116,23 @@ def lf_use23():
             if label == "chest0":
                 note("PASS" if pack1.split()[0] not in ("0", "?") else "FAIL",
                      f"{tag}: the caravan chest's starter weapon reached the host's hero (QC060 IsHeroPacking): {pack0} -> {pack1}")
+        # The partner's A inside its own pause wheel: its menu's, not the world's.
+        if chests:
+            x, y, z = chests[0][:3]
+            lf_p2_to(b, x, y, z, "chest")
+            time.sleep(2)
+        nb = len(b.lines())
+        b.send("press Start 200")
+        time.sleep(2.5)
+        b.send("press A 200")
+        time.sleep(3)
+        b.shot(f"{tag}_partner_A_in_wheel.png")
+        sent = [l[24:200] for l in b.lines()[nb:] if "the partner's A" in l]
+        note("PASS" if not sent else "FAIL", f"{tag}: the partner's A in its own pause wheel sends nothing ({sent})")
+        for _ in range(5):
+            b.send("press B 200")
+            time.sleep(1.2)
+        time.sleep(2)
         # The partner's A at nothing: no record, nothing on the host.
         lua_lines(b, ("local me = GetPlayerHenchman(); local p = me:GetPosition(); "
                       "Physics.TeleportToPosition(me, CVector3(p:GetX() + 12, p:GetY() + 12, p:GetZ())); print('LFAWAY ok')"),
