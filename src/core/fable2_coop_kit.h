@@ -989,15 +989,88 @@ extern "C" void sub_8240EAA0(PPCContext& ctx, uint8_t* base) {
 // Wheel builder (r3 = pause menu, r4 = 1 full / 0 henchman). Launch 1: the
 // partner's Start does not go through sub_82583340 (its caller
 // sub_82846078 always passes 0), so the partner's choice is made here.
+namespace fable2::coopkit {
+inline thread_local bool t_joiner_wheel = false;  // the full wheel is being built for the joiner
+}  // namespace fable2::coopkit
+
 extern "C" void __imp__sub_8240F040(PPCContext& ctx, uint8_t* base);
 extern "C" void sub_8240F040(PPCContext& ctx, uint8_t* base) {
-  if ((ctx.r4.u32 & 0xFF) == 0 && fable2::coopkit::joiner_active()) {
+  const bool forced = (ctx.r4.u32 & 0xFF) == 0 && fable2::coopkit::joiner_active();
+  if (forced) {
     if (fable2::coopkit::g_wheel_logged.fetch_add(1) < 20)
       REXSYS_INFO("[coopkit] pause menu: full wheel for player 2 (builder)");
     fable2::coopkit::menu_event(true, "full wheel built (sub_8240F040)");
     ctx.r4.u64 = 1;
   }
+  fable2::coopkit::t_joiner_wheel = forced;
   __imp__sub_8240F040(ctx, base);
+  fable2::coopkit::t_joiner_wheel = false;
+}
+
+// Wheel AddEntry(r3 = menu, r4 = &name, r5 = &label, r6, r7, r8 = 0, r9 = 300,
+// r10, stack +84), used by both builders: the host's sub_82842860 and the
+// henchman's sub_828436A8. In the joiner's full wheel (above) the host-only
+// rows are not the partner's: the Save row ("Saving": save and quit the host's
+// game) is left out, and Kick becomes the henchman's own Quit row, name
+// "HenchmanQuit" with the stock GUI_SCREEN_PAUSE_HENCHMAN_QUIT label, exactly
+// what sub_828436A8 adds. Choosing it is then an ordinary page choice that the
+// dispatcher sends to the henchman handler (any name with "Henchman"), the
+// stock "leave the game" question (live session 2026-10-27: Calvin had Kick,
+// which did nothing, and no way to leave).
+extern "C" void __imp__sub_824083C0(PPCContext& ctx, uint8_t* base);
+extern "C" void ConstructRefCounted_8222CF18(PPCContext& ctx, uint8_t* base);
+extern "C" void DestructRefCounted_82214F08(PPCContext& ctx, uint8_t* base);
+extern "C" void ReleaseGlobalRef_821C6868(PPCContext& ctx, uint8_t* base);
+extern "C" void ProcessAndProcessAndProcess1726_82301D40(PPCContext& ctx, uint8_t* base);  // text lookup
+extern "C" void sub_824083C0(PPCContext& ctx, uint8_t* base) {
+  namespace ta = fable2::textappend;
+  namespace ck = fable2::coopkit;
+  if (!ck::t_joiner_wheel) return __imp__sub_824083C0(ctx, base);
+  const uint32_t slot = ctx.r4.u32;
+  const uint32_t buf = slot && ta::rdable2(base, slot, 4) ? ta::load_be(base, slot) : 0;
+  const uint32_t str = buf && ta::rdable2(base, buf, 4) ? ta::load_be(base, buf) : 0;
+  char name[32] = {};
+  if (str && ta::rdable2(base, str, sizeof(name) - 1))
+    std::memcpy(name, reinterpret_cast<const void*>(ta::host_addr(base, str)), sizeof(name) - 1);
+  if (std::strcmp(name, "Saving") == 0) {
+    REXSYS_INFO("[coopkit] partner wheel: Save row left out");
+    return;
+  }
+  if (std::strcmp(name, "Kick") != 0) {
+    REXSYS_DEBUG("[coopkit] partner wheel row '{}'", name);
+    return __imp__sub_824083C0(ctx, base);
+  }
+  // Kick -> HenchmanQuit: a name, an id and a label in a scratch frame below the caller's stack.
+  constexpr uint32_t kHenchmanQuitId = 0x820DD114;  // "GUI_SCREEN_PAUSE_HENCHMAN_QUIT" (image)
+  const PPCContext in = ctx;
+  const uint32_t sp = (in.r1.u32 - 0x200) & ~0xFu;
+  for (uint32_t i = 0; i < 0x100; i += 4) ck::be32(base, sp + i, 0);
+  ck::be32(base, sp, in.r1.u32);  // back chain
+  const uint32_t new_name = sp + 0xA0, id = sp + 0xA4, label = sp + 0xA8;
+  ctx.r1.u64 = sp;
+  ctx.r3.u64 = new_name;
+  ctx.r4.u64 = ck::kHenchmanQuitStr;
+  ctx.r5.s64 = -1;
+  ConstructRefCounted_8222CF18(ctx, base);
+  ctx.r3.u64 = id;
+  ctx.r4.u64 = kHenchmanQuitId;
+  ctx.r5.s64 = -1;
+  ConstructRefCounted_8222CF18(ctx, base);
+  ctx.r3.u64 = label;
+  ctx.r4.u64 = id;  // consumed by the lookup
+  ProcessAndProcessAndProcess1726_82301D40(ctx, base);
+  ctx = in;
+  ctx.r1.u64 = sp;  // its frame below our slots; its stack argument copied
+  ck::be32(base, sp + 84, ta::load_be(base, in.r1.u32 + 84));
+  ctx.r4.u64 = new_name;
+  ctx.r5.u64 = label;
+  __imp__sub_824083C0(ctx, base);
+  ctx.r3.u64 = label;
+  ReleaseGlobalRef_821C6868(ctx, base);
+  ctx.r3.u64 = new_name;
+  DestructRefCounted_82214F08(ctx, base);
+  ctx = in;
+  REXSYS_INFO("[coopkit] partner wheel: Kick row is the henchman's Quit");
 }
 
 // r3 = player manager; returns 1 when multiplayer is active and the local

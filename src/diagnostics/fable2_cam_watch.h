@@ -7,12 +7,15 @@
 // moves (jitter, live session 2026-10-27). Overriding the writer needs its name.
 //
 // After each follow camera write, the host page holding the view's target
-// block is made read-only. The next write to that page faults into the
-// handler below, which makes the page writable again, notes the writing
-// thread, the host instruction (exe-relative, resolve it with fable_2.pdb to
-// the recompiled sub_<guest address>) and the offset in the view, and lets
-// the write go ahead. One fault per arm; re-armed at most every 250 ms, 60
-// samples per session. Faults on any other page go to the next handler.
+// block is made read-only. A write to that page faults into the handler
+// below, which makes the page writable again and lets the write go ahead. A
+// write into the view's current/target blocks (+0xE0..+0x170) by another
+// thread is noted (thread, host instruction exe-relative: resolve it with
+// fable_2.pdb to the recompiled sub_<guest address>; offset in the view) and
+// ends the arm. Any other write on the page (the first run caught only
+// view+0x44) is single-stepped and the page protected again after it.
+// Re-armed at most every 250 ms, 60 samples per session. Faults on any other
+// page go to the next handler.
 
 #include <Windows.h>
 
@@ -42,8 +45,19 @@ struct Sample {
 };
 inline Sample g_last;
 
+thread_local uintptr_t t_reprotect = 0;  // page to protect again after a single step
+inline std::atomic<int> g_steps{0};      // single steps this arm (bounded)
+
 inline LONG CALLBACK handler(PEXCEPTION_POINTERS info) {
   const EXCEPTION_RECORD* r = info->ExceptionRecord;
+  if (r->ExceptionCode == EXCEPTION_SINGLE_STEP && t_reprotect) {
+    const uintptr_t page = t_reprotect;
+    t_reprotect = 0;
+    info->ContextRecord->EFlags &= ~0x100u;
+    DWORD old = 0;
+    if (g_page.load() == page) VirtualProtect(reinterpret_cast<void*>(page), kPage, PAGE_READONLY, &old);
+    return EXCEPTION_CONTINUE_EXECUTION;
+  }
   if (r->ExceptionCode != EXCEPTION_ACCESS_VIOLATION || r->NumberParameters < 2 || r->ExceptionInformation[0] != 1)
     return EXCEPTION_CONTINUE_SEARCH;
   const uintptr_t page = g_page.load();
@@ -51,14 +65,24 @@ inline LONG CALLBACK handler(PEXCEPTION_POINTERS info) {
   if (!page || addr < page || addr >= page + kPage) return EXCEPTION_CONTINUE_SEARCH;
   DWORD old = 0;
   VirtualProtect(reinterpret_cast<void*>(page), kPage, PAGE_READWRITE, &old);
-  g_page.store(0);
   const DWORD tid = GetCurrentThreadId();
-  if (tid != g_own_tid.load() && !g_last.ready.load()) {
-    g_last.rip = static_cast<uintptr_t>(info->ContextRecord->Rip) -
-                 reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
-    g_last.tid = tid;
-    g_last.offset = static_cast<int64_t>(addr) - static_cast<int64_t>(g_view_host.load());
-    g_last.ready.store(true);
+  const int64_t offset = static_cast<int64_t>(addr) - static_cast<int64_t>(g_view_host.load());
+  const bool in_blocks = offset >= 0xE0 && offset < 0x170;
+  if (in_blocks && tid != g_own_tid.load()) {
+    g_page.store(0);
+    if (!g_last.ready.load()) {
+      g_last.rip = static_cast<uintptr_t>(info->ContextRecord->Rip) -
+                   reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+      g_last.tid = tid;
+      g_last.offset = offset;
+      g_last.ready.store(true);
+    }
+  } else if (tid != g_own_tid.load() && g_steps.fetch_add(1) < 5000) {
+    // Someone else's field on the page: let this one write through, then arm again.
+    t_reprotect = page;
+    info->ContextRecord->EFlags |= 0x100u;
+  } else {
+    g_page.store(0);  // our own write (the follow camera), or too many: the arm ends
   }
   return EXCEPTION_CONTINUE_EXECUTION;
 }
@@ -82,6 +106,7 @@ inline void after_write(uintptr_t view_host, uintptr_t target_host, int64_t now_
       mbi.Protect != PAGE_READWRITE) {
     return;  // not a plain read-write page (the SDK may be watching it): leave it alone
   }
+  g_steps.store(0);
   g_page.store(page);
   DWORD old = 0;
   if (!VirtualProtect(reinterpret_cast<void*>(page), kPage, PAGE_READONLY, &old)) {

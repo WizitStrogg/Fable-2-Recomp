@@ -376,7 +376,8 @@ inline void host_apply(const lobby::LobbyStatus& status, int64_t now) {
     // ~2 min on its own (live session, 2026-10-27), merged into the shared
     // purse. Its own pickups still count (purse_tick).
     const std::string no_wage =
-        "print('[coop] henchman gold share 0: ' .. tostring(pcall(Multiplayer.SetHenchmanGoldValue, 0)))\n";
+        "local ok, e = pcall(Debug.SetHenchmanGoldValue, 0)\n"  // registered on Debug, not Multiplayer (rig probe)
+        "print('[coop] henchman gold share 0: ' .. tostring(ok) .. ' ' .. tostring(e))\n";
     if (lib.empty() || !fable2::luaconsole::RunChunk(lib + "\n" + no_wage + campaign)) return;  // again next tick
     g_applied_epoch = epoch;
     g_applied_ip = 0;
