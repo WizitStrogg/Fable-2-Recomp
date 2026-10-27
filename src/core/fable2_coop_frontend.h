@@ -903,57 +903,6 @@ inline void partner_purse_tick(int64_t now) {
   if (fresh) REXSYS_INFO("[coop] purse: host total {} (seq {})", best->total, best->seq);
 }
 
-// Player 2's experience for the partner's own pause menu, which shows its hero
-// record's orbs (as it shows that record's gold: 0 in the live session).
-// Host: "COOPXP:<general>,<strength>,<skill>,<will>" from the purse chunk ->
-// lobby data coop_xp "COOPXP:v1|hxuid=<host>|seq=<n>|xp=<g>,<s>,<k>,<w>".
-inline uint32_t g_xp_seq = 0;
-inline void on_xp_line(std::string_view line) {
-  const std::string xp(line.substr(7));
-  lobby::PublishData("coop_xp", "COOPXP:v1|hxuid=" + fable2::cooplobby::XuidStr(fable2::cooplobby::MyXuid()) +
-                                    "|seq=" + std::to_string(++g_xp_seq) + "|xp=" + xp);
-}
-// Partner: its hero record's four experience values set to the host's record
-// (a new one at once, the same again every 10 s).
-inline uint32_t g_xp_applied_seq = 0;
-inline int64_t g_next_xp_ms = 0, g_xp_again_ms = 0;
-inline void partner_xp_tick(int64_t now) {
-  const uint64_t hx = g_purse_host_xuid.load();
-  if (!hx || now < g_next_xp_ms) return;
-  g_next_xp_ms = now + 1000;
-  if (lobby::GetLobbyStatus().joined_host_ip == 0 || !fable2::f5lua::ready()) return;
-  if (fable2::f5lua::g_queued.load() > 0) return;  // paused: try next tick
-  std::string best;
-  uint32_t best_seq = 0;
-  for (const auto& d : lobby::GetPeerData("coop_xp")) {
-    const std::string& v = d.value;
-    if (v.find("|hxuid=" + fable2::cooplobby::XuidStr(hx) + "|") == std::string::npos) continue;
-    const auto s = v.find("|seq=");
-    const uint32_t seq = s == std::string::npos ? 0 : static_cast<uint32_t>(std::strtoul(v.c_str() + s + 5, nullptr, 10));
-    if (seq > best_seq) best_seq = seq, best = v;
-  }
-  if (best.empty() || (best_seq == g_xp_applied_seq && now < g_xp_again_ms)) return;
-  const auto at = best.find("|xp=");
-  int g = 0, st = 0, k = 0, w = 0;
-  if (at == std::string::npos || std::sscanf(best.c_str() + at + 4, "%d,%d,%d,%d", &g, &st, &k, &w) != 4) return;
-  char chunk[640];
-  std::snprintf(chunk, sizeof(chunk),
-                "local hero = GetPlayerHero()\n"
-                "if not hero or not hero:IsAlive() then return end\n"
-                "local t = EExperienceType\n"
-                "local changed = false\n"
-                "for _, v in ipairs({{t.EXPERIENCE_GENERAL, %d}, {t.EXPERIENCE_STRENGTH, %d}, {t.EXPERIENCE_SKILL, %d}, "
-                "{t.EXPERIENCE_WILL, %d}}) do\n"
-                "  local cur = math.floor(Experience.Get(hero, v[1]))\n"
-                "  if cur ~= v[2] then Experience.Modify(hero, v[1], v[2] - cur) changed = true end\n"
-                "end\n"
-                "if changed then print('[coop] experience: mirrored player 2 %d/%d/%d/%d') end\n",
-                g, st, k, w, g, st, k, w);
-  if (!fable2::luaconsole::RunChunk(chunk)) return;  // no free console slot: next tick
-  g_xp_applied_seq = best_seq;
-  g_xp_again_ms = now + 10000;
-}
-
 // Partner: after the campaign session ends (the host quit, or this PC left),
 // the game goes back to its front end. Once it did not (rig 2026-10-27, 1 of
 // 2 runs after the host's Save and Quit): the session ended, the front end's
@@ -1052,20 +1001,9 @@ inline void purse_tick(int64_t now) {
   std::string c = R"lua(
 local hero, hench = GetPlayerHero(), GetPlayerHenchman()
 if not hench or not hench:IsAlive() then return end
-)lua";
-  if (reset) c += "CoopPurseLast, CoopXPLast = nil, nil\n";
-  // Player 2's experience by type, for the partner's own pause menu (its orbs
-  // show its hero record's, like its gold: partner_xp_tick).
-  c += R"lua(
-local okx, x = pcall(function()
-  local t = EExperienceType
-  return string.format('%d,%d,%d,%d', math.floor(Experience.Get(hench, t.EXPERIENCE_GENERAL)),
-    math.floor(Experience.Get(hench, t.EXPERIENCE_STRENGTH)), math.floor(Experience.Get(hench, t.EXPERIENCE_SKILL)),
-    math.floor(Experience.Get(hench, t.EXPERIENCE_WILL)))
-end)
-if okx and x ~= CoopXPLast then CoopXPLast = x print('COOPXP:' .. x) end
 local H, h = Money.Get(hero), Money.Get(hench)
 )lua";
+  if (reset) c += "CoopPurseLast = nil\n";
   c += R"lua(
 if CoopPurseLast == nil then
   CoopPurseLast = H
@@ -1609,7 +1547,6 @@ inline void OnFrame() {
   partner_purse_tick(fable2::f5lua::steady_ms());
   partner_return_watchdog(fable2::f5lua::steady_ms());
   teardown_hold_tick(fable2::f5lua::steady_ms());
-  partner_xp_tick(fable2::f5lua::steady_ms());
   test_input_tick();
 }
 
@@ -1617,7 +1554,6 @@ inline const bool g_installed = [] {
   fable2::fronthooks::g_press_hook = &OnPress;
   fable2::luaconsole::AddLineHandler("[coop] hero gender ok", [](std::string_view) { g_gender_ok.store(true); });
   fable2::luaconsole::AddLineHandler("COOPPURSE:", on_purse_line);
-  fable2::luaconsole::AddLineHandler("COOPXP:", on_xp_line);
   fable2::luaconsole::AddLineHandler("COOPP2W|", [](std::string_view l) { on_p2_line(l, true); });
   fable2::luaconsole::AddLineHandler("COOPP2W-NONE", [](std::string_view) { on_p2_none(true); });
   fable2::luaconsole::AddLineHandler("COOPP2|", [](std::string_view l) { on_p2_line(l, false); });
