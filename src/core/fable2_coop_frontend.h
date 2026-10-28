@@ -1540,7 +1540,7 @@ inline void OnFrame() {
   // Rig only: narrow the save list to one slot so Continue loads it with no
   // picker (launch 21: test a starter slot without a campaign lobby).
   static std::string s_rig_filter;
-  if (const std::string f = REXCVAR_GET(coop_rig_save_filter); f != s_rig_filter) {
+  if (const std::string& f = REXCVAR_GET(coop_rig_save_filter); f != s_rig_filter) {  // compare, no copy per frame
     s_rig_filter = f;
     rex_content_set_save_filter(f.c_str());
   }

@@ -254,7 +254,7 @@ inline void drive_tick(int64_t now) {
 // Testing trigger: coop_world_use = "<kind>:<x>,<y>,<z>" (host).
 inline std::string g_last_test;
 inline void test_tick() {
-  const std::string v = REXCVAR_GET(coop_world_use);
+  const std::string& v = REXCVAR_GET(coop_world_use);
   if (v == g_last_test) return;
   g_last_test = v;
   const auto colon = v.find(':');
@@ -293,7 +293,10 @@ inline void on_hint_line(std::string_view line) {
   g_hint = std::string(line.substr(std::string_view("COOPWHINT:").size()));
 }
 
+inline bool g_hint_idle = false;  // solo: no partner and "none" already published
 inline void host_hint_tick(int64_t now, bool partner_here) {
+  if (!partner_here && g_hint_idle) return;  // 001eq2: nothing per tick in solo
+  g_hint_idle = !partner_here && g_hint_sent == "none";
   std::string what;
   {
     std::lock_guard<std::mutex> l(g_hint_mtx);
