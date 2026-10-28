@@ -214,7 +214,15 @@ function CoopKit.Apply(entity, op, hex)
     CoopKitEquipping[hex] = nil  -- a retry after the weapon left the bag for the hand
     return "ok"
   end
-  if not item then return "no:noitem" end
+  if not item then
+    -- An equip of a weapon already carried (the page lists the one in hand by its
+    -- hand record) is already done.
+    if op == "equip" then
+      local m, r = weapons(entity)
+      if hex == m or hex == r then return "ok" end
+    end
+    return "no:noitem"
+  end
   local name = "#" .. hex
   if op == "equip" then
     if item.cat ~= "WEAPONS" and not item.cat:match("^WEAPONS") then return "no:cannotuse" end

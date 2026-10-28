@@ -4256,9 +4256,8 @@ def lf_eqtrace():
 
 
 
-EQ_LOW_HP = ("local function low(e) for _, f in ipairs({{Health, 'SetHealth'}, {Health, 'Set'}, {Health, 'SetCurrentHealth'}, "
-             "{Stats, 'SetHealth'}}) do if f[1] and f[1][f[2]] then local ok = pcall(f[1][f[2]], e, 1); if ok then return f[2] end end end "
-             "return 'none' end; ")
+EQ_LOW_HP = ("local function low(e) local ok = pcall(Combat.SetDamageMultiplier, e, 100); "
+             "return ok and 'Combat.SetDamageMultiplier 100' or 'none' end; ")
 
 
 def eq_kill_one_hit(a, b, tag, label, attacker, key, hold):
@@ -4269,7 +4268,7 @@ def eq_kill_one_hit(a, b, tag, label, attacker, key, hold):
     pos = lua_lines(a, (EQ_LOW_HP + f"local e = {who}; local p = e:GetPosition(); local f = Physics.GetFacingVector(e); "
                         "local s = CVector3(p:GetX() + f:GetX() * 1.6, p:GetY() + f:GetY() * 1.6, p:GetZ()); "
                         f"local ok, bd = pcall(Debug.CreateEntityAtPosition, 'CreatureVillagerBandit', 'lfb_{label}', s); "
-                        "LFB = ok and bd or nil; local how = LFB and low(LFB) or 'nil'; "
+                        "LFB = ok and bd or nil; local how = LFB and low(LFB) or 'nil'; low(e); "
                         "print('LFK1 ' .. tostring(ok) .. ' health via ' .. how)"), "LFK1", 10)
     time.sleep(2.5)
     a.shot(f"{tag}_{label}_before_hit_host.png")
@@ -4283,6 +4282,7 @@ def eq_kill_one_hit(a, b, tag, label, attacker, key, hold):
         if alive and alive[-1] == "false":
             break
     time.sleep(8)  # orbs
+    lua_lines(a, f"pcall(Combat.SetDamageMultiplier, {who}, 1); print('LFDM ok')", "LFDM", 6)
     after = (eq_xp(a, "p2"), eq_xp(a, "hero"))
     note("INFO", f"{tag}: kill by {label} ({key}): {pos}; attacks {k + 1}; bandit alive {alive}; "
                  f"XP player 2 {before[0]} -> {after[0]}; host hero {before[1]} -> {after[1]}")

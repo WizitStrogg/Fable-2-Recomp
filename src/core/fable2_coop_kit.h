@@ -623,6 +623,12 @@ inline void mirror_worn(PPCContext& ctx, uint8_t* base, const KitState& want) {
     g_worn_applied.clear();
   }
   const uint32_t appearance = fable2::coophero::find_appearance(base, fable2::coopcam::g_p2_entity.load());
+  static uint32_t s_logged_rev = 0;
+  if (want.rev != s_logged_rev) {  // 001eq proof: why a worn change did not reach the copy
+    s_logged_rev = want.rev;
+    REXSYS_INFO("[coopkit] worn mirror rev {}: appearance 0x{:08X}, host wears {}, applied {}", want.rev, appearance,
+                want.worn.size(), g_worn_applied.size());
+  }
   if (!appearance) return;
   int worn = 0, off = 0;
   for (const auto& rec : g_worn_applied) {
