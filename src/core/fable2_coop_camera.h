@@ -166,7 +166,11 @@ inline uint32_t find_view(const uint8_t* base, uint32_t component, uint32_t came
 // Shared with the input filter (input thread).
 inline std::atomic<bool> g_active{false};       // our camera is driving the view
 inline std::atomic<float> g_look_x{0};          // right stick / mouse look, -1..1
+inline std::atomic<float> g_look_y{0};          // right stick up/down, -1..1 (pitch)
 inline std::atomic<int64_t> g_look_ms{0};       // last time look input was non-zero
+inline std::atomic<bool> g_recenter{false};     // R3 pressed: camera back behind the hero
+inline bool g_r3_down = false;                  // input thread only
+constexpr uint16_t kButtonR3 = 0x0080;          // XINPUT_GAMEPAD_RIGHT_THUMB
 
 inline int64_t clock_ms() {
   return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -187,11 +191,19 @@ inline void input_filter(uint32_t /*user_index*/, rex::input::X_INPUT_STATE* sta
     return std::fabs(f) < 0.03f ? 0.0f : f;  // mouse look gives small values
   };
   const float look = norm(static_cast<int16_t>(state->gamepad.thumb_rx));
+  const float look_y = norm(static_cast<int16_t>(state->gamepad.thumb_ry));
   g_look_x.store(look);
-  if (look != 0) g_look_ms.store(clock_ms());
+  g_look_y.store(look_y);
+  if (look != 0 || look_y != 0) g_look_ms.store(clock_ms());
+  const bool r3 = (static_cast<uint16_t>(state->gamepad.buttons) & kButtonR3) != 0;
+  if (r3 && !g_r3_down) g_recenter.store(true);
+  g_r3_down = r3;
   if (!g_active.load()) return;
+  // Our camera owns the right stick and R3 (the game's own camera would act
+  // on the host's hero): yaw from X, pitch from Y, R3 recenters.
   state->gamepad.thumb_rx.set(0);
   state->gamepad.thumb_ry.set(0);
+  state->gamepad.buttons.set(static_cast<uint16_t>(state->gamepad.buttons) & ~kButtonR3);
 }
 
 // Follow camera state (render thread only).
@@ -202,14 +214,29 @@ inline Vec3 g_written_pos;       // what we last wrote (to tell network updates 
 inline Vec3 g_host_pos, g_host_fwd;  // last camera received from the host
 inline int64_t g_next_find_ms = 0;
 inline bool g_logged_active = false;
+// Shared with the game thread's view hooks (below the namespace): our last
+// camera, and the host's camera as the view setter last received it.
+inline std::mutex g_pose_mu;
+inline Vec3 g_our_pos, g_our_up, g_our_fwd;
+inline bool g_have_ours = false;
+inline Vec3 g_net_host_pos, g_net_host_fwd;
+inline bool g_net_host_new = false;
 
 constexpr float kDistance = 5.5f, kHeight = 2.3f, kLookHeight = 1.5f, kTurnRate = 0.04f;
 constexpr float kOrbitSpeed = 4.0f;          // radians per second at full look input
+// Pitch (right stick up/down): the camera's height above its normal one, in
+// metres; the distance shrinks as it rises so it looks down over the hero.
+constexpr float kPitchSpeed = 3.0f, kPitchMin = -1.6f, kPitchMax = 3.5f;
+inline float g_pitch = 0;
 constexpr float kDefaultFov = 1.309f;        // the game's normal field of view
 inline int64_t g_last_tick_ms = 0;
 inline Tracker g_follow;                // the creature, extrapolated between network steps (camera_math)
 inline int64_t g_handback_ms = 0;       // when the view went to the host's special camera
 inline int64_t g_trace_until_ms = 0;
+// Testing (coop_cam_watch, src/diagnostics/fable2_cam_watch.h): called after
+// each write with the view's and its target block's host addresses.
+inline void (*g_after_write)(uintptr_t view, uintptr_t target, int64_t now_ms) = nullptr;
+inline void (*g_before_write)() = nullptr;
 
 inline void follow_tick(bool enabled) {
   uint8_t* base = fable2::f5lua::g_base;
@@ -250,6 +277,16 @@ inline void follow_tick(bool enabled) {
     g_host_pos = seen;
     g_host_fwd = read_vec(base, view + kViewTarget + 0x20);
   }
+  {
+    // The host's camera as the view setter received it (game thread, below):
+    // the blocks themselves hold ours again by the time we read them.
+    std::lock_guard<std::mutex> l(g_pose_mu);
+    if (g_net_host_new) {
+      g_host_pos = g_net_host_pos;
+      g_host_fwd = g_net_host_fwd;
+      g_net_host_new = false;
+    }
+  }
   if (!g_have_yaw) {
     g_yaw = std::atan2(-g_host_fwd.y, -g_host_fwd.x);  // start where the host camera is
     g_last_creature = creature;
@@ -280,8 +317,9 @@ inline void follow_tick(bool enabled) {
   }
   const float dt = g_last_tick_ms ? std::fmin(0.1f, (now - g_last_tick_ms) / 1000.0f) : 0.0f;
   g_last_tick_ms = now;
-  // Orbit with the mouse / right stick.
+  // Orbit with the mouse / right stick; pitch with the stick's Y.
   g_yaw -= g_look_x.load() * kOrbitSpeed * dt;
+  g_pitch = std::fmin(kPitchMax, std::fmax(kPitchMin, g_pitch - g_look_y.load() * kPitchSpeed * dt));
   // The creature's position arrives in network steps: follow it damped, by
   // elapsed time, so the steps do not shake the camera.
   g_follow.Step(creature.x, creature.y, creature.z, dt);
@@ -299,7 +337,16 @@ inline void follow_tick(bool enabled) {
     g_yaw = ChaseYawLimited(g_yaw, std::atan2(-g_follow.vy, -g_follow.vx), dt);
   }
   (void)moved;
-  const Vec3 pos = target + Vec3{std::cos(g_yaw) * kDistance, std::sin(g_yaw) * kDistance, kHeight};
+  // R3: back to the normal height, behind the way the hero walks (or faces
+  // the host's camera's way when standing).
+  if (g_recenter.exchange(false)) {
+    g_pitch = 0;
+    g_yaw = g_follow.Speed() > kChaseMinSpeed ? std::atan2(-g_follow.vy, -g_follow.vx)
+                                              : std::atan2(-g_host_fwd.y, -g_host_fwd.x);
+    REXSYS_INFO("[coopcam] R3: camera recentered");
+  }
+  const float dist = kDistance * (1.0f - 0.12f * std::fmax(0.0f, g_pitch));
+  const Vec3 pos = target + Vec3{std::cos(g_yaw) * dist, std::sin(g_yaw) * dist, kHeight + g_pitch};
   const Vec3 fwd = normalized(target + Vec3{0, 0, kLookHeight} - pos);
   // Testing (coop_cam_trace): one line per frame for 30 s.
   if (REXCVAR_GET(coop_cam_trace)) {
@@ -315,6 +362,7 @@ inline void follow_tick(bool enabled) {
     }
   }
   const Vec3 up = normalized(Vec3{0, 0, 1} - fwd * fwd.z);
+  if (g_before_write) g_before_write();  // testing: the watched page writable for our own write
   for (uint32_t block : {kViewCurrent, kViewTarget}) {
     if (!ta::wr2(base, view + block, 0x30)) return;
     write_vec(base, view + block, pos);
@@ -322,7 +370,18 @@ inline void follow_tick(bool enabled) {
     write_vec(base, view + block + 0x20, fwd);
   }
   g_written_pos = pos;
+  {
+    std::lock_guard<std::mutex> l(g_pose_mu);
+    g_our_pos = pos;
+    g_our_up = up;
+    g_our_fwd = fwd;
+    g_have_ours = true;
+  }
   g_active.store(true);
+  if (g_after_write) {
+    g_after_write(static_cast<uintptr_t>(ta::host_addr(base, view)),
+                  static_cast<uintptr_t>(ta::host_addr(base, view + kViewTarget)), now);
+  }
   if (!g_logged_active) {
     g_logged_active = true;
     REXSYS_INFO("[coopcam] joiner follow camera active: creature {:.2f} {:.2f} {:.2f}", creature.x,
@@ -330,7 +389,56 @@ inline void follow_tick(bool enabled) {
   }
 }
 
+// Our camera into both view blocks again, on the thread that just wrote them.
+inline void rewrite_view(uint8_t* base, uint32_t view) {
+  if (!g_active.load() || !view || view != g_view.load()) return;
+  Vec3 pos, up, fwd;
+  {
+    std::lock_guard<std::mutex> l(g_pose_mu);
+    if (!g_have_ours) return;
+    pos = g_our_pos;
+    up = g_our_up;
+    fwd = g_our_fwd;
+  }
+  for (uint32_t block : {kViewCurrent, kViewTarget}) {
+    if (!ta::wr2(base, view + block, 0x30)) return;
+    write_vec(base, view + block, pos);
+    write_vec(base, view + block + 0x10, up);
+    write_vec(base, view + block + 0x20, fwd);
+  }
+}
+
 }  // namespace fable2::coopcam
+
+// The joiner's view is written on the game thread by the view setter
+// sub_82423800(r3 = view, r4 = new view: position, up +0x10, forward +0x20,
+// FOV +0x30), which the host's camera arriving over the network goes through,
+// and the per-frame view update sub_824244F0(r3 = view) (coop_cam_watch, rig
+// 2026-10-27). The follow camera writes from the render thread, so a host
+// update landing between its writes showed the host's camera for a frame
+// while the host moved (the jitter). While our camera is active both are
+// followed at once by ours on the same thread; the setter's input is kept as
+// the host's camera. The FOV is left as the host's (cutscene hand-back).
+extern "C" void __imp__sub_82423800(PPCContext& ctx, uint8_t* base);
+extern "C" void sub_82423800(PPCContext& ctx, uint8_t* base) {
+  namespace cc = fable2::coopcam;
+  const uint32_t view = ctx.r3.u32, src = ctx.r4.u32;
+  const bool ours = cc::g_active.load() && view && view == cc::g_view.load();
+  if (ours && cc::ta::rdable2(base, src, 0x30)) {
+    std::lock_guard<std::mutex> l(cc::g_pose_mu);
+    cc::g_net_host_pos = cc::read_vec(base, src);
+    cc::g_net_host_fwd = cc::read_vec(base, src + 0x20);
+    cc::g_net_host_new = true;
+  }
+  __imp__sub_82423800(ctx, base);
+  if (ours) cc::rewrite_view(base, view);
+}
+extern "C" void __imp__sub_824244F0(PPCContext& ctx, uint8_t* base);
+extern "C" void sub_824244F0(PPCContext& ctx, uint8_t* base) {
+  const uint32_t view = ctx.r3.u32;
+  __imp__sub_824244F0(ctx, base);
+  fable2::coopcam::rewrite_view(base, view);
+}
 
 // CECPlayer setup (one per player creature, also on a joiner): r3 = player
 // component, r4 = creature entity, r5 = player slot (1 = player 2). Camera

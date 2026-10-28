@@ -679,6 +679,10 @@ def open_coop_entry(g, tag):
         if sim >= 0.6:
             break
         if sim < 0:
+            # Covered (the Windows Security prompt sits over the menu while the
+            # game window still counts as in front): walk blind, checked by the log.
+            note("INFO", f"{tag}: {g.who}: no highlighted row visible ({p}); blind walk")
+            return open_coop_entry_blind(g, tag)
             note("FAIL", f"{tag}: {g.who}: no highlighted menu row on screen ({p})")
             return False
         # Down first (New Game/Continue are above Co-op); after 4, back up.
@@ -699,6 +703,32 @@ def open_coop_entry(g, tag):
     time.sleep(2)
     g.shot(f"{tag}_{g.who}_hub.png")
     return ok
+
+
+def open_coop_entry_blind(g, tag):
+    """Another window covers the menu (the Windows Security prompt, 2026-10-27):
+    Down to Co-op without looking (1 row with no saves, 2 with), A, and the log
+    says whether Co-op was chosen; otherwise back to New Game and try the other."""
+    nl = len(g.lines())
+    has_saves = any("mainsave.bin" in f for _, _, f in os.walk(os.path.join(g.dir, "saves")))
+    for downs in ((2, 1) if has_saves else (1, 2)):
+        n = g.count(r"\[coop\] main menu: Co-op chosen")
+        for _ in range(downs):
+            g.press("Down")
+            time.sleep(0.8)
+        g.press("E")
+        if g.wait(f"{tag}: Co-op entry opens the hub (blind walk, {downs} down)", r"\[coop\] main menu: Co-op chosen", n, 6):
+            note("INFO", f"{tag}: {g.who}: menu events {menu_events(g, nl)}")
+            time.sleep(2)
+            return True
+        for _ in range(2):
+            g.press("B")
+            time.sleep(1.2)
+        for _ in range(4):
+            g.press("Up")
+            time.sleep(0.5)
+    note("FAIL", f"{tag}: {g.who}: blind walk found no Co-op; menu events {menu_events(g, nl)}")
+    return False
 
 
 def host_new_campaign(a, tag):
@@ -1633,7 +1663,8 @@ def run_boots():
               ("player 2 spawned", r"player 2 spawned|campaign player 2 queued")]
     for what, pat in checks:
         if pat is None:
-            n = len([l for l in a.lines() if "[state]" in l and "boot=0ms" not in l and "test:" not in l])
+            n = len([l for l in a.lines() if "[state]" in l and "boot=0ms" not in l and "test:" not in l
+                     and "front-end scans" not in l])
             note("PASS" if n == 0 else "FAIL", f"boots_blind: host: {what} ({n} state change(s))")
         else:
             n = a.count(pat)
@@ -1802,16 +1833,33 @@ def run_worldgold():
         relay.kill()
 
 
-def wg_place_before_p2(a, table, idx, dist):
-    """Host Lua: move object table[idx] dist m in front of player 2 (the host
-    owns world objects; player 2's position is the partner's own)."""
+def wg_partner_pose(b):
+    """The partner's own hero position and facing, from the partner's Lua (its
+    copy owns them). Returns (x, y, z, fx, fy) or None."""
+    out = lua_lines(b, ("local ok, e = pcall(function() local me = GetPlayerHenchman(); local p = me:GetPosition(); "
+                        "local f = Physics.GetFacingVector(me); print(string.format('WGPOSE %.3f %.3f %.3f %.3f %.3f', "
+                        "p:GetX(), p:GetY(), p:GetZ(), f:GetX(), f:GetY())) end); "
+                        "if not ok then print('WGPOSE error ' .. tostring(e)) end"), "WGPOSE", 10)
+    if not out or "error" in out[-1]:
+        note("INFO", f"worldgold: partner pose {out}")
+        return None
+    return tuple(float(x) for x in out[-1].split()[:5])
+
+
+def wg_place_before_p2(a, b, table, idx, dist):
+    """Host Lua (the host owns world objects): move object table[idx] dist m in
+    front of the partner's hero, by the partner's own position and facing."""
+    pose = wg_partner_pose(b)
+    if not pose:
+        return False
+    x, y, z, fx, fy = pose
+    n = math.hypot(fx, fy) or 1.0
+    px, py = x + fx / n * dist, y + fy / n * dist
     out = lua_lines(a, (
-        f"local ok, e = pcall(function() local h = GetPlayerHenchman(); local o = {table}[{idx}]; "
-        f"local p = h:GetPosition(); local f = Physics.GetFacingVector(h); "
-        f"local st = CVector3(p:GetX() + f:GetX() * {dist}, p:GetY() + f:GetY() * {dist}, p:GetZ()); "
-        f"Physics.TeleportToPosition(o, st); print(string.format('WGPLACE %s %d %.1f m in front of player 2', "
-        f"'{table}', {idx}, {dist})) end); if not ok then print('WGPLACE error ' .. tostring(e)) end"), "WGPLACE", 10)
-    note("INFO", f"worldgold: {out}")
+        f"local ok, e = pcall(function() Physics.TeleportToPosition({table}[{idx}], CVector3({px:.3f}, {py:.3f}, {z:.3f})); "
+        f"print(string.format('WGPLACE %s %d at %.1f %.1f, {dist} m in front of the partner', '{table}', {idx}, "
+        f"{px:.3f}, {py:.3f})) end); if not ok then print('WGPLACE error ' .. tostring(e)) end"), "WGPLACE", 10)
+    note("INFO", f"worldgold: partner at ({x:.1f}, {y:.1f}) facing ({fx:.2f}, {fy:.2f}); {out}")
     return bool(out) and "error" not in out[-1]
 
 
@@ -1837,14 +1885,21 @@ def wg_partner_goto(b, xyz, kind, side):
     return bool(out) and out[-1].startswith("ok")
 
 
-def wg_partner_pickup(a, b, idx, xyz, tag, start):
-    for side, dist in enumerate((0.9, 0.6, 1.2, 0.4)):
-        if not wg_place_before_p2(a, "WGG", idx, dist):
+def wg_partner_pickup(a, b, idx, xyz, tag, start, gold=5):
+    for side, dist in enumerate((1.0, 0.7, 1.3, 0.5)):
+        if not wg_place_before_p2(a, b, "WGG", idx, dist):
             continue
         time.sleep(1.5)
+        b.shot(f"{tag}_partner_before_A_{side}.png")
         before = read_purses(a, b, f"{tag}_before_A_side{side}")
         b.press("E")
-        time.sleep(4)
+        time.sleep(3)
+        if lua_lines(a, f"print('WGPICK ' .. tostring(WGG[{idx}]:IsAlive()))", "WGPICK", 8)[-1:] == ["true"]:
+            # Not picked up from there: walk onto it (a short push forward), A again.
+            b.send("stick L 0 1 400")
+            time.sleep(0.8)
+            b.press("E")
+            time.sleep(3)
         wg_dismiss(a, b, b, tag)
         gone = lua_lines(a, f"print('WGPICK ' .. tostring(WGG[{idx}]:IsAlive()))", "WGPICK", 8)
         if gone and "false" in gone[-1]:
@@ -1852,10 +1907,13 @@ def wg_partner_pickup(a, b, idx, xyz, tag, start):
             note("PASS", f"{tag}: the partner picked up gold object {idx} with its own A (side {side})")
             note("INFO", f"{tag}: purses right before the A {before}, right after {after}")
             if before and after:
-                same = after[0] - before[0] == after[1] - before[1] == after[2] - before[2] > 0
+                # Judged by the shared total: the host's purse and the partner's
+                # mirror each move once, by the bag's gold.
+                same = after[0] - before[0] == after[1] - before[1] == after[2] - before[2] == gold
                 note("PASS" if same else "FAIL",
-                     f"{tag}: the same gain on all three purses ({before} -> {after})")
-                check_purse(a, b, tag, after[0])
+                     f"{tag}: host purse, host's player 2 and the partner's mirror each +{gold} once "
+                     f"({before} -> {after})")
+                check_purse(a, b, tag, before[0] + gold)
                 return after[0]
             return start
     note("FAIL", f"{tag}: the partner could not pick up gold object {idx}")
@@ -1864,7 +1922,7 @@ def wg_partner_pickup(a, b, idx, xyz, tag, start):
 
 def wg_partner_chest(a, b, idx, xyz, tag, start):
     for side, dist in enumerate((1.3, 1.0, 1.6, 0.8)):
-        if not wg_place_before_p2(a, "WG", idx, dist):
+        if not wg_place_before_p2(a, b, "WG", idx, dist):
             continue
         time.sleep(1.5)
         before = read_purses(a, b, f"{tag}_before_A_side{side}")
@@ -1908,35 +1966,31 @@ def wg_quest_reward(a, b, total):
     return total + paid[-1]
 
 
+def wg_partner_self_goto(b, xyz, side, r=1.2):
+    """The partner's own Lua puts its own hero r m from a world spot and turns it
+    to face the spot (its copy owns its position; objects the host spawns or
+    moves are not in the partner's world: gold2 2026-10-26)."""
+    x, y, z = xyz
+    ox, oy = [(r, 0), (-r, 0), (0, r), (0, -r)][side]
+    out = lua_lines(b, (
+        f"local ok, e = pcall(function() local me = GetPlayerHenchman(); "
+        f"local st = CVector3({x + ox:.3f}, {y + oy:.3f}, {z:.3f}); Physics.TeleportToPosition(me, st); "
+        f"local f = CVector3({x:.3f}, {y:.3f}, {z:.3f}) - st; f:Normalise(); Physics.SetFacingVector(me, f); "
+        f"print('WGSELF ok side {side}') end); if not ok then print('WGSELF error ' .. tostring(e)) end"), "WGSELF", 10)
+    return bool(out) and out[-1].startswith("ok")
+
+
 def worldgold_events(a, b, host_parts=True):
-    """The world-gold events in a joined campaign: gold picked up with A by the
-    host and by the partner, a chest opened by each (the partner's holds a gold
-    bag), a quest reward. host_parts=False: the partner's and the quest's only
-    (batch1 --phases gold2). Returns the expected purse total, or None."""
+    """World gold in a joined campaign. host_parts: the host picks up a gold bag
+    and opens a chest with A. Always: the partner opens a real level chest
+    stocked with a gold bag, standing there by its own teleport, with its own A.
+    The partner looks on while the host opens its chest (does it show open on
+    the partner's copy?). Pass: the host's purse, the host's player 2 and the
+    partner's mirror each change once, by the same amount. Returns the total."""
     v = read_purses(a, b, "worldgold_purse0")
     if not v:
         return None
     total = v[0]
-    golds = lua_lines(a, WG_FIND_GOLD, "WGGOLD", 30)
-    if len([gl for gl in golds if gl.split()[0].isdigit()]) < 2:
-        # Not enough gold lying here: the game's own object creation with the
-        # gold-bag template next to each player (logged "spawned").
-        golds += lua_lines(a, WG_SPAWN_GOLD, "WGGOLD", 20)
-    for gl in golds:
-        note("INFO", f"worldgold: gold object {gl}")
-    piles = []
-    for gl in golds:
-        m = re.match(r"(\d+) x=(-?[\d.]+) y=(-?[\d.]+) z=(-?[\d.]+) d=([\d.]+) gold=(-?\d+)", gl)
-        if m:
-            piles.append((float(m.group(5)), int(m.group(1)), int(m.group(6)),
-                          (float(m.group(2)), float(m.group(3)), float(m.group(4)))))
-    piles.sort()
-    if len(piles) < 2:
-        note("FAIL", f"worldgold: {len(piles)} gold object(s) to pick up")
-    else:
-        if host_parts:
-            total = wg_pickup(a, b, a, piles[0][1], "hero", piles[0][2], "worldgold_host_pickup", total)
-        total = wg_partner_pickup(a, b, piles[1][1], piles[1][3], "worldgold_partner_pickup", total)
     chests = lua_lines(a, WG_FIND, "WGCHEST", 20)
     cand = []
     for c in chests:
@@ -1948,18 +2002,67 @@ def worldgold_events(a, b, host_parts=True):
     cand.sort()  # nearest first
     if len(cand) < 2:
         note("FAIL", f"worldgold: fewer than 2 closed, unlocked chests here ({len(cand)})")
-    else:
-        if host_parts:
-            # Chests here hold items, no gold component: the host's open checks
-            # the open with A and that the purses do not move.
-            ok, total = wg_open_chest(a, b, a, cand[0][1], "hero", "worldgold_host_chest", total)
-        idx = cand[1][1]
-        stocked = lua_lines(a, (f"local ok, e = pcall(Inventory.AddItemOfType, WG[{idx}], 'ObjectInventoryGoldBag'); "
-                                f"print('WGSTOCK ' .. tostring(ok) .. ' items=' .. "
-                                f"tostring(Inventory.GetNumberOfItems(WG[{idx}])))"), "WGSTOCK", 10)
-        note("INFO", f"worldgold: chest {idx} stocked with a gold bag (spawned): {stocked}")
-        total = wg_partner_chest(a, b, idx, cand[1][2], "worldgold_partner_chest", total)
-    return wg_quest_reward(a, b, total)
+        return total
+    # The host opens chest 1 while the partner stands by it and looks.
+    c1 = cand[0]
+    if wg_partner_self_goto(b, c1[2], 0, 2.5):
+        time.sleep(2)
+        b.shot("worldgold_observe_host_chest_before_partner.png")
+    ok, total = wg_open_chest(a, b, a, c1[1], "hero", "worldgold_host_chest", total)
+    time.sleep(2)
+    b.shot("worldgold_observe_host_chest_after_partner.png")
+    note("INFO", "worldgold: observation shots of the host's chest on the partner's copy: "
+                 "worldgold_observe_host_chest_before/after_partner.png")
+    if host_parts:
+        golds = lua_lines(a, WG_SPAWN_GOLD, "WGGOLD", 20)
+        piles = [re.match(r"(\d+) .*gold=(-?\d+)", gl) for gl in golds]
+        piles = [(int(m.group(1)), int(m.group(2))) for m in piles if m]
+        if piles:
+            b.shot("worldgold_observe_host_bag_before_partner.png")
+            total = wg_pickup(a, b, a, piles[0][0], "hero", piles[0][1], "worldgold_host_pickup", total)
+            b.shot("worldgold_observe_host_bag_after_partner.png")
+    # The partner opens chest 2 (stocked with a gold bag by the host) itself.
+    c2 = cand[1]
+    stocked = lua_lines(a, (f"local ok, e = pcall(Inventory.AddItemOfType, WG[{c2[1]}], 'ObjectInventoryGoldBag'); "
+                            f"print('WGSTOCK ' .. tostring(ok) .. ' items=' .. "
+                            f"tostring(Inventory.GetNumberOfItems(WG[{c2[1]}])))"), "WGSTOCK", 10)
+    note("INFO", f"worldgold: chest {c2[1]} at {c2[2]} stocked with a gold bag: {stocked}")
+    for side in range(4):
+        if not wg_partner_self_goto(b, c2[2], side):
+            continue
+        time.sleep(1.5)
+        b.shot(f"worldgold_partner_chest_at_side{side}.png")
+        before = read_purses(a, b, f"worldgold_partner_chest_before_A_side{side}")
+        st = ""
+        # SetFacingVector does not turn a player-controlled hero: a short tap
+        # of the stick in each of 8 directions turns it, then A.
+        for k in range(9):
+            if k:
+                ang = (k - 1) * math.pi / 4
+                b.send(f"stick L {math.cos(ang):.3f} {math.sin(ang):.3f} 120")
+                time.sleep(0.5)
+            b.send("press A 200")
+            time.sleep(3)
+            st = wg_chest_state(a, c2[1])
+            if "open=true" in st:
+                note("INFO", f"worldgold_partner_chest: opened after {k} stick tap(s)")
+                break
+        if "open=true" not in st:
+            continue
+        note("PASS", f"worldgold_partner_chest: the partner opened a real chest with its own A (side {side})")
+        b.shot("worldgold_partner_chest_open.png")
+        wg_dismiss(a, b, b, "worldgold_partner_chest")
+        after = read_purses(a, b, "worldgold_partner_chest_after_A")
+        if before and after:
+            d = [after[i] - before[i] for i in range(3)]
+            note("PASS" if d[0] == d[1] == d[2] else "FAIL",
+                 f"worldgold_partner_chest: host purse, host's player 2 and the partner's mirror each changed by "
+                 f"{d} ({before} -> {after}; the gold bag's value, once)")
+            check_purse(a, b, "worldgold_partner_chest", after[0])
+            total = after[0]
+        return total
+    note("FAIL", "worldgold_partner_chest: the partner could not open the chest from any side")
+    return total
 
 
 def host_has_partner(a):
@@ -2104,8 +2207,14 @@ def run_batch1():
             if not partner_continue_join(a, b, tag):
                 return
             ref = check_kept(a, b, tag, ref, total)
-        # 3. The host killed right after a save, three times (T032).
-        for k in (1, 2, 3):
+        # 3. The host killed right after a save, three times (T032). The
+        # reference purse is read again first: player 2 can pick up gold on its
+        # own meanwhile (001pl2 run: +1, shared once on all three).
+        if "t032" in run:
+            v = read_purses(a, b, "t032_purse_ref")
+            if v and v[0] == v[1] == v[2]:
+                total = v[0]
+        for k in ((1, 2, 3) if "t032" in run else ()):
             tag = f"t032_{k}"
             out = lua_lines(a, "print('B1SAVE ' .. tostring(pcall(AutoSaveGame, true, true)))", "B1SAVE", 20)
             note("INFO", f"{tag}: save {out}")
@@ -2234,6 +2343,1077 @@ def run_savestress():
             return
         if total is not None:
             check_kept(a, b, "ss_continue", ref, total)
+    finally:
+        for g in (a, b):
+            g.stop()
+        relay.kill()
+
+
+def probe_cpu(g, tag, secs=20):
+    """CPU share of the state probe's thread over secs (its OS thread id is the
+    [tNNNN] prefix of its [state] lines; the probe is an unnamed std::thread)."""
+    ids = re.findall(r"\[t(\d+)\] \[state\]", "\n".join(g.lines()))
+    if not ids or not g.proc:
+        note("INFO", f"{tag}: probe thread not found")
+        return None
+    tid = int(ids[-1])
+
+    def cpu():
+        for t in g.proc.threads():
+            if t.id == tid:
+                return t.user_time + t.system_time
+        return None
+    c0, t0 = cpu(), time.time()
+    time.sleep(secs)
+    c1, t1 = cpu(), time.time()
+    if c0 is None or c1 is None:
+        note("INFO", f"{tag}: probe thread {tid} not in the process")
+        return None
+    share = (c1 - c0) / (t1 - t0)
+    note("INFO", f"{tag}: state probe thread t{tid} used {share:.1%} of a core over {secs} s")
+    return share
+
+
+def run_solowalk():
+    """Solo play with the light probe (coop/001-probe-light): New Game into the
+    world, the probe's front-end scans pause while the game's Lua runs; back at
+    the front end (the game's own QuitToFrontEnd) they resume, the menu is
+    detected again and the Co-op entry is built. No crash."""
+    setup_tomls()
+    a = Game("mod-a", "host")
+    a.start({"FABLE2_TEST_INPUT": "1"})
+    try:
+        a.past_title()
+        time.sleep(3)
+        a.shot("solowalk_menu.png")
+        n = a.count(r"front-end scans paused")
+        a.press("E")  # New Game: the menu's first row, highlighted at the title pass
+        for k in range(8):  # the hero cards come up ~20 s later: a 200 ms A picks the first
+            time.sleep(10)
+            if a.count(r"front-end scans paused") > n:
+                break
+            if k == 3:
+                a.send("press Left 200")  # no card highlighted yet: pick one
+                time.sleep(1)
+            a.send("press A 200")
+        ok = a.wait("solowalk: front-end scans paused in the world", r"front-end scans paused", n, 180)
+        a.shot("solowalk_world.png")
+        for _ in range(4):  # walk a little
+            a.send("stick L 0 1 3000")
+            time.sleep(4)
+        a.shot("solowalk_walked.png")
+        world = probe_cpu(a, "solowalk_world")
+        nr = a.count(r"front-end scans resumed")
+        nm = a.count(r"main menu: Co-op entry added")
+        a.send("lua print('[coop] QuitToFrontEnd: ' .. tostring(pcall(Debug.QuitToFrontEnd)))")
+        ok &= a.wait("solowalk: front-end scans resumed at the front end", r"front-end scans resumed", nr, 120)
+        time.sleep(5)
+        a.past_title()
+        ok &= a.wait("solowalk: main menu built with the Co-op entry", r"main menu: Co-op entry added", nm, 60)
+        a.shot("solowalk_back_at_menu.png")
+        menu = probe_cpu(a, "solowalk_menu")
+        if world is not None:
+            note("PASS" if world < 0.05 else "FAIL",
+                 f"solowalk: the probe thread in the world {world:.1%} of a core (001fps: ~17.5%), "
+                 f"at the menu {menu if menu is None else f'{menu:.1%}'}")
+        crashes = a.count(r"Unhandled guest")
+        note("PASS" if ok and crashes == 0 else "FAIL", f"solowalk: paused/resumed and menu again, {crashes} crash(es)")
+    finally:
+        a.stop()
+
+
+def lf_empty_boot():
+    """An empty-saves cold boot (mod-c with only its profile): the menu builds
+    with the Co-op entry right after New Game and the game keeps running."""
+    import shutil
+    saves = os.path.join(ROOT, "mod-c", "saves")
+    bak = saves + ".livefix-bak"
+    if os.path.exists(bak):
+        raise SystemExit(f"{bak} exists: restore it first")
+    os.rename(saves, bak)
+    try:
+        os.makedirs(saves)
+        for keep in ("4D5307F1", "achievements"):
+            if os.path.isdir(os.path.join(bak, keep)):
+                shutil.copytree(os.path.join(bak, keep), os.path.join(saves, keep))
+        c = Game("mod-c", "empty")
+        c.start({"FABLE2_TEST_INPUT": "1"})
+        try:
+            n = c.count(r"main menu: Co-op entry added")
+            c.past_title()
+            ok = c.wait("empty saves: the menu builds with the Co-op entry", r"main menu: Co-op entry added", n, 90)
+            time.sleep(15)
+            crashed = c.count(r"Unhandled guest access violation") > 0 or not c.proc.is_running()
+            note("FAIL" if crashed or not ok else "PASS", f"empty saves: no crash 15 s after the menu (alive={c.proc.is_running()})")
+            c.shot("lf_empty_menu.png")
+            if ok and not crashed:
+                ok = open_coop_entry(c, "lf_empty")
+                note("PASS" if ok else "FAIL", "empty saves: the Co-op entry opens the hub")
+        finally:
+            c.stop()
+    finally:
+        time.sleep(3)
+        shutil.rmtree(saves, ignore_errors=True)
+        os.rename(bak, saves)
+        note("INFO", "empty saves: mod-c's saves restored")
+
+
+def lf_session(female, gold_only=False):
+    """Host (mod-a) + partner (mod-b) in a new campaign, the partner's seat male
+    or female. Checks player 2's body on both PCs, then (male run only) the
+    henchman gold share, camera watch / pitch / R3, a 6 min idle wage check,
+    the partner's purse in its UI and both pause menus."""
+    tag = "lf_f" if female else "lf_m"
+    setup_tomls()
+    with open(os.path.join(ROOT, "mod-b", "fable_2.toml"), "a", encoding="utf-8", newline="\n") as f:
+        f.write("coop_cam_watch = true\n")
+    relay_log = open(os.path.join(OUT, f"relay_{tag}.log"), "w")
+    relay = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                           "coop_relay.py")], stdout=relay_log, stderr=relay_log)
+    a, b = Game("mod-a", "host"), Game("mod-b", "partner")
+    a.start({"FABLE2_TEST_INPUT": "1"})
+    b.start({"FABLE2_TEST_INPUT": "1"})
+    try:
+        for g in (a, b):
+            g.n_menu = g.count(r"main menu: Co-op entry added")
+            g.past_title()
+        menu_then_coop(a, tag, a.n_menu)
+        host_new_campaign(a, tag)
+        menu_then_coop(b, tag, b.n_menu)
+        wait_row(b, "Join TestA", f"{tag}: the host's lobby is listed")
+        partner_joins(b, "Join TestA", tag)
+        wait_row(a, "Start", f"{tag}: host lobby shows the partner")
+        if female:
+            b.select("Your hero")
+            b.press("Right")
+            time.sleep(2)
+            note("INFO", f"{tag}: partner rows after the gender change {[r[0] for r in b.rows()]}")
+        time.sleep(2)
+        hv = [l for l in a.lines() if "[lobby] view:" in l][-1:]
+        note("INFO", f"{tag}: host lobby view {hv[0][-260:] if hv else ''}")
+        if not both_ready_and_start(a, b, tag) or not join_phase(a, b, tag):
+            return
+        want = "CreatureHeroFemale" if female else "CreatureHero "
+        for g in (a, b):
+            body = [l for l in g.lines() if "player 2 body:" in l][-1:]
+            ok = bool(body) and want in body[0] + " " and "from the lobby" in body[0]
+            note("PASS" if ok else "FAIL", f"{tag}: {g.who}: player 2 body {body[0][60:] if body else '(none)'}")
+        start = [l for l in a.lines() if "host start:" in l][-1:]
+        note("INFO", f"{tag}: {start[0][60:] if start else ''}")
+        time.sleep(1)
+        b.shot(f"{tag}_partner_right_after_spawn.png")
+        a.shot(f"{tag}_host_right_after_spawn.png")
+        time.sleep(6)
+        b.shot(f"{tag}_partner_view.png")
+        a.shot(f"{tag}_host_view.png")
+        # Where the henchman gold share setter really lives (the plain call fails).
+        probe = ("local t = {} for k, v in pairs(_G) do if type(v) == 'table' then "
+                 "local ok, f = pcall(function() return v.SetHenchmanGoldValue end) "
+                 "if ok and f then t[#t + 1] = k end end end "
+                 "print('LFGOLD owners ' .. table.concat(t, ',')) "
+                 "print('LFGOLD type ' .. type(Multiplayer) .. ' ' .. tostring(Multiplayer and Multiplayer.SetHenchmanGoldValue)) "
+                 "local ok1, e1 = pcall(function() return Multiplayer.SetHenchmanGoldValue(0) end) "
+                 "print('LFGOLD dot ' .. tostring(ok1) .. ' ' .. tostring(e1)) "
+                 "local ok2, e2 = pcall(function() return Multiplayer:SetHenchmanGoldValue(0) end) "
+                 "print('LFGOLD colon ' .. tostring(ok2) .. ' ' .. tostring(e2))")
+        note("INFO", f"{tag}: gold probe {lua_lines(a, probe, 'LFGOLD', 15)}")
+        if female:
+            return
+        if gold_only:
+            lf_gold(a, tag)
+            lf_partner_ui_gold(b, tag)
+            return
+        # Camera: the host walks while the partner holds still (the jitter);
+        # the watch names whatever writes the partner's view.
+        b.send("cvar coop_cam_trace true")
+        for k in range(8):
+            a.send("stick L 0 1 2500")
+            time.sleep(1.2)
+            b.shot(f"{tag}_jitter_{k}_partner.png")
+            time.sleep(1.4)
+        a.send("stick L 0 -1 2500")
+        time.sleep(3)
+        watch = [l[24:] for l in b.lines() if "[camwatch]" in l]
+        note("INFO" if watch else "FAIL", f"{tag}: camera watch lines {len(watch)}: {watch[:12]}")
+        # Pitch and R3 on the partner (the trace ends itself after 30 s: again).
+        b.send("cvar coop_cam_trace false")
+        time.sleep(0.5)
+        b.send("cvar coop_cam_trace true")
+        time.sleep(1)
+        n_tr = len(b.lines())
+        b.send("stick R 0 1 1200")
+        time.sleep(1.5)
+        b.shot(f"{tag}_pitch_up.png")
+        b.send("stick R 0 -1 2400")
+        time.sleep(2.6)
+        b.shot(f"{tag}_pitch_down.png")
+        n_r3 = b.count(r"R3: camera recentered")
+        b.send("press RS 150")
+        time.sleep(1.5)
+        b.shot(f"{tag}_after_r3.png")
+        note("PASS" if b.count(r"R3: camera recentered") > n_r3 else "FAIL", f"{tag}: R3 recenters the partner's camera")
+        zs = []
+        for l in b.lines()[n_tr:]:
+            m = re.search(r"trace dt .* cam ([-\d.]+) ([-\d.]+) ([-\d.]+) host", l)
+            if m:
+                zs.append(float(m.group(3)))
+        note("PASS" if zs and max(zs) - min(zs) > 1.0 else "FAIL",
+             f"{tag}: right stick Y moves the partner's camera height ({min(zs, default=0):.2f}..{max(zs, default=0):.2f})")
+        # Gold watch (coop_gold_watch): find player 2's gold by value, keep the
+        # address that follows a second value, watch it through the idle.
+        for k, v in enumerate((9871, 9872, 9873)):
+            a.send(f"lua Money.Set(GetPlayerHenchman(), {v}) print('LFSET {v}')")
+            time.sleep(3)
+            a.send(f"cvar coop_gold_watch {'find' if k == 0 else 'pick'}:{v}")
+            time.sleep(4 if k == 0 else 1.5)  # the first step scans the heap
+        a.send("cvar coop_gold_watch watch")
+        time.sleep(1.5)
+        note("INFO", f"{tag}: gold watch {[l[24:240] for l in a.lines() if '[goldwatch]' in l][-4:]}")
+        # 6 min idle: the stock henchman gold share must not pay player 2.
+        n_p = len(a.lines())
+        note("INFO", f"{tag}: idle 6 min (wage check)")
+        time.sleep(360)
+        ticks = [l[60:] for l in a.lines()[n_p:] if "purse: host" in l]
+        note("INFO", f"{tag}: gold writes during the idle {[l[24:240] for l in a.lines()[n_p:] if '[goldwatch]' in l][:12]}")
+        writes = [l for l in a.lines()[n_p:] if "[goldwatch] gold" in l]
+        note("PASS" if not ticks and not writes else "FAIL",
+             f"{tag}: player 2's gold unchanged in 6 min idle (purse lines {ticks[:3]}; gold writes {len(writes)})")
+        # The partner's purse in its own UI, against the host's total.
+        before = read_purses(a, b, f"{tag}_ui")
+        b.send("press Start 200")
+        time.sleep(2.5)
+        b.shot(f"{tag}_partner_pause.png")
+        b.send("press B 200")
+        time.sleep(2)
+        mir = [l[60:] for l in b.lines() if "purse: mirrored" in l or "purse: host total" in l][-3:]
+        note("INFO", f"{tag}: purses {before}; partner mirror lines {mir}")
+        # Both pause menus (Leave / Quit): screenshots of what each side has.
+        a.send("press Start 200")
+        time.sleep(2.5)
+        a.shot(f"{tag}_host_pause.png")
+        a.send("press Up 150")  # the cursor opens on Quests/Maps; Save is above
+        time.sleep(1.2)
+        a.send("press A 200")
+        time.sleep(2.5)
+        a.shot(f"{tag}_host_save_menu.png")
+        for _ in range(3):
+            a.send("press B 200")
+            time.sleep(1.5)
+        b.send("press Start 200")
+        time.sleep(2.5)
+        b.shot(f"{tag}_partner_pause2.png")
+        # The partner's Kick row (the bottom one): what does it do on the joiner?
+        for _ in range(6):
+            b.send("press Down 150")
+            time.sleep(0.9)
+        b.shot(f"{tag}_partner_on_quit.png")
+        na, nb = len(a.lines()), len(b.lines())
+        b.send("press A 200")
+        time.sleep(2.5)
+        b.shot(f"{tag}_partner_kick_1.png")
+        b.send("press A 200")
+        time.sleep(8)
+        b.shot(f"{tag}_partner_kick_2.png")
+        a.shot(f"{tag}_host_after_partner_kick.png")
+        keys = ("coop]", "joingate", "partner", "henchman", "XSession", "front end", "QuitToFrontEnd", "Unhandled")
+        note("INFO", f"{tag}: host after the partner's Kick: {[l[24:200] for l in a.lines()[na:] if any(k in l for k in keys)][:15]}")
+        note("INFO", f"{tag}: partner after its Kick: {[l[24:200] for l in b.lines()[nb:] if any(k in l for k in keys)][:15]}")
+        note("INFO", f"{tag}: alive after the Kick: host {a.proc.is_running()}, partner {b.proc.is_running()}")
+    finally:
+        for g in (a, b):
+            g.stop()
+        relay.kill()
+
+
+OAK_SLOT = os.path.join(ROOT, "mod-a", "saves", "B13EBABEBABEBABE", "4D5307F1", "00000001", "Hero044")
+OAK_CID = "65065FDB022E88AC"
+
+
+def oak_join(a, b, tag):
+    """The Oakfield copy (newest by its mainsave), hosted through Co-op ->
+    continue; a fresh partner joins. True once player 2 spawned."""
+    os.utime(os.path.join(OAK_SLOT, "mainsave.bin"))
+    if not host_continue_lobby(a, tag):
+        return False
+    hv = [l for l in a.lines() if "[lobby] open host kind=continue" in l][-1:]
+    ok = bool(hv) and OAK_CID in hv[0]
+    note("PASS" if ok else "FAIL", f"{tag}: the Oakfield campaign's lobby ({hv[0][60:] if hv else ''})")
+    if not ok:
+        return False
+    return partner_continue_join(a, b, tag)
+
+
+def lf_level(a, b, tag):
+    q = "print('LFLEVEL ' .. tostring(ScriptFunction.GetLevelName()))"
+    for g in (a, b):
+        out = lua_lines(g, q, "LFLEVEL", 15)
+        note("PASS" if out and "ravenscar" in out[-1].lower() else "FAIL",
+             f"{tag}: {g.who}: level {out[-1] if out else '(no answer)'} (Ravenscar = Oakfield)")
+
+
+def lf_oakfield():
+    """Josh's Oakfield save (mod-a Hero044, a co-op copy of his real Hero000):
+    the partner joins in Oakfield; its Abilities and Weapons pages; it leaves
+    from its own pause menu (the host carries on as designed, purse saved);
+    then, joined again, the host's Save -> Save and Quit sends the partner back
+    to its menu. Screenshots of the partner's view throughout."""
+    setup_tomls()
+    relay_log = open(os.path.join(OUT, "relay_lf_oak.log"), "w")
+    relay = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                           "coop_relay.py")], stdout=relay_log, stderr=relay_log)
+    a, b = Game("mod-a", "host"), Game("mod-b", "partner")
+    a.start({"FABLE2_TEST_INPUT": "1"})
+    b.start({"FABLE2_TEST_INPUT": "1"})
+    try:
+        if not oak_join(a, b, "lf_oak"):
+            return
+        time.sleep(8)
+        lf_level(a, b, "lf_oak")
+        a.shot("lf_oak_host_world.png")
+        b.shot("lf_oak_partner_world.png")
+        purse0 = read_purses(a, b, "lf_oak_start")
+        # The partner's wheel: rows, Abilities, Weapons.
+        nb = len(b.lines())
+        b.send("press Start 200")
+        time.sleep(2.5)
+        b.shot("lf_oak_partner_wheel.png")
+        rows = [l[24:160] for l in b.lines()[nb:] if "partner wheel" in l or "full wheel" in l]
+        note("PASS" if any("Kick row is the henchman's Quit" in r for r in rows) and any("Save row left out" in r for r in rows)
+             else "FAIL", f"lf_oak: partner wheel built without Save and with Quit for Kick ({rows[:6]})")
+        # The wheel opens on Abilities (row 1; Quests/Maps above it, Save left out).
+        def page(downs, shot, want):
+            n0 = len(b.lines())
+            for _ in range(downs):
+                b.send("press Down 150")
+                time.sleep(1)
+            b.send("press A 200")
+            time.sleep(3)
+            b.shot(shot)
+            chosen = [l[24:160] for l in b.lines()[n0:] if "chosen" in l]
+            note("PASS" if any(f"'{want}'" in c for c in chosen) else "FAIL", f"lf_oak: partner page {want}: {chosen[:2]}")
+            for _ in range(4):  # back out and close the wheel
+                b.send("press B 200")
+                time.sleep(1.2)
+            time.sleep(1.5)
+
+        b.send("press B 200")
+        time.sleep(1.5)
+        for downs, shot, want in ((0, "lf_oak_partner_abilities.png", "Abilities"),
+                                  (2, "lf_oak_partner_weapons.png", "Weapons")):
+            b.send("press Start 200")
+            time.sleep(2.5)
+            page(downs, shot, want)
+        # Leave: the bottom row, 6 below Abilities (Items, Weapons, Clothing, Logbook, Options, Quit).
+        b.send("press Start 200")
+        time.sleep(2.5)
+        for _ in range(6):
+            b.send("press Down 150")
+            time.sleep(1)
+        b.shot("lf_oak_partner_on_quit.png")
+        na, nb = len(a.lines()), len(b.lines())
+        b.send("press A 200")
+        time.sleep(3)
+        b.shot("lf_oak_partner_quit_question.png")  # the wheel closing; no question (fable2_coop_kit.h)
+        t = time.time()
+        fe = r"\[state\].*-> (MainMenu|MainMenuMovie|PressAScreen)"
+        while time.time() - t < 120 and not any(re.search(fe, l) for l in b.lines()[nb:]):
+            time.sleep(2)
+        time.sleep(4)
+        b.shot("lf_oak_partner_after_leave.png")
+        a.shot("lf_oak_host_after_leave.png")
+        keys = ("[coop]", "joingate", "lobby]", "XSession", "Unhandled", "coopkit")
+        note("INFO", f"lf_oak: partner after Quit {[l[24:200] for l in b.lines()[nb:] if any(k in l for k in keys)][:14]}")
+        note("INFO", f"lf_oak: host after the partner's Quit {[l[24:200] for l in a.lines()[na:] if any(k in l for k in keys)][:14]}")
+        back = any(re.search(fe, l) for l in b.lines()[nb:])
+        note("PASS" if back and b.proc.is_running() else "FAIL", "lf_oak: the partner's Quit takes it back to its main menu")
+        host_ok = a.wait("lf_oak: host saves and returns to the front end after the partner left",
+                         r"host: back at the front end", a.count(r"host: back at the front end"), 240)
+        note("PASS" if host_ok and a.proc.is_running() else "FAIL", "lf_oak: the host carries on as designed after the partner left")
+        # Joined again; then the host quits from Save -> Save and Quit.
+        time.sleep(8)
+        b.stop()
+        b = Game("mod-b", "partner")
+        b.start({"FABLE2_TEST_INPUT": "1"})
+        a.stop()
+        a = Game("mod-a", "host")
+        a.start({"FABLE2_TEST_INPUT": "1"})
+        if not oak_join(a, b, "lf_oak2"):
+            return
+        time.sleep(8)
+        purse1 = read_purses(a, b, "lf_oak_rejoin")
+        note("INFO", f"lf_oak: purses at the start {purse0}, after leaving and joining again {purse1}")
+        na, nb = len(a.lines()), len(b.lines())
+        a.send("press Start 200")
+        time.sleep(2.5)
+        a.send("press Up 150")
+        time.sleep(1)
+        a.send("press A 200")
+        time.sleep(2.5)
+        a.shot("lf_oak_host_save_menu.png")
+        a.send("press Down 150")
+        time.sleep(1)
+        a.shot("lf_oak_host_on_save_and_quit.png")
+        a.send("press A 200")
+        time.sleep(3)
+        a.shot("lf_oak_host_save_and_quit_1.png")
+        a.send("press A 200")
+        t = time.time()
+        while time.time() - t < 150:
+            if any(re.search(fe, l) for l in b.lines()[nb:]) and any(re.search(fe, l) for l in a.lines()[na:]):
+                break
+            time.sleep(2)
+        time.sleep(4)
+        b.shot("lf_oak_partner_after_host_quit.png")
+        a.shot("lf_oak_host_after_quit.png")
+        note("INFO", f"lf_oak: host after Save and Quit {[l[24:200] for l in a.lines()[na:] if any(k in l for k in keys)][:14]}")
+        note("INFO", f"lf_oak: partner after the host quit {[l[24:200] for l in b.lines()[nb:] if any(k in l for k in keys)][:14]}")
+        note("PASS" if any(re.search(fe, l) for l in b.lines()[nb:]) and b.proc.is_running() else "FAIL",
+             "lf_oak: the host's Save and Quit returns the partner to its front end")
+        note("PASS" if any(re.search(fe, l) for l in a.lines()[na:]) and a.proc.is_running() else "FAIL",
+             "lf_oak: the host is back at its front end")
+    finally:
+        for g in (a, b):
+            g.stop()
+        relay.kill()
+
+
+def lf_gold(a, tag, idle_s=300):
+    """coop_gold_watch: player 2's gold found by value, then watched through
+    an idle; the adds to it are logged with their caller."""
+    for k, v in enumerate((9871, 9872, 9873)):
+        a.send(f"lua Money.Set(GetPlayerHenchman(), {v}) print('LFSET {v}')")
+        time.sleep(3)
+        a.send(f"cvar coop_gold_watch {'find' if k == 0 else 'pick'}:{v}")
+        time.sleep(4 if k == 0 else 1.5)
+    a.send("cvar coop_gold_watch watch")
+    time.sleep(1.5)
+    n_p = len(a.lines())
+    note("INFO", f"{tag}: gold watch {[l[24:240] for l in a.lines() if '[goldwatch]' in l][-4:]}; idle {idle_s} s")
+    time.sleep(idle_s)
+    adds = [l[24:240] for l in a.lines()[n_p:] if "[goldwatch] add" in l]
+    note("PASS" if not adds else "FAIL", f"{tag}: adds to player 2's gold while idle: {adds[:8]}")
+
+
+
+def lf_partner_ui_gold(b, tag):
+    """Item 4: which creature's Money the partner's pause menu shows. The
+    mirror sets GetPlayerHenchman(); the menu showed 0. Mark the partner's
+    GetPlayerHero() with 4242 and look."""
+    out = lua_lines(b, "print('LFUI hero ' .. tostring(Money.Get(GetPlayerHero())) .. ' hench ' .. "
+                       "tostring(Money.Get(GetPlayerHenchman())))", "LFUI", 10)
+    m = re.search(r"hero (\d+) hench (\d+)", out[-1]) if out else None
+    note("PASS" if m and m.group(1) == m.group(2) else "FAIL",
+         f"{tag}: the partner's own hero shows the shared purse (what its pause menu reads): {out}")
+    b.send("lua Money.Set(GetPlayerHero(), 4242) print('LFUI set')")
+    time.sleep(2)
+    b.send("press Start 200")
+    time.sleep(2.5)
+    b.shot(f"{tag}_partner_pause_hero4242.png")
+    for _ in range(3):
+        b.send("press B 200")
+        time.sleep(1.2)
+    out = lua_lines(b, "print('LFUI hero ' .. tostring(Money.Get(GetPlayerHero())) .. ' hench ' .. "
+                       "tostring(Money.Get(GetPlayerHenchman())))", "LFUI", 10)
+    note("INFO", f"{tag}: partner purses after the mark {out} (screenshot {tag}_partner_pause_hero4242.png)")
+
+
+
+def lf_chest_open(a):
+    out = lua_lines(a, "print('LFOPEN ' .. tostring(LFC and Chest.IsOpen(LFC)))", "LFOPEN", 10)
+    return out[-1] if out else "?"
+
+
+def lf_use_try(g, a, other, who, tag):
+    """g presses A facing the chest (twice if still closed: a tutorial line can
+    take the first); the chest's state on the host before and after, and the
+    probe lines of both PCs from then on."""
+    na, nb = len(g.lines()), len(other.lines())
+    before = lf_chest_open(a)
+    for k in range(2):
+        g.send("press A 200")
+        time.sleep(5)
+        g.shot(f"{tag}_{who}_after_A{k}.png")
+        after = lf_chest_open(a)
+        note("INFO", f"{tag}: {who} A #{k + 1}: chest open {before} -> {after}")
+        if after == "true":
+            break
+    other.shot(f"{tag}_{who}_after_A_other.png")
+    for x, name in ((g, who), (other, "other")):
+        lines = [l[24:300] for l in x.lines()[na if x is g else nb:] if "[useprobe]" in l]
+        note("INFO", f"{tag}: {who} pressed A; {name} PC useprobe: {lines[:30]}")
+
+
+def lf_use():
+    """Item 7, experiment 1 (coop_use_probe): the partner, then the host, press
+    A at the same closed chest; where does the partner's use stop?"""
+    tag = "lf_use"
+    setup_tomls()
+    for folder in ("mod-a", "mod-b"):
+        with open(os.path.join(ROOT, folder, "fable_2.toml"), "a", encoding="utf-8", newline="\n") as f:
+            f.write("coop_use_probe = true\n")
+    relay_log = open(os.path.join(OUT, f"relay_{tag}.log"), "w")
+    relay = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                           "coop_relay.py")], stdout=relay_log, stderr=relay_log)
+    a, b = Game("mod-a", "host"), Game("mod-b", "partner")
+    a.start({"FABLE2_TEST_INPUT": "1"})
+    b.start({"FABLE2_TEST_INPUT": "1"})
+    try:
+        for g in (a, b):
+            g.n_menu = g.count(r"main menu: Co-op entry added")
+            g.past_title()
+        menu_then_coop(a, tag, a.n_menu)
+        host_new_campaign(a, tag)
+        menu_then_coop(b, tag, b.n_menu)
+        wait_row(b, "Join TestA", f"{tag}: the host's lobby is listed")
+        partner_joins(b, "Join TestA", tag)
+        wait_row(a, "Start", f"{tag}: host lobby shows the partner")
+        if not both_ready_and_start(a, b, tag) or not join_phase(a, b, tag):
+            return
+        time.sleep(10)
+        # The closed chest nearest the host's hero.
+        out = lua_lines(a, (
+            "local ok, e = pcall(function() local h = GetPlayerHero(); local best, bd = nil, 1e9; "
+            "for _, o in pairs(SearchTools.GetSearchResults(SearchTools.FilterWithEC("
+            "SearchTools.StartNewSearch('object'), Chest.GetECType()))) do "
+            "if not Chest.IsOpen(o) and not Chest.IsLocked(o) then local d = (o:GetPosition() - h:GetPosition()):GetLength(); "
+            "if d < bd then best, bd = o, d end end end; "
+            "if not best then print('LFCHEST none') return end; LFC = best; local p = best:GetPosition(); "
+            "print(string.format('LFCHEST %.2f %.2f %.2f %.1f', p:GetX(), p:GetY(), p:GetZ(), bd)) end); "
+            "if not ok then print('LFCHEST error ' .. tostring(e)) end"), "LFCHEST", 15)
+        note("INFO", f"{tag}: nearest chest {out}")
+        if not out or len(out[-1].split()) < 4:
+            return
+        x, y, z = (float(v) for v in out[-1].split()[:3])
+        # The partner first, at the closed chest, from its own Lua (its copy owns its position).
+        out = lua_lines(b, (
+            f"local ok, e = pcall(function() local me = GetPlayerHenchman(); local best, bd = nil, 1e9; "
+            f"for _, o in pairs(SearchTools.GetSearchResults(SearchTools.FilterWithEC("
+            f"SearchTools.StartNewSearch('object'), Chest.GetECType()))) do "
+            f"local d = (o:GetPosition() - CVector3({x}, {y}, {z})):GetLength(); "
+            f"if d < bd then best, bd = o, d end end; "
+            f"if not best or bd > 3 then print('LFPTP none ' .. tostring(bd)) return end; local p = best:GetPosition(); "
+            f"local st = CVector3(p:GetX() + 1.2, p:GetY(), p:GetZ()); Physics.TeleportToPosition(me, st); "
+            f"local f = p - st; f:Normalise(); Physics.SetFacingVector(me, f); "
+            f"print(string.format('LFPTP ok (%.1f m from the host spot)', bd)) end); "
+            f"if not ok then print('LFPTP error ' .. tostring(e)) end"), "LFPTP", 15)
+        note("INFO", f"{tag}: partner to the chest: {out}")
+        if out and out[-1].startswith("ok"):
+            time.sleep(2)
+            b.shot(f"{tag}_partner_at_chest.png")
+            lf_use_try(b, a, a, "partner", tag)
+        # Then the host at the same chest (its own copy: the teleport sticks).
+        lua_lines(a, (f"local h = GetPlayerHero(); local st = CVector3({x + 1.2:.2f}, {y:.2f}, {z:.2f}); "
+                      f"Physics.TeleportToPosition(h, st); local f = CVector3({x:.2f}, {y:.2f}, {z:.2f}) - st; "
+                      f"f:Normalise(); Physics.SetFacingVector(h, f); print('LFHOSTAT ok')"), "LFHOSTAT", 10)
+        time.sleep(3)
+        a.shot(f"{tag}_host_at_chest.png")
+        lf_use_try(a, a, b, "host", tag)
+    finally:
+        for g in (a, b):
+            g.stop()
+        relay.kill()
+
+
+
+def lf_start_campaign(tag, extra_toml=()):
+    """Host (mod-a) + partner (mod-b) in a new campaign; (a, b, relay) or None."""
+    setup_tomls()
+    for folder in ("mod-a", "mod-b"):
+        if extra_toml:
+            with open(os.path.join(ROOT, folder, "fable_2.toml"), "a", encoding="utf-8", newline="\n") as f:
+                f.write("".join(line + "\n" for line in extra_toml))
+    relay_log = open(os.path.join(OUT, f"relay_{tag}.log"), "w")
+    relay = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                           "coop_relay.py")], stdout=relay_log, stderr=relay_log)
+    a, b = Game("mod-a", "host"), Game("mod-b", "partner")
+    a.start({"FABLE2_TEST_INPUT": "1"})
+    b.start({"FABLE2_TEST_INPUT": "1"})
+    for g in (a, b):
+        g.n_menu = g.count(r"main menu: Co-op entry added")
+        g.past_title()
+    menu_then_coop(a, tag, a.n_menu)
+    host_new_campaign(a, tag)
+    menu_then_coop(b, tag, b.n_menu)
+    wait_row(b, "Join TestA", f"{tag}: the host's lobby is listed")
+    partner_joins(b, "Join TestA", tag)
+    wait_row(a, "Start", f"{tag}: host lobby shows the partner")
+    if not both_ready_and_start(a, b, tag) or not join_phase(a, b, tag):
+        return a, b, relay, False
+    return a, b, relay, True
+
+
+LF_FIND = {
+    "chest": ("SearchTools.FilterWithEC(s, Chest.GetECType())",
+              "not Chest.IsOpen(o) and not Chest.IsLocked(o)", "tostring(Chest.IsOpen(LFO.chest))"),
+    "door": ("SearchTools.FilterWithEC(s, Door.GetECType())",
+             "not Door.IsLocked(o) and not Door.IsOpen(o)", "tostring(Door.IsOpen(LFO.door))"),
+    "switch": ("local _ = 0", "Switch.IsAvailable(o)", "'n/a'"),
+}
+
+
+def lf_find(a, kind, radius):
+    """The nearest usable <kind> to the host's hero within radius: (x, y, z, d) or None."""
+    filt, ok, _ = LF_FIND[kind]
+    out = lua_lines(a, (
+        "local ok, e = pcall(function() LFO = LFO or {}; local h = GetPlayerHero(); local s = SearchTools.StartNewSearch('object'); "
+        f"SearchTools.FilterWithinDistanceOfPos(s, h:GetPosition(), {radius}); {filt}; local best, bd = nil, 1e9; "
+        f"for _, o in pairs(SearchTools.GetSearchResults(s)) do if {ok} then "
+        "local d = (o:GetPosition() - h:GetPosition()):GetLength(); if d < bd then best, bd = o, d end end end; "
+        f"if not best then print('LFFIND none') return end; LFO.{kind} = best; local p = best:GetPosition(); "
+        "print(string.format('LFFIND %.3f %.3f %.3f %.1f', p:GetX(), p:GetY(), p:GetZ(), bd)) end); "
+        "if not ok then print('LFFIND error ' .. tostring(e)) end"), "LFFIND", 20)
+    note("INFO", f"use1: nearest {kind}: {out}")
+    if not out or len(out[-1].split()) < 4:
+        return None
+    return tuple(float(v) for v in out[-1].split()[:4])
+
+
+def lf_chests(a, radius, n=3):
+    """Up to n closed, unlocked chests nearest the host's hero: [(x, y, z, d)]."""
+    out = lua_lines(a, (
+        "local ok, e = pcall(function() local h = GetPlayerHero(); local s = SearchTools.StartNewSearch('object'); "
+        f"SearchTools.FilterWithinDistanceOfPos(s, h:GetPosition(), {radius}); SearchTools.FilterWithEC(s, Chest.GetECType()); "
+        "local t = {} for _, o in pairs(SearchTools.GetSearchResults(s)) do if not Chest.IsOpen(o) and not Chest.IsLocked(o) then "
+        "t[#t + 1] = {o, (o:GetPosition() - h:GetPosition()):GetLength()} end end; "
+        "table.sort(t, function(x, y) return x[2] < y[2] end); print('LFCH n ' .. #t); "
+        f"for i = 1, math.min(#t, {n}) do local p = t[i][1]:GetPosition(); "
+        "print(string.format('LFCH %.3f %.3f %.3f %.1f', p:GetX(), p:GetY(), p:GetZ(), t[i][2])) end end); "
+        "if not ok then print('LFCH error ' .. tostring(e)) end"), "LFCH", 20)
+    note("INFO", f"use1: chests {out}")
+    return [tuple(float(v) for v in l.split()[:4]) for l in out if len(l.split()) == 4 and l[0] != "n"]
+
+
+def lf_state(a, kind, x, y, z):
+    """open state of the <kind> nearest (x, y, z), read on the host."""
+    fn = "Chest.IsOpen" if kind == "chest" else "Door.IsOpen"
+    ec = "Chest.GetECType()" if kind == "chest" else "Door.GetECType()"
+    out = lua_lines(a, (
+        f"local p = CVector3({x:.3f}, {y:.3f}, {z:.3f}); local s = SearchTools.StartNewSearch('object'); "
+        f"SearchTools.FilterWithinDistanceOfPos(s, p, 2.5); SearchTools.FilterWithEC(s, {ec}); local o = SearchTools.GetNearestEntity(s, p); "
+        f"print('LFST ' .. tostring(o and {fn}(o)))"), "LFST", 10)
+    return out[-1] if out else "?"
+
+
+def lf_exec(a, b, tag, kind, x, y, z, label):
+    before = lf_state(a, kind, x, y, z)
+    purse0 = read_purses(a, b, f"{tag}_{label}_before")
+    n = len(a.lines())
+    a.send(f"cvar coop_world_use {kind}:{x:.3f},{y:.3f},{z:.3f}")
+    time.sleep(8)
+    after = lf_state(a, kind, x, y, z)
+    res = [l[60:220] for l in a.lines()[n:] if "[lua] [coop] world use" in l]
+    purse1 = read_purses(a, b, f"{tag}_{label}_after")
+    a.shot(f"{tag}_{label}_host.png")
+    b.shot(f"{tag}_{label}_partner.png")
+    note("PASS" if after == "true" else "FAIL",
+         f"{tag}: {label}: open {before} -> {after}; executor {res}; purses {purse0} -> {purse1}")
+    a.send("cvar coop_world_use none")
+    time.sleep(1)
+    return after == "true"
+
+
+def lf_p2_to(b, x, y, z, kind):
+    """The partner stands 1.2 m from the object (its own Lua; its copy owns its position)."""
+    ec = "Chest.GetECType()" if kind == "chest" else "Door.GetECType()"
+    out = lua_lines(b, (
+        f"local ok, e = pcall(function() local me = GetPlayerHenchman(); local p = CVector3({x:.3f}, {y:.3f}, {z:.3f}); "
+        f"local st = CVector3({x + 1.2:.3f}, {y:.3f}, {z:.3f}); Physics.TeleportToPosition(me, st); "
+        "local f = p - st; f:Normalise(); Physics.SetFacingVector(me, f); print('LFP2 ok') end); "
+        "if not ok then print('LFP2 error ' .. tostring(e)) end"), "LFP2", 15)
+    return bool(out) and out[-1].startswith("ok")
+
+
+def lf_use1():
+    """Path 2b, step 1: the host's executor (coop_world_use) opens chests and a
+    door for player 2, triggered on the host itself: first with player 2 away,
+    then with player 2 standing at the object."""
+    tag = "lf_use1"
+    a, b, relay, ok = lf_start_campaign(tag)
+    try:
+        if not ok:
+            return
+        time.sleep(10)
+        chests = lf_chests(a, 150)
+        for i, (x, y, z, d) in enumerate(chests[:2]):
+            if not lf_exec(a, b, tag, "chest", x, y, z, f"chest{i}_away"):
+                if lf_p2_to(b, x, y, z, "chest"):
+                    time.sleep(3)
+                    lf_exec(a, b, tag, "chest", x, y, z, f"chest{i}_p2_near")
+        door = lf_find(a, "door", 150)
+        if door:
+            x, y, z, d = door
+            if not lf_exec(a, b, tag, "door", x, y, z, "door_away"):
+                if lf_p2_to(b, x, y, z, "door"):
+                    time.sleep(3)
+                    lf_exec(a, b, tag, "door", x, y, z, "door_p2_near")
+    finally:
+        for g in (a, b):
+            g.stop()
+        relay.kill()
+
+
+def lf_hero_has_starter(a):
+    """QC060's own test (IsHeroPacking): the host's hero holds the adult starter melee."""
+    out = lua_lines(a, "print('LFPACK ' .. tostring(Inventory.GetNumberOfItemsOfType(GetPlayerHero(), "
+                       "Gameflow.WeaponNames.AdultStarterMelee)) .. ' ' .. tostring(Inventory.GetNumberOfItems(GetPlayerHero())))",
+                    "LFPACK", 10)
+    return out[-1] if out else "?"
+
+
+def lf_use23():
+    """Path 2b, steps 2 and 3: the partner presses A at the caravan quest chest
+    (QC060), another chest and a door; the host uses each for player 2. Checks:
+    the hint shows, the object opens, the contents reach the host's hero (the
+    stock co-op rule) and QC060's test passes, the purses agree; the partner's
+    A on nothing still works (no record)."""
+    tag = "lf_use23"
+    a, b, relay, ok = lf_start_campaign(tag)
+    try:
+        if not ok:
+            return
+        time.sleep(20)  # the partner acts only 15 s after player 2 arrives (fable2_coop_worlduse.h)
+        chests = lf_chests(a, 150)
+        door = lf_find(a, "door", 150)
+        targets = [("chest", c[:3], f"chest{i}") for i, c in enumerate(chests[:2])]
+        if door:
+            targets.append(("door", door[:3], "door"))
+        for kind, (x, y, z), label in targets:
+            if not lf_p2_to(b, x, y, z, kind):
+                note("FAIL", f"{tag}: {label}: the partner could not get to it")
+                continue
+            time.sleep(3.5)
+            b.shot(f"{tag}_{label}_hint.png")
+            before = lf_state(a, kind, x, y, z)
+            pack0 = lf_hero_has_starter(a)
+            purse0 = read_purses(a, b, f"{tag}_{label}_before")
+            p2inv0 = inv_dump(a, f"{tag}_{label}_p2_before")
+            na, nb = len(a.lines()), len(b.lines())
+            b.send("press A 200")
+            # A chest's items show the host a "received" box that waits for the
+            # host player's A (the game pauses meanwhile): dismiss them.
+            t = time.time()
+            while time.time() - t < 40:
+                if any("world use done" in l for l in a.lines()[na:]) or (
+                        kind != "chest" and time.time() - t > 6):
+                    break
+                time.sleep(3)
+                if any("game paused" in l for l in a.lines()[na:]) and not any(
+                        "world use done" in l for l in a.lines()[na:]):
+                    a.send("press A 200")
+            time.sleep(3)
+            b.shot(f"{tag}_{label}_partner_after.png")
+            a.shot(f"{tag}_{label}_host_after.png")
+            after = lf_state(a, kind, x, y, z)
+            pack1 = lf_hero_has_starter(a)
+            purse1 = read_purses(a, b, f"{tag}_{label}_after")
+            p2inv1 = inv_dump(a, f"{tag}_{label}_p2_after")
+            sent = [l[24:200] for l in b.lines()[nb:] if "world use" in l]
+            done = [l[24:200] for l in a.lines()[na:] if "world use" in l]
+            note("PASS" if after == "true" else "FAIL",
+                 f"{tag}: {label}: partner's A -> open {before} -> {after}; partner {sent}; host {done}")
+            note("INFO", f"{tag}: {label}: host hero starter melee / items {pack0} -> {pack1}; purses {purse0} -> {purse1}; "
+                         f"player 2 items {p2inv0[1] if p2inv0 else '?'} -> {p2inv1[1] if p2inv1 else '?'}")
+            if kind == "chest" and label != "chest0" and p2inv0 and p2inv1:
+                # An ordinary chest: its items to player 2's own inventory, and the
+                # kit's mirror carries them to the partner's copy mid-session.
+                time.sleep(4)
+                mirror = [l[24:200] for l in b.lines()[nb:] if "[coopkit] mirror rev" in l]
+                gave = [l[60:220] for l in a.lines()[na:] if "gave" in l]
+                note("PASS" if p2inv1[1] > p2inv0[1] or "0 item(s)" in " ".join(gave) else "FAIL",
+                     f"{tag}: {label}: an ordinary chest's items went to player 2 ({p2inv0[1]} -> {p2inv1[1]} items; {gave})")
+                note("PASS" if any(re.search(r"\+[1-9]", m) for m in mirror) or "0 item(s)" in " ".join(gave) else "FAIL",
+                     f"{tag}: {label}: the kit's mirror put them on the partner's copy ({mirror[-2:]})")
+            if label == "chest0":
+                note("PASS" if pack1.split()[0] not in ("0", "?") else "FAIL",
+                     f"{tag}: the caravan chest's starter weapon reached the host's hero (QC060 IsHeroPacking): {pack0} -> {pack1}")
+        # The partner's A inside its own pause wheel: its menu's, not the world's.
+        if chests:
+            x, y, z = chests[0][:3]
+            lf_p2_to(b, x, y, z, "chest")
+            time.sleep(2)
+        nb = len(b.lines())
+        b.send("press Start 200")
+        time.sleep(2.5)
+        b.send("press A 200")
+        time.sleep(3)
+        b.shot(f"{tag}_partner_A_in_wheel.png")
+        sent = [l[24:200] for l in b.lines()[nb:] if "the partner's A" in l]
+        note("PASS" if not sent else "FAIL", f"{tag}: the partner's A in its own pause wheel sends nothing ({sent})")
+        for _ in range(5):
+            b.send("press B 200")
+            time.sleep(1.2)
+        time.sleep(2)
+        # The partner's A at nothing: no record, nothing on the host.
+        lua_lines(b, ("local me = GetPlayerHenchman(); local p = me:GetPosition(); "
+                      "Physics.TeleportToPosition(me, CVector3(p:GetX() + 12, p:GetY() + 12, p:GetZ())); print('LFAWAY ok')"),
+                  "LFAWAY", 10)
+        time.sleep(2)
+        na, nb = len(a.lines()), len(b.lines())
+        b.send("press A 200")
+        time.sleep(4)
+        acted = [l[24:200] for l in a.lines()[na:] if "world use" in l and ("opening it" in l or "opened" in l)]
+        said = [l[24:200] for l in a.lines()[na:] if "nothing to use" in l]
+        note("PASS" if not acted else "FAIL",
+             f"{tag}: the partner's A away from objects uses nothing on the host ({said or acted})")
+    finally:
+        for g in (a, b):
+            g.stop()
+        relay.kill()
+
+
+
+def lf_xp_general(g, who):
+    out = lua_lines(g, ("local ok, e = pcall(function() return math.floor(Experience.Get(" + who +
+                        ", EExperienceType.EXPERIENCE_GENERAL)) end); print('LFXP ' .. tostring(ok and e or ('error ' .. tostring(e))))"),
+                    "LFXP", 10)
+    return out[-1] if out else "?"
+
+
+def lf_host_pos(a):
+    out = lua_lines(a, ("local p = GetPlayerHero():GetPosition(); "
+                        "print(string.format('LFHP %.3f %.3f %.3f', p:GetX(), p:GetY(), p:GetZ()))"), "LFHP", 10)
+    if not out or len(out[-1].split()) != 3:
+        return None
+    return tuple(float(v) for v in out[-1].split())
+
+
+def lf_next():
+    """001-next batch in Josh's Oakfield copy: the host's hero as the partner
+    sees it (T-pose, idle and walking); the experience mirror; the 'A: Open'
+    hint and the partner's A at a door/chest; a lever used for player 2 on the
+    host; then the host's Save and Quit: the partner back at its front end (B
+    watchdog; A: its chunks held during the teardown)."""
+    tag = "lf_next"
+    setup_tomls()
+    relay_log = open(os.path.join(OUT, f"relay_{tag}.log"), "w")
+    relay = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                           "coop_relay.py")], stdout=relay_log, stderr=relay_log)
+    a, b = Game("mod-a", "host"), Game("mod-b", "partner")
+    a.start({"FABLE2_TEST_INPUT": "1"})
+    b.start({"FABLE2_TEST_INPUT": "1"})
+    try:
+        if not oak_join(a, b, tag):
+            return
+        time.sleep(20)  # past the partner's 15 s settle
+        # --- T-pose: the host's hero on the partner's screen, idle then walking.
+        hp = lf_host_pos(a)
+        note("INFO", f"{tag}: host hero at {hp}")
+        if hp:
+            lua_lines(b, (f"local me = GetPlayerHenchman(); local h = CVector3({hp[0]:.3f}, {hp[1]:.3f}, {hp[2]:.3f}); "
+                          f"local st = CVector3({hp[0] + 3.5:.3f}, {hp[1]:.3f}, {hp[2]:.3f}); Physics.TeleportToPosition(me, st); "
+                          "local f = h - st; f:Normalise(); Physics.SetFacingVector(me, f); print('LFTP ok')"), "LFTP", 10)
+            time.sleep(4)
+            b.shot(f"{tag}_tpose_partner_idle.png")
+            a.shot(f"{tag}_tpose_host_idle.png")
+            a.send("stick L 0 1 2500")
+            time.sleep(1.2)
+            b.shot(f"{tag}_tpose_partner_walking.png")
+            a.shot(f"{tag}_tpose_host_walking.png")
+            time.sleep(3)
+            b.shot(f"{tag}_tpose_partner_after_walk.png")
+            note("INFO", f"{tag}: T-pose screenshots taken (idle, walking, after); host hero now at {lf_host_pos(a)}")
+        # --- XP: the host gives player 2 experience; the partner's record follows.
+        xp_b0, xp_h0 = lf_xp_general(b, "GetPlayerHero()"), lf_xp_general(a, "GetPlayerHenchman()")
+        na, nb = len(a.lines()), len(b.lines())
+        lua_lines(a, ("local ok, e = pcall(function() Experience.Modify(GetPlayerHenchman(), EExperienceType.EXPERIENCE_GENERAL, 250) end); "
+                      "print('LFXPADD ' .. tostring(ok or e))"), "LFXPADD", 10)
+        time.sleep(15)
+        xp_b1, xp_h1 = lf_xp_general(b, "GetPlayerHero()"), lf_xp_general(a, "GetPlayerHenchman()")
+        xa = [l[24:200] for l in a.lines()[na:] if "COOPXP" in l][:3]
+        xb = [l[24:200] for l in b.lines()[nb:] if "xp" in l.lower() and "coop" in l.lower()][:3]
+        try:
+            ok = int(xp_b1) - int(xp_b0) == 250
+        except ValueError:
+            ok = False
+        note("PASS" if ok else "FAIL", f"{tag}: XP: host's player 2 {xp_h0} -> {xp_h1}; partner's hero {xp_b0} -> {xp_b1}; host {xa}; partner {xb}")
+        b.shot(f"{tag}_xp_partner.png")
+        # (No partner-side probe of GetPlayerHenchman's experience: reading it
+        # there crashed the joiner, guest read of 0x5, rig 2026-10-27 run 3.)
+        hx = lua_lines(a, ("local t = EExperienceType.EXPERIENCE_GENERAL; print('LFXPH hero ' .. math.floor(Experience.Get(GetPlayerHero(), t)) .. "
+                           "' hench ' .. math.floor(Experience.Get(GetPlayerHenchman(), t)))"), "LFXPH", 10)
+        note("INFO", f"{tag}: XP on the host {hx}")
+        # The partner's Abilities page (the wheel opens on it): which XP it shows.
+        b.send("press Start 200")
+        time.sleep(2.5)
+        b.send("press A 200")
+        time.sleep(3)
+        b.shot(f"{tag}_xp_partner_abilities.png")
+        b.send("press B 200")
+        time.sleep(1.5)
+        b.send("press B 200")
+        time.sleep(2)
+        # --- hint + A: a door and a chest near the host.
+        targets = []
+        door = lf_find(a, "door", 80)
+        if door:
+            targets.append(("door", door[:3]))
+        ch = lf_chests(a, 80, 1)
+        if ch:
+            targets.append(("chest", ch[0][:3]))
+        for kind, (x, y, z) in targets:
+            na, nb = len(a.lines()), len(b.lines())
+            if not lf_p2_to(b, x, y, z, kind):
+                note("FAIL", f"{tag}: {kind}: the partner could not get to it")
+                continue
+            time.sleep(7)
+            b.shot(f"{tag}_{kind}_hint.png")
+            hints = [l[24:200] for l in a.lines()[na:] if "COOPWHINT" in l]
+            note("PASS" if any(f"COOPWHINT:{kind}" in h for h in hints) else "FAIL",
+                 f"{tag}: {kind}: the host's hint for player 2 {hints[-3:]} (partner screenshot {tag}_{kind}_hint.png)")
+            before = lf_state(a, kind, x, y, z)
+            na = len(a.lines())
+            b.send("press A 200")
+            t = time.time()
+            while time.time() - t < 25:
+                if kind != "chest" or any("world use done" in l for l in a.lines()[na:]):
+                    break
+                time.sleep(1)
+            time.sleep(3)
+            if kind == "chest" and any("game paused" in l for l in a.lines()[na:]):
+                a.send("press A 200")
+            after = lf_state(a, kind, x, y, z)
+            done = [l[24:200] for l in a.lines()[na:] if "world use" in l][:4]
+            b.shot(f"{tag}_{kind}_after_a.png")
+            note("PASS" if after == "true" else "FAIL", f"{tag}: {kind}: partner's A -> open {before} -> {after}; host {done}")
+            time.sleep(2)
+            b.shot(f"{tag}_{kind}_hint_after_open.png")
+        # The hint goes away from everything.
+        lua_lines(b, ("local me = GetPlayerHenchman(); local p = me:GetPosition(); "
+                      "Physics.TeleportToPosition(me, CVector3(p:GetX() + 12, p:GetY() + 12, p:GetZ())); print('LFAWAY ok')"), "LFAWAY", 10)
+        time.sleep(4)
+        last = [l[24:200] for l in a.lines() if "COOPWHINT" in l][-1:]
+        b.shot(f"{tag}_hint_away.png")
+        note("PASS" if last and "COOPWHINT:none" in last[0] else "FAIL", f"{tag}: the hint clears away from objects ({last})")
+        # --- lever: used for player 2 on the host (not reachable from the A).
+        sw = lf_find(a, "switch", 150)
+        if sw:
+            na = len(a.lines())
+            a.send(f"cvar coop_world_use switch:{sw[0]:.3f},{sw[1]:.3f},{sw[2]:.3f}")
+            time.sleep(6)
+            res = [l[24:220] for l in a.lines()[na:] if "world use" in l][:4]
+            a.shot(f"{tag}_lever_host.png")
+            note("PASS" if any("lever used by player 2" in r for r in res) else "FAIL", f"{tag}: lever at {sw}: {res}")
+            a.send("cvar coop_world_use none")
+        else:
+            note("INFO", f"{tag}: no lever (Switch) within 150 m of the host in Oakfield")
+        # --- the host's Save and Quit: B + A on the partner.
+        fe = r"\[state\].*-> (MainMenu|MainMenuMovie|PressAScreen)"
+        na, nb = len(a.lines()), len(b.lines())
+        a.send("press Start 200")
+        time.sleep(2.5)
+        a.send("press Up 150")
+        time.sleep(1)
+        a.send("press A 200")
+        time.sleep(2.5)
+        a.send("press Down 150")
+        time.sleep(1)
+        a.shot(f"{tag}_host_on_save_and_quit.png")
+        a.send("press A 200")
+        time.sleep(3)
+        a.send("press A 200")
+        t = time.time()
+        while time.time() - t < 150:
+            if any("chunk hold ended" in l for l in b.lines()[nb:]) and any(re.search(fe, l) for l in a.lines()[na:]):
+                break
+            time.sleep(2)
+        time.sleep(6)
+        b.shot(f"{tag}_partner_after_host_quit.png")
+        a.shot(f"{tag}_host_after_quit.png")
+        keys = ("XSession", "co-op session is ending", "chunk hold", "front end", "[state]", "restart", "Unhandled")
+        pl = [l[24:200] for l in b.lines()[nb:] if any(k in l for k in keys)]
+        note("INFO", f"{tag}: partner after the host's Save and Quit {pl[:16]}")
+        note("INFO", f"{tag}: A: XSessionEnd on the partner {any('XSessionEnd' in l for l in pl)}; "
+                     f"hold {[l for l in pl if 'session is ending' in l or 'chunk hold' in l][:3]}")
+        note("PASS" if any(re.search(fe, l) for l in b.lines()[nb:]) and b.proc.is_running() else "FAIL",
+             f"{tag}: the host's Save and Quit returns the partner to its front end")
+        note("PASS" if not any("telling the player to restart" in l for l in b.lines()[nb:]) else "FAIL",
+             f"{tag}: B watchdog: no black screen (no restart card)")
+    finally:
+        for g in (a, b):
+            g.stop()
+        relay.kill()
+
+
+def run_livefix():
+    phases = sys.argv[sys.argv.index("--phases") + 1].split(",") if "--phases" in sys.argv else ["empty", "male", "female"]
+    if "empty" in phases:
+        lf_empty_boot()
+    if "male" in phases:
+        lf_session(False)
+    if "female" in phases:
+        lf_session(True)
+    if "oak" in phases:
+        lf_oakfield()
+    if "gold" in phases:
+        lf_session(False, gold_only=True)
+    if "use" in phases:
+        lf_use()
+    if "use1" in phases:
+        lf_use1()
+    if "use23" in phases:
+        lf_use23()
+    if "next" in phases:
+        lf_next()
+
+
+def run_dynsync():
+    """Do objects spawned in the host's world reach the partner? A gold bag is
+    spawned (Debug.CreateEntityAtPosition, the call the game's own quest scripts
+    use for NPCs) straight at a spot 1 m in front of the partner's hero, by its
+    own position and facing (a teleport of an existing object is not sent to
+    the partner, gold2 2026-10-26). Screenshots of both copies; the partner
+    presses A. Pass: the bag is gone on the host and the host purse, the host's
+    player 2 and the partner's mirror each move once by the same amount."""
+    setup_tomls()
+    relay_log = open(os.path.join(OUT, "relay_dynsync.log"), "w")
+    relay = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                           "coop_relay.py")], stdout=relay_log, stderr=relay_log)
+    a, b = Game("mod-a", "host"), Game("mod-b", "partner")
+    a.start({"FABLE2_TEST_INPUT": "1"})
+    b.start({"FABLE2_TEST_INPUT": "1"})
+    try:
+        for g in (a, b):
+            g.n_menu = g.count(r"main menu: Co-op entry added")
+            g.past_title()
+        menu_then_coop(a, "dyn", a.n_menu)
+        host_new_campaign(a, "dyn")
+        menu_then_coop(b, "dyn", b.n_menu)
+        wait_row(b, "Join TestA", "dyn: the host's lobby is listed")
+        partner_joins(b, "Join TestA", "dyn")
+        wait_row(a, "Start", "dyn: host lobby shows the partner")
+        if not both_ready_and_start(a, b, "dyn") or not join_phase(a, b, "dyn"):
+            return
+        time.sleep(8)
+        for k, dist in enumerate((1.0, 0.7, 1.3)):
+            pose = wg_partner_pose(b)
+            if not pose:
+                continue
+            x, y, z, fx, fy = pose
+            n = math.hypot(fx, fy) or 1.0
+            px, py = x + fx / n * dist, y + fy / n * dist
+            out = lua_lines(a, (
+                f"local ok, e = pcall(function() DYNB = Debug.CreateEntityAtPosition('ObjectInventoryGoldBag', "
+                f"'dynbag{k}', CVector3({px:.3f}, {py:.3f}, {z:.3f})); print('DYNSPAWN ' .. tostring(DYNB:IsAlive()) .. "
+                f"' gold=' .. tostring(Money.IsAvailable(DYNB) and Money.Get(DYNB) or -1)) end); "
+                f"if not ok then print('DYNSPAWN error ' .. tostring(e)) end"), "DYNSPAWN", 10)
+            note("INFO", f"dyn: bag {k} spawned {dist} m in front of the partner ({px:.1f}, {py:.1f}): {out}")
+            time.sleep(3)
+            a.shot(f"dyn_bag{k}_host.png")
+            b.shot(f"dyn_bag{k}_partner.png")
+            before = read_purses(a, b, f"dyn_before_{k}")
+            b.send("press A 200")
+            time.sleep(4)
+            wg_dismiss(a, b, b, f"dyn_{k}")
+            gone = lua_lines(a, "print('DYNPICK ' .. tostring(DYNB:IsAlive()))", "DYNPICK", 8)
+            after = read_purses(a, b, f"dyn_after_{k}")
+            b.shot(f"dyn_bag{k}_partner_after.png")
+            note("INFO", f"dyn: bag {k} alive after the partner's A: {gone}; purses {before} -> {after}")
+            if gone and "false" in gone[-1] and before and after:
+                d = [after[i] - before[i] for i in range(3)]
+                note("PASS" if d[0] == d[1] == d[2] > 0 else "FAIL",
+                     f"dyn: the partner picked up a host-spawned bag; each purse changed by {d} (once, the same)")
+                return
+        note("FAIL", "dyn: the partner did not pick up a host-spawned bag (see dyn_bag*_partner.png: is it there?)")
     finally:
         for g in (a, b):
             g.stop()
@@ -2409,7 +3589,7 @@ def run_continue2():
 def main():
     os.makedirs(OUT, exist_ok=True)
     mode = sys.argv[1] if len(sys.argv) > 1 else "coop"
-    {"coop": run_coop, "solo": run_solo, "multi": run_multi, "menu": run_menu, "menu2": run_menu2, "err": run_err, "final": run_final, "last": run_last, "start": run_start, "purse": run_purse, "fps": run_fps, "combo": run_combo, "camera": run_camera, "luaq": run_luaq, "luaq_kept": run_luaq_kept, "continue2": run_continue2, "boots": run_boots, "worldgold": run_worldgold, "batch1": run_batch1, "savestress": run_savestress}[mode]()
+    {"coop": run_coop, "solo": run_solo, "multi": run_multi, "menu": run_menu, "menu2": run_menu2, "err": run_err, "final": run_final, "last": run_last, "start": run_start, "purse": run_purse, "fps": run_fps, "combo": run_combo, "camera": run_camera, "luaq": run_luaq, "luaq_kept": run_luaq_kept, "continue2": run_continue2, "boots": run_boots, "worldgold": run_worldgold, "batch1": run_batch1, "savestress": run_savestress, "solowalk": run_solowalk, "dynsync": run_dynsync, "livefix": run_livefix}[mode]()
     with open(os.path.join(OUT, f"results_{mode}.txt"), "w", encoding="utf-8") as f:
         f.write("\n".join(results) + "\n")
     return 0 if not any(r.startswith("FAIL") for r in results) else 1

@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <cstdio>
@@ -29,6 +30,7 @@
 #include <mutex>
 #include <sstream>
 #include <string>
+#include <thread>
 
 #include <rex/cvar.h>
 #include <rex/logging.h>
@@ -105,6 +107,26 @@ inline std::atomic<bool> g_menu_built{false};
 inline std::atomic<uint32_t> g_menu_built_dcalls{0};
 inline std::atomic<bool> g_menu_fallback_logged{false};
 constexpr uint32_t kMenuIdleDcalls = 2000;
+inline bool world_lua_busy() {
+  static uint32_t last_hits = 0;
+  static bool busy = false;
+  static int idle_samples = 0;
+  const uint32_t hits = fable2::f5lua::g_dcall_hits.load(std::memory_order_relaxed);
+  const bool active = hits - last_hits > 500;  // since the last sample, ~1 s ago
+  last_hits = hits;
+  // Busy at once; idle only after 3 quiet samples in a row (a pause menu or a
+  // short load in the world dipped below the bar and resumed the scans: 7
+  // toggles in one 001pl boots session).
+  idle_samples = active ? 0 : idle_samples + 1;
+  if (active) busy = true;
+  else if (idle_samples >= 3) busy = false;
+  return busy;
+}
+inline const bool g_world_busy_installed = [] {
+  fable2::stateprobe::g_world_busy = &world_lua_busy;
+  return true;
+}();
+
 inline void OnMenuBuilt() {
   g_menu_built_dcalls.store(fable2::f5lua::g_dcall_hits.load(std::memory_order_relaxed));
   g_menu_built.store(true);
@@ -161,6 +183,7 @@ struct SessionState {
   bool partner_spawned = false;
   bool host_female = false;
   bool quit_sent = false;  // host after a partner loss: QuitToFrontEnd requested
+  std::string leave_seen;  // host: the partner's coop_leave record when player 2 arrived (older ones are stale)
   // Partner: the host to join, the last join attempt, and since when joined.
   uint32_t host_ip = 0;
   uint64_t host_xuid = 0;  // the host is heard once per shared network: match by XUID
@@ -423,6 +446,9 @@ inline void on_host_start() {
   }
   // T031: a continued campaign brings player 2 back from its file; otherwise
   // (new campaign, or no usable file) player 2 is seeded (T031a).
+  // Player 2's body (and so its head and hair) by the lobby's gender2, the same
+  // value the partner's PC uses (on_partner_go).
+  fable2::coophero::g_campaign_p2_female.store(rec.gender2 == fable2::cooplobby::Gender::kFemale ? 1 : 0);
   std::optional<std::string> restore = resume && slot ? restore_player2_chunk(slot->path) : std::nullopt;
   fable2::coophero::SetCampaignPlayer2(
       restore ? *restore : seed_player2_chunk(rec.gender2 == fable2::cooplobby::Gender::kMale));
@@ -455,12 +481,20 @@ inline void on_host_start() {
 inline void on_partner_go(uint32_t ip) {
   uint64_t host_xuid = 0;
   std::string host_name;
+  bool p2_female = false;
   {
     auto& lb = fable2::cooplobby::L();
     std::lock_guard<std::mutex> l(lb.m);
     host_xuid = lb.partner.host_xuid;
     host_name = lb.partner.seat.host;
+    // The host's record has the gender2 it started with; this seat's own choice
+    // is the same value (the partner owns gender) if the record is missing.
+    p2_female = (lb.partner.host_rec ? lb.partner.host_rec->gender2 : lb.partner.seat.gender) ==
+                fable2::cooplobby::Gender::kFemale;
   }
+  fable2::coophero::g_campaign_p2_female.store(p2_female ? 1 : 0);
+  lobby::PublishData("coop_leave", "");  // a leave from an earlier session is not news
+  lobby::PublishData("coop_wuse", "");   // nor a use (fable2_coop_worlduse.h)
   {
     std::lock_guard<std::mutex> l(S().m);
     S().s = Session::kPartnerJoining;
@@ -502,6 +536,17 @@ inline PeerView peer_view(uint64_t xuid, uint32_t ip) {
     }
   }
   return v;
+}
+
+// Host: the partner's latest coop_leave record ("COOPLEAVE:v1|hxuid=<host>|n=<nonce>",
+// published by the partner as it leaves from its wheel), "" if none.
+inline std::string partner_leave_record(const SessionState& s) {
+  std::string rec;
+  for (const auto& d : lobby::GetPeerData("coop_leave")) {
+    if (s.partner_xuid && d.xuid ? d.xuid != s.partner_xuid : d.ip != s.partner_ip) continue;
+    if (d.value.rfind("COOPLEAVE:v1|", 0) == 0) rec = d.value;
+  }
+  return rec;
 }
 
 inline void open_coop_hub();
@@ -842,10 +887,14 @@ inline void partner_purse_tick(int64_t now) {
   const bool fresh = best->seq != g_purse_applied_seq;
   if (fable2::f5lua::g_queued.load() > 0) return;  // paused: queued scripts wait; try next tick
   const std::string t = std::to_string(best->total);
-  if (!fable2::luaconsole::RunChunk("local me = GetPlayerHenchman()\n"
-                               "if me and me:IsAlive() and Money.Get(me) ~= " + t + " then\n"
+  // The partner's own pause menu shows GetPlayerHero()'s gold, not its
+  // creature's (rig 2026-10-27: 0 while the creature had the total), so both.
+  if (!fable2::luaconsole::RunChunk("local me, hero = GetPlayerHenchman(), GetPlayerHero()\n"
+                               "if me and me:IsAlive() and (Money.Get(me) ~= " + t +
+                               " or (hero and Money.Get(hero) ~= " + t + ")) then\n"
                                "  local was = Money.Get(me)\n"
                                "  Money.Set(me, " + t + ")\n"
+                               "  if hero then Money.Set(hero, " + t + ") end\n"
                                "  print('[coop] purse: mirrored the host total " + t + " (was ' .. was .. ')')\n"
                                "end\n"))
     return;  // no free console slot: the next tick tries again
@@ -854,12 +903,98 @@ inline void partner_purse_tick(int64_t now) {
   if (fresh) REXSYS_INFO("[coop] purse: host total {} (seq {})", best->total, best->seq);
 }
 
+// Partner: after the campaign session ends (the host quit, or this PC left),
+// the game goes back to its front end. Once it did not (rig 2026-10-27, 1 of
+// 2 runs after the host's Save and Quit): the session ended, the front end's
+// load never started and the game ran no Lua at all, a black screen. Nothing
+// from Lua can help then. If within kReturnMs the state probe has not moved
+// off the state it had at the session's end (the good run: MainMenu ->
+// MainMenuMovie at once) and no main menu was built, the cover card tells the
+// player what to do instead of a black screen.
+constexpr int64_t kReturnMs = 25000;
+inline bool g_return_watch_joined = false;
+inline int64_t g_return_since_ms = 0;
+inline int g_return_state = -1;
+inline void partner_return_watchdog(int64_t now) {
+  const bool joined = lobby::GetLobbyStatus().joined_host_ip != 0;
+  if (joined) {
+    // A campaign partner (its purse mirror has the host) in the host's world.
+    if (g_purse_host_xuid.load() != 0) g_return_watch_joined = true;
+    g_return_since_ms = 0;
+    return;
+  }
+  if (g_return_watch_joined) {
+    g_return_watch_joined = false;
+    g_return_since_ms = now;
+    g_return_state = fable2::stateprobe::CurrentState();
+    g_menu_built.store(false);
+    REXSYS_INFO("[coop] partner: the campaign session ended; waiting for the front end (state {})",
+                fable2::stateprobe::StateName(g_return_state));
+  }
+  if (!g_return_since_ms) return;
+  if (g_menu_built.load() || fable2::stateprobe::CurrentState() != g_return_state) {
+    REXSYS_INFO("[coop] partner: back at the front end after {} ms", now - g_return_since_ms);
+    g_return_since_ms = 0;
+    return;
+  }
+  if (now - g_return_since_ms > kReturnMs) {
+    g_return_since_ms = 0;
+    REXSYS_WARN("[coop] partner: no front end {} s after the session ended; telling the player to restart",
+                kReturnMs / 1000);
+    ShowCover2("The co-op game has ended", "Fable II did not get back to the menu: please close it and start it again");
+  }
+}
+
+// A: the partner's chunks wait while its campaign session is torn down (the
+// runner latches the hold, fable2_f5_lua.h teardown_held). Armed while the
+// partner is in the host's campaign and until it is back in the front end. The
+// hold ends when the main menu is built or the menu movie or title shows (the
+// probe already says MainMenu at the session's end), or after kTeardownHoldMs;
+// what waited is dropped then. A new XSessionStart while still joined was no
+// teardown: the hold ends and the chunks run.
+constexpr int64_t kTeardownHoldMs = 60000;
+inline int64_t g_hold_since_ms = 0;
+inline void teardown_hold_tick(int64_t now) {
+  namespace fl = fable2::f5lua;
+  const bool in_campaign = g_purse_host_xuid.load() != 0 && lobby::GetLobbyStatus().joined_host_ip != 0;
+  const int s = fable2::stateprobe::CurrentState();
+  const bool front = s == fable2::stateprobe::kMainMenuMovie || s == fable2::stateprobe::kPressAScreen;
+  if (!fl::g_teardown_hold.load()) {
+    if (in_campaign) {
+      fl::g_hold_on_session_end.store(true);
+    } else if (front || g_menu_built.load()) {
+      fl::g_hold_on_session_end.store(false);
+      fl::g_seen_not_ending.store(false);
+    }
+    // The flag goes up only on the game thread's drain; while armed in the
+    // world, read it here too so an idle runner still sees it low first.
+    if (fl::g_hold_on_session_end.load() && !fl::rex_session_ending()) fl::g_seen_not_ending.store(true);
+    return;
+  }
+  if (!g_hold_since_ms) {
+    g_hold_since_ms = now;
+    g_menu_built.store(false);  // built before the campaign: not the way back
+  }
+  const bool resumed = in_campaign && !fl::rex_session_ending();
+  const bool back = g_menu_built.load() || front;
+  if (!resumed && !back && now - g_hold_since_ms <= kTeardownHoldMs) return;
+  size_t dropped = 0;
+  if (!resumed) dropped = fl::drop_queued() + fable2::luaconsole::DropKept();
+  REXSYS_INFO("[coop] partner: chunk hold ended after {} ms ({}); {} chunk(s) dropped", now - g_hold_since_ms,
+              resumed ? "the session started again" : back ? "back at the front end" : "timed out", dropped);
+  g_hold_since_ms = 0;
+  fl::g_hold_on_session_end.store(resumed);
+  fl::g_seen_not_ending.store(resumed);
+  fl::g_teardown_hold.store(false);
+}
+
 inline void purse_tick(int64_t now) {
   if (now < g_next_purse_ms) return;
   // Paused, queued scripts wait: do not stack syncs behind each other (they
   // would take every console slot); the next tick after the pause syncs.
   if (fable2::f5lua::g_queued.load() > 0) return;
   g_next_purse_ms = now + kPurseEveryMs;
+  if (fable2::coophero::g_hold_purse.load()) return;  // testing: coop_gold_watch
   const uint32_t epoch = fable2::coophero::g_spawn_epoch.load();
   const bool reset = epoch != g_purse_epoch;
   g_purse_epoch = epoch;
@@ -1065,6 +1200,7 @@ end
     case Session::kHostInWorld: {
       if (!s.partner_spawned && fable2::coophero::g_spawn_epoch.load() != g_seen_spawn_epoch) {
         s.partner_spawned = true;
+        s.leave_seen = partner_leave_record(s);
         lobby::PublishData("coop_go", "");  // joined: a stale go must not pull a rejoin
         lobby::PublishData("coop_lobby", "");
         REXSYS_INFO("[coop] host: player 2 is in the world");
@@ -1109,11 +1245,23 @@ end
       p2_watch_tick(now, true);
       purse_tick(now);
       const int quiet = peer_view(s.partner_xuid, s.partner_ip).quiet;
-      if (quiet < 0 || quiet > 6) {
+      // The partner chose Quit (fable2_coop_kit.h): its coop_leave record names
+      // this host. A campaign is played only with both players (spec), so a
+      // clean leave goes the partner-lost way too.
+      const std::string leave = partner_leave_record(s);
+      const bool left = !leave.empty() && leave != s.leave_seen &&
+                        leave.find("|hxuid=" + fable2::cooplobby::XuidStr(fable2::cooplobby::MyXuid()) + "|") !=
+                            std::string::npos;
+      if (left) {
+        REXSYS_INFO("[coop] host: partner {} left the game ({}), saving", s.partner_name, leave);
+        ShowCoverMessage(s.partner_name + " left the game",
+                         "Saving, then back to the main menu (Co-op to continue together)", 10000);
+      }
+      if (left || quiet < 0 || quiet > 6) {
         // Partner lost (proof P6): save with the game's own autosave call
         // (QC060 uses AutoSaveGame(true, true)), then, once it has had time
         // to finish, back to the front end to wait in the campaign's lobby.
-        REXSYS_INFO("[coop] host: partner {} lost (quiet {} s), saving", s.partner_name, quiet);
+        if (!left) REXSYS_INFO("[coop] host: partner {} lost (quiet {} s), saving", s.partner_name, quiet);
         lobby::PublishData("coop_purse", "");
         s.s = Session::kHostPartnerLost;
         s.since_ms = now;
@@ -1305,17 +1453,14 @@ inline bool OnPress(PPCContext& ctx, uint8_t* base) {
 inline void (*g_prev_frame_hook)() = nullptr;
 // Testing only (FABLE2_TEST_INPUT=1 in the environment, set by
 // tools/coop_ship_e2e.py; never by play-coop.cmd): commands from
-// <exe dir>\test_input.txt, read and emptied each frame, so proofs do not depend
-// on which window is in front (2026-10-25: focus loss and key repeat at 60 fps
-// broke two runs). Command language: fable2_coop_test_input.h.
-inline void test_input_tick() {
-  static const bool on = std::getenv("FABLE2_TEST_INPUT") != nullptr;
-  if (!on) return;
-  static int64_t next = 0;
-  const int64_t now = fable2::f5lua::steady_ms();
-  if (now < next) return;
-  next = now + 50;
-  const auto path = fable2::cooptemplate::exe_dir() / "test_input.txt";
+// <exe dir>\test_input.txt, read and emptied every 50 ms, so proofs do not
+// depend on which window is in front (2026-10-25: focus loss and key repeat at
+// 60 fps broke two runs). Command language: fable2_coop_test_input.h.
+// A thread of its own polls the file: on the frame hook (3D Engine thread) the
+// stat/read/rewrite calls took up to 1.2 s under disk load and stalled frames
+// (2026-10-27 walk profile). Presses, sticks, Lua chunks and cvars are all
+// safe to queue from any thread.
+inline void test_input_poll(const std::filesystem::path& path) {
   std::error_code ec;
   if (!std::filesystem::exists(path, ec) || std::filesystem::file_size(path, ec) == 0) return;
   std::string text;
@@ -1355,6 +1500,21 @@ inline void test_input_tick() {
   }
 }
 
+inline void test_input_tick() {
+  static const bool on = std::getenv("FABLE2_TEST_INPUT") != nullptr;
+  if (!on) return;
+  static const bool started = [] {
+    std::thread([path = fable2::cooptemplate::exe_dir() / "test_input.txt"] {
+      for (;;) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        test_input_poll(path);
+      }
+    }).detach();
+    return true;
+  }();
+  (void)started;
+}
+
 inline void OnFrame() {
   if (g_prev_frame_hook) g_prev_frame_hook();
   // Rig only: narrow the save list to one slot so Continue loads it with no
@@ -1385,6 +1545,8 @@ inline void OnFrame() {
   }
   session_tick();
   partner_purse_tick(fable2::f5lua::steady_ms());
+  partner_return_watchdog(fable2::f5lua::steady_ms());
+  teardown_hold_tick(fable2::f5lua::steady_ms());
   test_input_tick();
 }
 

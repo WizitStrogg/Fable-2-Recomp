@@ -110,6 +110,9 @@ inline std::map<int, std::string>& story_parts() {
   return m;
 }
 inline std::atomic<int64_t> g_spawned_at_ms{0};  // last henchman spawn
+// Testing (coop_gold_watch, src/diagnostics/fable2_gold_watch.h): the shared
+// purse merge waits, so player 2's gold moves only by what pays it.
+inline std::atomic<bool> g_hold_purse{false};
 inline std::atomic<uint32_t> g_spawn_epoch{0};   // increments per spawn
 
 // Host-side apply bookkeeping (game thread only).
@@ -188,17 +191,24 @@ inline std::string timestamp() {
   return buf;
 }
 
-// Gender of player 2's hero: 1 female, 0 male, -1 unknown. On the host it is
-// the partner's (from their published profile), on a joiner its own.
+// Gender of player 2's hero: 1 female, 0 male, -1 unknown. In a co-op campaign
+// it is the lobby's gender2 (the partner's seat choice) on both PCs; otherwise
+// on the host the partner's (from their published profile), on a joiner its
+// own. Without the lobby value the host had no profile yet at the spawn and
+// fell back to index 0 (female): a female head and hair under the male starter
+// outfit for a male seat (live session, 2026-10-27).
 inline std::atomic<int> g_partner_female{-1};
+inline std::atomic<int> g_campaign_p2_female{-1};  // set at host start / partner go, -1 at the menu
 inline int profile_female(std::string_view profile) {
   const auto p = profile.find("|g=");
   if (p == std::string_view::npos || p + 3 >= profile.size()) return -1;
   return profile[p + 3] == 'F' ? 1 : 0;
 }
 inline void update_partner_gender(const lobby::LobbyStatus& status) {
-  int female = -1;
-  if (status.in_world && status.joined_host_ip == 0) {
+  int female = g_campaign_p2_female.load();
+  if (female >= 0) {
+    // the lobby's choice
+  } else if (status.in_world && status.joined_host_ip == 0) {
     const lobby::PeerData* best = nullptr;
     const auto heroes = lobby::GetPeerData("hero");
     for (const auto& h : heroes) {
@@ -322,8 +332,10 @@ inline void auto_capture(const lobby::LobbyStatus& status, int64_t now) {
 // runs it instead of applying the partner's published hero (T031a).
 inline std::mutex g_campaign_mu;
 inline std::string g_campaign_p2_chunk;
+inline std::atomic<bool> g_campaign_on{false};  // a campaign's player 2 is set up (the wage below)
 inline void SetCampaignPlayer2(std::string chunk) {
   std::lock_guard<std::mutex> l(g_campaign_mu);
+  g_campaign_on.store(!chunk.empty());
   g_campaign_p2_chunk = std::move(chunk);
 }
 inline std::string campaign_player2() {
@@ -332,10 +344,11 @@ inline std::string campaign_player2() {
 }
 
 // Player 2's saved weapons, after the campaign chunk (it leaves CoopWeaponsDue):
-// every kWeaponsEveryMs until CoopHero.ApplyWeapons is done, the last try
-// final (adds what is still missing even if the slots stayed empty).
+// every kWeaponsEveryMs until CoopHero.ApplyWeapons is done (every saved
+// weapon is there); only the last try, ~30 s after the spawn, adds what is
+// still missing.
 constexpr int64_t kWeaponsEveryMs = 2000;
-constexpr int kWeaponsTries = 10;
+constexpr int kWeaponsTries = 15;
 inline uint32_t g_weapons_epoch = ~0u;
 inline int g_weapons_tries = kWeaponsTries;
 inline int64_t g_next_weapons_ms = 0;
@@ -766,7 +779,10 @@ extern "C" void sub_8231EEE0(PPCContext& ctx, uint8_t* base) {
     __imp__sub_8231EEE0(ctx, base);
     return;
   }
-  const int known = fable2::coophero::g_partner_female.load();
+  // The lobby's value first: the spawn can come before the per-frame
+  // update_partner_gender has copied it.
+  const int lobby_female = fable2::coophero::g_campaign_p2_female.load();
+  const int known = lobby_female >= 0 ? lobby_female : fable2::coophero::g_partner_female.load();
   const bool female = known >= 0 ? known == 1 : index <= 2;
   static uint32_t s_names[2] = {0, 0};
   uint32_t& name = s_names[female ? 1 : 0];
@@ -787,7 +803,21 @@ extern "C" void sub_8231EEE0(PPCContext& ctx, uint8_t* base) {
   ctx.r3.u32 = out;
   REXSYS_INFO("[coop] player 2 body: {} (selector index {}, gender {})",
               female ? "CreatureHeroFemale" : "CreatureHero", index,
-              known < 0 ? "from co-op screen" : "from hero profile");
+              lobby_female >= 0 ? "from the lobby"
+              : known < 0       ? "from co-op screen"
+                                : "from hero profile");
+}
+
+// The stock henchman wage (r3 = the henchman's player component): gold per
+// minute played by "HenchmanJobLevels" / "GoldEarnedPerMinute", the fraction
+// kept at +1064 and the whole part paid with the add-money sub_8239E698. In a
+// co-op campaign player 2 is a player, not a hired henchman: it paid player 2
+// 1 gold every ~2 min into the shared purse (live session; caller found with
+// coop_gold_watch, rig 2026-10-27). Skipped while a campaign's player 2 is set up.
+extern "C" void __imp__sub_824A6FD8(PPCContext& ctx, uint8_t* base);
+extern "C" void sub_824A6FD8(PPCContext& ctx, uint8_t* base) {
+  if (fable2::coophero::g_campaign_on.load(std::memory_order_relaxed)) return;
+  __imp__sub_824A6FD8(ctx, base);
 }
 
 // Stats.AddUnlockedTitle native (also reached from ModifyFat & co). Our own

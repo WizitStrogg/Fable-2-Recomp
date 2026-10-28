@@ -205,33 +205,31 @@ local function owns(entity, hex, id)
   return false
 end
 
--- The saved weapons, added only when still missing from the inventory and
--- the hand/sheath slots once player 2 is fully up (batch1, 2026-10-26: a
--- restore right after the spawn found the slots still empty and added the
--- sword and the pistol again as inventory items, 5 -> 7). Returns true when
--- done; false while every slot is still empty (the caller tries again), unless
--- final.
+-- The saved weapons, added only if still missing from the inventory and the
+-- hand/sheath slots once player 2 is fully up. The game equips the saved
+-- weapons one by one after the spawn (001pl regression, 2026-10-27: with the
+-- sword in hand and the crossbow not yet sheathed, the crossbow was added as
+-- an item and then sheathed too). So: done as soon as every saved weapon is
+-- there; anything still missing is added only on the final try. Returns true
+-- when done, false to be called again.
 function CoopHero.ApplyWeapons(entity, p, final)
-  local any = false
-  for _, slot in ipairs(WEAPON_SLOTS) do
-    local w = try("GetEntityInSlot", Carrying.GetEntityInSlot, entity, slot)
-    if w and w:IsAlive() then any = true end
-  end
-  if not any and not final and #p.weap > 0 then
-    print("[coop] weapons: player 2's weapon slots still empty, waiting")
-    return false
-  end
-  local added, had = 0, 0
+  local missing, had = {}, 0
   for _, hex in ipairs(p.weap) do
     local id = id_from_hex(hex)
     if id and not owns(entity, hex, id) then
-      try("AddItemOfType " .. hex, Inventory.AddItemOfType, entity, id)
-      added = added + 1
+      missing[#missing + 1] = {hex, id}
     elseif id then
       had = had + 1
     end
   end
-  print("[coop] weapons: added " .. added .. ", already had " .. had)
+  if #missing > 0 and not final then
+    print("[coop] weapons: " .. #missing .. " of player 2's saved weapon(s) not equipped yet, waiting")
+    return false
+  end
+  for _, m in ipairs(missing) do
+    try("AddItemOfType " .. m[1], Inventory.AddItemOfType, entity, m[2])
+  end
+  print("[coop] weapons: added " .. #missing .. ", already had " .. had)
   return true
 end
 

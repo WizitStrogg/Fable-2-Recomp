@@ -401,6 +401,41 @@ inline bool saving() {
          steady_ms() - g_save_table_ms.load() < kSaveHoldMs;
 }
 
+// The co-op partner's campaign session is being torn down: no queued script or
+// native task may run (the partner's black screen after the host's Save and
+// Quit, 1 of 2 rig runs: one of our chunks ran during the teardown both times).
+// Armed by the co-op layer while the partner is in the host's campaign; latched
+// here at the drain on the SDK's session-ending flag (XSessionEnd), so no frame
+// can slip a chunk in first. The co-op layer ends the hold when the front end
+// is back and drops what waited (campaign chunks, stale in the menu).
+extern "C" int rex_session_ending();
+// Only a rise of the flag seen while armed counts (an edge): one still up from an
+// earlier session can never hold chunks. g_seen_not_ending: armed and read 0
+// since (cleared by the co-op layer when it disarms).
+inline std::atomic<bool> g_hold_on_session_end{false};
+inline std::atomic<bool> g_seen_not_ending{false};
+inline std::atomic<bool> g_teardown_hold{false};
+inline bool teardown_held() {
+  if (!g_teardown_hold.load() && g_hold_on_session_end.load()) {
+    if (!rex_session_ending()) {
+      g_seen_not_ending.store(true);
+    } else if (g_seen_not_ending.load()) {
+      g_teardown_hold.store(true);
+      REXSYS_INFO("[lua] the co-op session is ending: holding {} script(s) and {} native task(s)",
+                  g_queued.load(), g_native_count.load());
+    }
+  }
+  return g_teardown_hold.load();
+}
+// Drops every queued script (the hold's end). Returns how many.
+inline size_t drop_queued() {
+  std::lock_guard<std::mutex> l(g_queue_mtx);
+  const size_t n = g_queue.size();
+  g_queue.clear();
+  g_queued.store(0);
+  return n;
+}
+
 // True when run_pending has something to do (a native task, a queued script
 // or the F5 file); without it run_pending returns at once.
 inline bool has_pending() {
@@ -411,6 +446,7 @@ inline bool has_pending() {
 // Called by the dispatcher probe after the game's own call returned, at
 // dispatch depth 0. Runs the F5 file when latched, otherwise one queued script.
 inline void run_pending(PPCContext& ctx, uint8_t* base, const std::string& via) {
+  if (!has_pending()) return;  // nothing queued: run_native and the rest would do nothing
   if (saving()) {
     const uint32_t save = g_saves_seen.load();
     if (has_pending() && g_save_hold_logged.exchange(save) != save) {
@@ -419,6 +455,7 @@ inline void run_pending(PPCContext& ctx, uint8_t* base, const std::string& via) 
     }
     return;
   }
+  if (teardown_held()) return;
   run_native(ctx, base);
   if (g_running.load() || (g_queued.load() == 0 && !g_f5_pending.load())) return;
   if (!REXCVAR_GET(coop_lua_runner)) {

@@ -22,6 +22,7 @@
 #include "fable2_coop_mainmenu.h"
 // Co-op kit (feature 002): player 2's own inventory from the pause menu.
 #include "fable2_coop_kit.h"
+#include "fable2_coop_worlduse.h"  // player 2 opens chests, doors and levers (through the host)
 
 #include "fable_2_app.h"
 #include "fps_meter.h"
@@ -34,6 +35,8 @@
 #include "fable2_menu_probe.h"  // main-menu input path (mod-menu hook points)
 #include "fable2_modmenu.h"  // 6th "MOD OPTION" selectable main-menu item
 #include "fable2_av_probe.h"  // self-installs a guest-PC AV logger (VEH)
+#include "fable2_cam_watch.h"  // testing: who writes the joiner camera's view (coop_cam_watch)
+#include "fable2_gold_watch.h"  // testing: what pays player 2 its gold (coop_gold_watch)
 #include "fable2_stall_dump.h"  // self-installs a render-stall thread dumper
 // #include "fable2_ui_render_probe.h"
 #include "keyboard_gamepad.h"
