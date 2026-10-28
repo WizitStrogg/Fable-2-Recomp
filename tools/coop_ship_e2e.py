@@ -3408,6 +3408,93 @@ def lf_jn():
         a.stop()
 
 
+
+EQ_SLOT_PY = r"C:\Users\josh_\AppData\Local\Temp\claude\D--VoiceBank\2c833dc8-b1f5-4a88-af94-d98cc46c47dc\scratchpad\oakfield_slot.py"
+
+
+def eq_fresh_slot():
+    """A fresh rig co-op copy of Josh's Oakfield save in mod-a (no coop_player2.txt,
+    the newest save): (slot path, campaign id)."""
+    out = subprocess.check_output([sys.executable, EQ_SLOT_PY], text=True)
+    m = re.search(r"slot (\S+) header .* campaign (\w+)", out)
+    note("INFO", f"eq: fresh slot {out.strip()}")
+    return (m.group(1), m.group(2)) if m else (None, None)
+
+
+def eq_host_lobby(a, tag, cid):
+    if not host_continue_lobby(a, tag):
+        return False
+    hv = [l for l in a.lines() if "[lobby] open host kind=continue" in l][-1:]
+    ok = bool(hv) and cid in hv[0]
+    note("PASS" if ok else "FAIL", f"{tag}: the fresh Oakfield copy's lobby ({hv[0][60:] if hv else ''})")
+    return ok
+
+
+def lf_eqprobe():
+    """001eq a2 probe: which controller field holds the partner's look-screen gender.
+    The partner joins a fresh Oakfield copy with coop_join_screen_probe on and its
+    own answers off; on its look screen the harness presses Right once (the gender
+    row), then A until player 2 spawns. The probe lines go to the report."""
+    tag = "lf_eqprobe"
+    slot, cid = eq_fresh_slot()
+    if not cid:
+        note("FAIL", f"{tag}: no fresh slot")
+        return
+    setup_tomls()
+    with open(os.path.join(ROOT, "mod-b", "fable_2.toml"), "a", encoding="utf-8", newline="\n") as f:
+        f.write("coop_join_screen_probe = true\ncoop_join_screens_auto = false\n")
+    relay_log = open(os.path.join(OUT, f"relay_{tag}.log"), "w")
+    relay = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                           "coop_relay.py")], stdout=relay_log, stderr=relay_log)
+    a, b = Game("mod-a", "host"), Game("mod-b", "partner")
+    a.start({"FABLE2_TEST_INPUT": "1"})
+    b.start({"FABLE2_TEST_INPUT": "1"})
+    try:
+        if not eq_host_lobby(a, tag, cid):
+            return
+        n = b.count(r"main menu: Co-op entry added")
+        b.past_title()
+        menu_then_coop(b, tag, n)
+        wait_row(b, "Continue TestA", f"{tag}: the campaign is listed for the partner")
+        partner_joins(b, "Continue TestA", tag)
+        wait_row(a, "Start", f"{tag}: host lobby shows the partner")
+        if not both_ready_and_start(a, b, tag):
+            return
+        nb = len(b.lines())
+        t = time.time()
+        while time.time() - t < 180 and not any("[joinscreen] open" in l for l in b.lines()[nb:]):
+            time.sleep(1)
+        opened = any("[joinscreen] open" in l for l in b.lines()[nb:])
+        note("PASS" if opened else "FAIL", f"{tag}: the partner's join screen opened ({time.time() - t:.0f} s)")
+        if not opened:
+            return
+        time.sleep(2.5)
+        b.shot(f"{tag}_look_before.png")
+        n1 = len(b.lines())
+        b.send("press Right 200")
+        time.sleep(2.5)
+        b.shot(f"{tag}_look_after_right.png")
+        right = [l[24:330] for l in b.lines()[n1:] if "[joinscreen]" in l]
+        note("INFO", f"{tag}: probe lines after Right: {right[:8]}")
+        n2 = len(b.lines())
+        spawn0 = a.count(r"henchman spawned")
+        for k in range(12):
+            if a.count(r"henchman spawned") > spawn0:
+                break
+            b.send("press A 200")
+            time.sleep(2.0)
+            b.shot(f"{tag}_a{k:02d}.png")
+        a.wait(f"{tag}: player 2 spawned", r"henchman spawned", spawn0, 60)
+        note("INFO", f"{tag}: probe lines over the A presses: {[l[24:330] for l in b.lines()[n2:] if '[joinscreen]' in l][:20]}")
+        note("INFO", f"{tag}: body {[l[24:200] for l in a.lines() if 'player 2 body' in l][-1:]}")
+        time.sleep(5)
+        b.shot(f"{tag}_partner_world.png")
+    finally:
+        for g in (a, b):
+            g.stop()
+        relay.kill()
+
+
 def run_livefix():
     phases = sys.argv[sys.argv.index("--phases") + 1].split(",") if "--phases" in sys.argv else ["empty", "male", "female"]
     if "empty" in phases:
@@ -3430,6 +3517,8 @@ def run_livefix():
         lf_next()
     if "jn" in phases:
         lf_jn()
+    if "eqprobe" in phases:
+        lf_eqprobe()
 
 
 def run_dynsync():
