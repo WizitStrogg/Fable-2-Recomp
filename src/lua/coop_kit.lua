@@ -182,9 +182,10 @@ function CoopKit.Apply(entity, op, hex)
     for _, slot in ipairs(WEAPON_SLOTS) do
       local w = try("GetEntityInSlot", Carrying.GetEntityInSlot, entity, slot)
       if w and w:IsAlive() and (RANGED_SLOTS[slot] and true or false) == want_ranged then
-        if not pcall(Carrying.ReturnEntityToInventory, entity, w) then
-          try("ReturnEntityToInventory", Carrying.ReturnEntityToInventory, w)
-        end
+        -- The working form (rig 2026-10-28, eqdiag): out of the slot, into the bag.
+        -- ReturnEntityToInventory returned true and changed nothing.
+        try("RemoveEntityFromSlot", Carrying.RemoveEntityFromSlot, entity, slot)
+        try("Inventory.AddEntity", Inventory.AddEntity, entity, w)
         done = done + 1
       end
     end

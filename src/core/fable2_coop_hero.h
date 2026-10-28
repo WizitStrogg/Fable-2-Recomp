@@ -356,9 +356,39 @@ inline void weapons_tick(uint32_t epoch, int64_t now) {
   if (g_weapons_epoch != epoch || g_weapons_tries >= kWeaponsTries || now < g_next_weapons_ms) return;
   const std::string lib = read_lib();
   const bool final = g_weapons_tries + 1 == kWeaponsTries;
-  const std::string chunk = lib + "\nif CoopWeaponsDue and CoopWeaponsDue.e:IsAlive() and "
+  // 001eq: once the saved weapons are there, the stock henchman default weapon
+  // ("DefaultWeaponHenchman", record BDFE364C: the "Hal's Sword" Calvin saw) is taken out
+  // of player 2's slots and the first saved weapon is equipped from the bag instead.
+  const std::string swap =
+      "local function coop_swap_default(e, p)\n"
+      "  local removed = 0\n"
+      "  for _, sl in ipairs({DummyObjects.HAND_RIGHT, DummyObjects.HAND_LEFT, DummyObjects.SHEATHE_BACK,\n"
+      "                       DummyObjects.SHEATHE_FRONT, DummyObjects.SHEATHE_HIP}) do\n"
+      "    local o, w = pcall(Carrying.GetEntityInSlot, e, sl)\n"
+      "    local on, nm = pcall(function() return w:GetName() end)\n"
+      "    if o and w and w:IsAlive() and on and nm == 'DefaultWeaponHenchman' then\n"
+      "      pcall(Carrying.RemoveEntityFromSlot, e, sl)\n"
+      "      removed = removed + 1\n"
+      "    end\n"
+      "  end\n"
+      "  if removed == 0 then return end\n"
+      "  for _, hex in ipairs(p.weap or {}) do\n"
+      "    for i = 0, (Inventory.GetNumberOfItems(e) or 0) - 1 do\n"
+      "      local item = Inventory.GetItemByIndex(e, i)\n"
+      "      local ok, id = pcall(function() return item:GetRecord():GetID() end)\n"
+      "      if ok and tostring(id):upper():find(hex, 1, true) then\n"
+      "        pcall(WeaponSetManager.EquipWeapon, e, item)\n"
+      "        print('[coop] weapons: the default henchman weapon replaced by ' .. hex)\n"
+      "        return\n"
+      "      end\n"
+      "    end\n"
+      "  end\n"
+      "  print('[coop] weapons: the default henchman weapon taken off (no saved weapon to equip)')\n"
+      "end\n";
+  const std::string chunk = lib + "\n" + swap + "if CoopWeaponsDue and CoopWeaponsDue.e:IsAlive() and "
                                   "CoopHero.ApplyWeapons(CoopWeaponsDue.e, CoopWeaponsDue.p, " +
-                            std::string(final ? "true" : "false") + ") then CoopWeaponsDue = nil end\n";
+                            std::string(final ? "true" : "false") +
+                            ") then pcall(coop_swap_default, CoopWeaponsDue.e, CoopWeaponsDue.p) CoopWeaponsDue = nil end\n";
   if (lib.empty() || !fable2::luaconsole::RunChunk(chunk)) return;  // no free slot: next tick
   ++g_weapons_tries;
   g_next_weapons_ms = now + kWeaponsEveryMs;

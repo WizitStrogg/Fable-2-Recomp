@@ -4137,6 +4137,124 @@ def lf_eqdiag():
         relay.kill()
 
 
+
+def eq_kill_in_place(a, b, tag, label, attacker):
+    """A bandit spawned 1.6 m in front of the attacker where it stands; the attacker
+    faces it and presses X until it is dead (the handle kept); XP read on the host."""
+    who = "GetPlayerHenchman()" if attacker is b else "GetPlayerHero()"
+    before = (eq_xp(a, "p2"), eq_xp(a, "hero"))
+    pos = lua_lines(a, (f"local e = {who}; local p = e:GetPosition(); local f = Physics.GetFacingVector(e); "
+                        "local s = CVector3(p:GetX() + f:GetX() * 1.6, p:GetY() + f:GetY() * 1.6, p:GetZ()); "
+                        f"local ok, b = pcall(Debug.CreateEntityAtPosition, 'CreatureVillagerBandit', 'lfb_{label}', s); "
+                        "LFB = ok and b or nil; print(string.format('LFKPOS %s %.2f %.2f %.2f', tostring(ok), s:GetX(), s:GetY(), s:GetZ()))"),
+                    "LFKPOS", 10)
+    time.sleep(3)
+    hits, alive = 0, ["?"]
+    for k in range(40):
+        alive = lua_lines(a, "print('LFBA ' .. tostring(LFB and LFB:IsAlive()))", "LFBA", 6)
+        if alive and alive[-1] == "false":
+            break
+        attacker.send("press X 200")
+        hits += 1
+        time.sleep(0.9)
+        if k == 3:
+            a.shot(f"{tag}_{label}_fight_host.png")
+            b.shot(f"{tag}_{label}_fight_partner.png")
+    time.sleep(8)  # orbs
+    after = (eq_xp(a, "p2"), eq_xp(a, "hero"))
+    note("INFO", f"{tag}: kill by {label}: spawn {pos}; {hits} presses; bandit alive {alive}; XP player 2 {before[0]} -> {after[0]}; "
+                 f"host hero {before[1]} -> {after[1]}")
+    a.shot(f"{tag}_{label}_after_kill_host.png")
+    b.shot(f"{tag}_{label}_after_kill_partner.png")
+
+
+def lf_eqtrace():
+    """001eq trace launch (coordinator 2026-10-28 17:02Z): load-in + the default weapon swap;
+    what the partner's Abilities page reads for XP (coop_trace_xp, joiner); the host's own
+    purchase traced (the learn path); Y-unequip with the working form; kills in place
+    (player 2, then the host); the pistol through Ranged."""
+    tag = "lf_eqtrace"
+    slot, cid = eq_fresh_slot()
+    if not cid:
+        note("FAIL", f"{tag}: no fresh slot")
+        return
+    setup_tomls()
+    relay_log = open(os.path.join(OUT, f"relay_{tag}.log"), "w")
+    relay = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                           "coop_relay.py")], stdout=relay_log, stderr=relay_log)
+    a, b = Game("mod-a", "host"), Game("mod-b", "partner")
+    a.start({"FABLE2_TEST_INPUT": "1"})
+    b.start({"FABLE2_TEST_INPUT": "1"})
+    try:
+        if not eq_host_lobby(a, tag, cid) or not partner_continue_join(a, b, tag):
+            return
+        a.window_capture = b.window_capture = True
+        time.sleep(40)  # the seed's weapons step runs up to ~30 s after the spawn
+        swap = [l[24:200] for l in a.lines() if "default henchman weapon" in l or "weapons: added" in l]
+        note("INFO", f"{tag}: seed weapons {swap}; slots {lua_lines(a, EQ_WEAP_LUA + 'print(' + chr(39) + 'LFSL ' + chr(39) + ' .. wl(GetPlayerHenchman()))', 'LFSL', 10)}")
+        b.shot(f"{tag}_loadin_partner.png")
+        a.shot(f"{tag}_loadin_host.png")
+        # --- the partner's Abilities page: what it reads for XP
+        lua_lines(a, ("local h = GetPlayerHenchman(); local t = EExperienceType; "
+                      "pcall(Experience.Modify, h, t.EXPERIENCE_GENERAL, 1111, false); pcall(Experience.Modify, h, t.EXPERIENCE_STRENGTH, 2222, false); "
+                      "print('LFXPSET ok')"), "LFXPSET", 10)
+        time.sleep(5)
+        nb = len(b.lines())
+        b.send("cvar coop_trace_xp true")
+        eq_page_path(b, 0, [(None, "p_abilities"), ("A", "p_strength")], tag)
+        eq_close_pages(b)
+        b.send("cvar coop_trace_xp false")
+        note("INFO", f"{tag}: partner page trace (host player 2 XP {eq_xp(a, 'p2')}): "
+                     f"{[l[24:240] for l in b.lines()[nb:] if '[eqtrace]' in l][:40]}")
+        # --- the host buys on its own page (the learn path)
+        lua_lines(a, ("pcall(Experience.Modify, GetPlayerHero(), EExperienceType.EXPERIENCE_STRENGTH, 6000, false); print('LFHXP ok')"), "LFHXP", 10)
+        lvl = ("local o, l = pcall(Stats.GetHeroAbilityLevel, GetPlayerHero(), EHeroAbilityType.HERO_ABILITY_STRENGTH_MELEE_WEAPONS); "
+               "print('LFHLVL ' .. tostring(o and l))")
+        l0 = lua_lines(a, lvl, "LFHLVL", 10)
+        na = len(a.lines())
+        a.send("cvar coop_trace_xp true")
+        eq_page_path(a, 0, [(None, "h_abilities"), ("A", "h_strength"), ("A", "h_after_buy"), ("A", "h_after_confirm")], tag)
+        eq_close_pages(a)
+        a.send("cvar coop_trace_xp false")
+        l1 = lua_lines(a, lvl, "LFHLVL", 10)
+        note("INFO", f"{tag}: host purchase: Brutal Styles {l0} -> {l1}; XP {eq_xp(a, 'hero')}; trace "
+                     f"{[l[24:240] for l in a.lines()[na:] if '[eqtrace]' in l][:60]}")
+        # --- Y-unequip (the working form)
+        na, nb = len(a.lines()), len(b.lines())
+        eq_page_path(b, 2, [(None, "unequip_hint"), ("Y", "unequip_after_y")], tag)
+        eq_close_pages(b)
+        time.sleep(4)
+        note("INFO", f"{tag}: unequip: host {[l[24:200] for l in a.lines()[na:] if 'host: command' in l][:3]}; slots "
+                     f"{lua_lines(a, EQ_WEAP_LUA + 'print(' + chr(39) + 'LFSL ' + chr(39) + ' .. wl(GetPlayerHenchman()))', 'LFSL', 10)}")
+        a.shot(f"{tag}_unequip_host.png")
+        b.shot(f"{tag}_unequip_partner.png")
+        # --- kills in place
+        lua_lines(a, ("local h = GetPlayerHenchman(); pcall(Inventory.AddItemOfType, h, GDB.GetRecord('#3966741D'):GetID()); "
+                      "for i = 0, Inventory.GetNumberOfItems(h) - 1 do local it = Inventory.GetItemByIndex(h, i); "
+                      "local ok, id = pcall(function() return it:GetRecord():GetID() end); "
+                      "if ok and tostring(id):upper():find('3966741D', 1, true) then pcall(WeaponSetManager.EquipWeapon, h, it) end end; print('LFARM ok')"),
+                  "LFARM", 10)
+        time.sleep(4)
+        eq_kill_in_place(a, b, tag, "p2", b)
+        eq_kill_in_place(a, b, tag, "host", a)
+        # --- the pistol through Ranged
+        lua_lines(a, ("pcall(Inventory.AddItemOfType, GetPlayerHenchman(), GDB.GetRecord('#3A153787'):GetID()); print('LFPIS ok')"), "LFPIS", 10)
+        time.sleep(6)
+        na = len(a.lines())
+        eq_page_path(b, 2, [(None, "pistol_cat"), ("Down", "pistol_on_ranged"), ("A", "pistol_list"), ("A", "pistol_after_a")], tag)
+        eq_close_pages(b)
+        time.sleep(4)
+        note("INFO", f"{tag}: pistol: host {[l[24:200] for l in a.lines()[na:] if 'host: command' in l][:3]}; slots "
+                     f"{lua_lines(a, EQ_WEAP_LUA + 'print(' + chr(39) + 'LFSL ' + chr(39) + ' .. wl(GetPlayerHenchman()))', 'LFSL', 10)}")
+        a.shot(f"{tag}_pistol_host.png")
+        b.shot(f"{tag}_pistol_partner.png")
+        note("INFO", f"{tag}: crashes: partner {b.count(r'Unhandled guest')}, host {a.count(r'Unhandled guest')}")
+    finally:
+        for g in (a, b):
+            g.stop()
+        relay.kill()
+
+
 def run_livefix():
     phases = sys.argv[sys.argv.index("--phases") + 1].split(",") if "--phases" in sys.argv else ["empty", "male", "female"]
     if "empty" in phases:
@@ -4171,6 +4289,8 @@ def run_livefix():
         lf_eqxp()
     if "eqdiag" in phases:
         lf_eqdiag()
+    if "eqtrace" in phases:
+        lf_eqtrace()
 
 
 def run_dynsync():

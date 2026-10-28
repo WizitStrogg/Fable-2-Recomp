@@ -22,6 +22,7 @@
 #include "fable2_coop_mainmenu.h"
 // Co-op kit (feature 002): player 2's own inventory from the pause menu.
 #include "fable2_coop_kit.h"
+#include "fable2_coop_eqtrace.h"  // 001eq: rig trace of the experience / ability calls (coop_trace_xp)
 #include "fable2_coop_worlduse.h"  // player 2 opens chests, doors and levers (through the host)
 
 #include "fable_2_app.h"
