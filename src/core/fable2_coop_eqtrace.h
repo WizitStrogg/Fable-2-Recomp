@@ -19,6 +19,8 @@
 #include <rex/logging.h>
 #include <rex/ppc/context.h>
 
+#include "fable2_coop_kit.h"
+
 REXCVAR_DEFINE_BOOL(coop_trace_xp, false, "Network",
                     "Testing: log the experience / ability calls (001eq trace), each distinct call once");
 
@@ -58,3 +60,32 @@ FABLE2_EQTRACE_HOOK(8251C068, "Experience.Get", 1)
 FABLE2_EQTRACE_HOOK(8251C0A8, "Experience.Modify core", 2)
 FABLE2_EQTRACE_HOOK(824AA728, "Stats 0x824AA728 (SetHeroAbilityLevel?)", 3)
 FABLE2_EQTRACE_HOOK(824AA140, "Stats 0x824AA140 (GetHeroAbilityLevel?)", 4)
+
+// 001up: the Experience binding thunk (sub_8251ED18: r3 = the binding, its function
+// at +8; r4 = the entity; r5 = the type) looks the entity's Experience component up
+// and calls the function (Get sub_8251C068, ...); without one it returns 0. The
+// partner's copy of player 2 has none, so its Abilities page showed 0 XP. On the
+// partner, a Get on player 2's copy is answered from the host's kit_state instead,
+// with no engine call on the copy. coop_trace_xp logs every distinct
+// (entity, function) the thunk sees.
+extern "C" void __imp__sub_8251ED18(PPCContext& ctx, uint8_t* base);
+extern "C" void sub_8251ED18(PPCContext& ctx, uint8_t* base) {
+  namespace ck = fable2::coopkit;
+  namespace ta = fable2::textappend;
+  const uint32_t bind = ctx.r3.u32, entity = ctx.r4.u32, type = ctx.r5.u32;
+  const uint32_t fn = ta::rdable2(base, bind + 8, 4) ? ta::load_be(base, bind + 8) : 0;
+  const uint32_t p2 = fable2::coopcam::g_p2_entity.load();
+  if (REXCVAR_GET(coop_trace_xp)) {
+    static std::mutex mu;
+    static std::set<std::pair<uint32_t, uint32_t>> seen;
+    std::lock_guard<std::mutex> l(mu);
+    if (seen.size() < 64 && seen.insert({entity, fn}).second)
+      REXSYS_INFO("[eqtrace] Experience thunk: entity 0x{:08X}{} fn 0x{:08X} type {} lr 0x{:08X}", entity,
+                  entity == p2 ? " (player 2's copy)" : "", fn, int32_t(type), static_cast<uint32_t>(ctx.lr));
+  }
+  if (entity && entity == p2 && ck::g_p2_xp_valid.load() && ck::joiner_active() && type < 4 && fn == 0x8251C068) {
+    ctx.r3.u64 = static_cast<uint32_t>(ck::g_p2_xp[type].load());
+    return;
+  }
+  __imp__sub_8251ED18(ctx, base);
+}

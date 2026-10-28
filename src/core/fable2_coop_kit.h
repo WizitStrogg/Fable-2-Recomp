@@ -43,6 +43,7 @@
 #include <map>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -697,6 +698,10 @@ inline void mirror_now(PPCContext& ctx, uint8_t* base, const KitState& want) {
 // known native), so the partner is told what the host did with a toast.
 extern "C" void rex_ui_set_toast(const char* text, int ms);
 inline std::map<uint32_t, Op> g_sent_ops;  // seq -> op, for the ack toast
+// 001up: player 2's experience from the host's kit_state, for the Experience
+// binding thunk below (the game thread reads them; joiner_tick writes them).
+inline std::atomic<bool> g_p2_xp_valid{false};
+inline std::atomic<int> g_p2_xp[4] = {0, 0, 0, 0}, g_p2_xpt[4] = {0, 0, 0, 0};
 constexpr uint16_t kPadY = 0x8000;
 inline std::atomic<bool> g_weapons_page{false};
 inline std::atomic<int> g_unequip_pending{0};  // -1: Y pressed on the Weapons page (pad_hook)
@@ -767,6 +772,13 @@ inline void joiner_tick(const Peer& host_pc, int64_t now) {
     auto k = ParseKitState(d.value);
     if (!k || k->rev == 0 || (j.state && k->rev <= j.state->rev)) continue;
     j.state = *k;
+    if (k->has_xp) {
+      for (int i = 0; i < 4; ++i) {
+        g_p2_xp[i] = k->xp[i];
+        g_p2_xpt[i] = k->xpt[i];
+      }
+      g_p2_xp_valid = true;
+    }
   }
   if (j.state && j.state->rev != j.mirrored_rev && REXCVAR_GET(coop_kit_mirror)) {
     j.mirrored_rev = j.state->rev;

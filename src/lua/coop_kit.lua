@@ -156,8 +156,17 @@ function CoopKit.Snapshot(entity, rev)
   melee, ranged = CoopKitWeaponRec[melee] or melee, CoopKitWeaponRec[ranged] or ranged
   local hp = try("Health.Get", Health.Get, entity) or 0
   local hpm = try("Health.GetMax", Health.GetMax, entity) or 0
+  -- 001up: player 2's experience (general, strength, skill, will) and the totals
+  -- earned, for the partner's Abilities page (its copy has no Experience component).
+  local xp, xpt = {}, {}
+  for i, t in ipairs({EExperienceType.EXPERIENCE_GENERAL, EExperienceType.EXPERIENCE_STRENGTH,
+                      EExperienceType.EXPERIENCE_SKILL, EExperienceType.EXPERIENCE_WILL}) do
+    xp[i] = math.floor(try("Experience.Get", Experience.Get, entity, t) or 0)
+    xpt[i] = math.floor(try("Experience.GetTotalEarned", Experience.GetTotalEarned, entity, t) or 0)
+  end
   return "COOPKIT:v1|rev=" .. tostring(rev or 0) .. "|hp=" .. math.floor(hp) .. "|hpm=" .. math.floor(hpm) ..
     "|melee=" .. melee .. "|ranged=" .. ranged .. "|worn=" .. table.concat(worn_list(entity), ",") ..
+    "|xp=" .. table.concat(xp, ",") .. "|xpt=" .. table.concat(xpt, ",") ..
     "|items=" .. table.concat(list, ",")
 end
 

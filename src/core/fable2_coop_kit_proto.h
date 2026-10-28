@@ -296,6 +296,10 @@ struct KitState {
   std::string melee, ranged;      // record hex of the equipped weapons ("" = none)
   std::vector<std::string> worn;  // record hex
   std::vector<Item> items;        // sorted by record hex
+  // 001up: experience by type (general, strength, skill, will) and the totals earned;
+  // has_xp false when the line carries none (an older host).
+  bool has_xp = false;
+  int xp[4] = {0, 0, 0, 0}, xpt[4] = {0, 0, 0, 0};
 };
 
 inline std::string Format(const KitState& k) {
@@ -319,6 +323,13 @@ inline std::optional<KitState> ParseKitState(std::string_view line) {
   k.ranged = (*f)["ranged"];
   for (auto w : Split((*f)["worn"], ','))
     if (IsRecordHex(w)) k.worn.emplace_back(w);
+  if (const auto xp = Split((*f)["xp"], ','), xpt = Split((*f)["xpt"], ','); xp.size() == 4 && xpt.size() == 4) {
+    k.has_xp = true;
+    for (int i = 0; i < 4; ++i) {
+      k.xp[i] = std::atoi(std::string(xp[i]).c_str());
+      k.xpt[i] = std::atoi(std::string(xpt[i]).c_str());
+    }
+  }
   for (auto part : Split((*f)["items"], ',')) {
     const auto p = Split(part, ':');
     if (p.size() < 4 || !IsRecordHex(p[0])) continue;
