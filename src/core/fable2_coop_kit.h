@@ -82,6 +82,8 @@ REXCVAR_DEFINE_BOOL(coop_kit_send_use, true, "Network",
 REXCVAR_DEFINE_STRING(coop_kit_send_line, "", "Network",
                       "Co-op kit test (partner): set to '<equip|wear|unwear|use> <record hex>' to send it "
                       "to the host once (the coop_kit_send command, as a setting the test input can set)");
+REXCVAR_DEFINE_BOOL(coop_kit_xp_probe, false, "Network",
+                    "Testing (partner): log player 2's components with a float array at +16 (experience probe), once");
 REXCVAR_DEFINE_BOOL(coop_kit_unequip, true, "Network",
                     "Co-op kit (partner): Y on the Weapons page takes the carried weapon back into the bag (001eq)");
 REXCVAR_DEFINE_BOOL(coop_kit_equip_local, true, "Network",
@@ -862,8 +864,32 @@ inline void start_close_tick() {
 
 inline int64_t g_next_tick_ms = 0;
 inline void (*g_prev_frame_hook)() = nullptr;
+// 001eq probe (rig): which of player 2's components holds its experience. The
+// Experience binding's Get (sub_8251C068) reads the float at *(component + 16) +
+// type * 4; this logs every component of the copy whose +16 points at readable
+// memory, with its first six floats, so a known value set on the host shows the type.
+inline void log_xp_components(PPCContext& /*ctx*/, uint8_t* base) {
+  const uint32_t entity = fable2::coopcam::g_p2_entity.load();
+  for (const auto& c : components(base, entity)) {
+    if (!c.ptr || !ta::rdable2(base, c.ptr + 16, 4)) continue;
+    const uint32_t arr = ta::load_be(base, c.ptr + 16);
+    if (!arr || !ta::rdable2(base, arr, 24)) continue;
+    float f[6];
+    for (int i = 0; i < 6; ++i) {
+      const uint32_t v = ta::load_be(base, arr + 4 * i);
+      std::memcpy(&f[i], &v, 4);
+    }
+    REXSYS_INFO("[coopkit] xp probe: type {} comp 0x{:08X} +16 -> 0x{:08X}: {:.1f} {:.1f} {:.1f} {:.1f} {:.1f} {:.1f}", c.type,
+                c.ptr, arr, f[0], f[1], f[2], f[3], f[4], f[5]);
+  }
+}
+
 inline void OnFrame() {
   if (g_prev_frame_hook) g_prev_frame_hook();
+  if (REXCVAR_GET(coop_kit_xp_probe)) {
+    rex::cvar::SetFlagByName("coop_kit_xp_probe", "false");
+    fable2::f5lua::request_native(&log_xp_components);
+  }
   if (!REXCVAR_GET(coop_kit)) return;
   start_close_tick();
   const int64_t now = now_ms();
