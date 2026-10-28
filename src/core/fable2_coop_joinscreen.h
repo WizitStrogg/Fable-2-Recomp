@@ -24,9 +24,11 @@
 #include <cstdint>
 
 #include <rex/cvar.h>
+#include <rex/kernel/xam/lan_lobby.h>
 #include <rex/logging.h>
 #include <rex/ppc/context.h>
 
+#include "fable2_coop_frontend.h"
 #include "fable2_f5_lua.h"
 
 REXCVAR_DEFINE_BOOL(coop_join_screen_probe, false, "Network",
@@ -128,12 +130,58 @@ inline void check_fallback() {
   rex::cvar::SetFlagByName("coop_join_screen_skip", "false");
 }
 
+// --- the partner's answer while the screens are open (001jn) --------------------------
+//
+// Round two (2026-10-28, a later-story Oakfield save): the partner's timed A presses
+// (frontend accept_tick, from the join on) were all spent before its game had loaded
+// the host's level and opened these screens, so the screens sat under the partner's
+// "Joining..." cover until Calvin pressed A by chance (the host waited 347 s). Now the
+// partner answers the screens while they are actually open: a real pad A (the same path
+// as a press) every kScreenAEveryMs from kScreenFirstAMs after the open, at most
+// kScreenMaxA times; the partner's look screen and its "won't be saved" box both take
+// A. If they are still open kScreenCoverMs after the open, the cover comes down so the
+// player can see and answer them. Off with coop_join_screens_auto (rig stepping) or
+// when coop_join_screen_skip answers them in code.
+constexpr int64_t kScreenFirstAMs = 1500, kScreenAEveryMs = 2000, kScreenCoverMs = 10000;
+constexpr int kScreenMaxA = 10;
+inline int64_t g_screen_seen_open = 0, g_screen_last_a_ms = 0;
+inline int g_screen_a = 0;
+inline bool g_screen_cover_dropped = false;
+inline void partner_screen_tick() {
+  if (!REXCVAR_GET(coop_campaign) || !REXCVAR_GET(coop_join_screens_auto) || REXCVAR_GET(coop_join_screen_skip))
+    return;
+  const int64_t open = g_open_ms.load();
+  if (!open || !g_controller.load()) return;
+  if (rex::kernel::xam::lobby::GetLobbyStatus().joined_host_ip == 0) return;  // the host keeps its timed answers
+  if (open != g_screen_seen_open) {
+    g_screen_seen_open = open;
+    g_screen_a = 0;
+    g_screen_last_a_ms = 0;
+    g_screen_cover_dropped = false;
+    REXSYS_INFO("[coop] partner: the game's join screen is open");
+  }
+  if (fable2::coopfrontend::g_cover_hide_at_ms.load()) return;  // player 2 spawned: A would act in the world
+  const int64_t now = fable2::f5lua::steady_ms();
+  if (g_screen_a < kScreenMaxA && now - open >= kScreenFirstAMs && now - g_screen_last_a_ms >= kScreenAEveryMs) {
+    g_screen_last_a_ms = now;
+    ++g_screen_a;
+    fable2::cooplobby::InjectPress(static_cast<uint16_t>(fable2::cooplobby::kA), 0, 200);
+    REXSYS_INFO("[coop] partner: auto-accepted stock join screen (A {} of {}, open {} ms)", g_screen_a, kScreenMaxA,
+                now - open);
+  }
+  if (!g_screen_cover_dropped && now - open > kScreenCoverMs) {
+    g_screen_cover_dropped = true;
+    fable2::coopfrontend::HideCover("the game's join screen is still open after 10 s: shown so it can be answered");
+  }
+}
+
 // The fallback also runs from its own frame hook: launch 28 rerun showed the
 // partner's screens can leave the per-frame update the check used to hang off.
 inline void (*g_prev_frame_hook)() = nullptr;
 inline void OnFrame() {
   if (g_prev_frame_hook) g_prev_frame_hook();
   check_fallback();
+  partner_screen_tick();
 }
 inline const bool g_installed = [] {
   g_prev_frame_hook = fable2::f5lua::g_frame_hook;

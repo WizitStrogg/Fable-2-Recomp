@@ -3334,6 +3334,80 @@ def lf_next():
         relay.kill()
 
 
+
+def lf_jn():
+    """001jn proof (coordinator, 2026-10-28): the partner's stock join screen is
+    answered by the partner itself while it is open (no manual A anywhere): a
+    loopback Co-op continue join (Josh's Oakfield copy, mod-a host, mod-b partner)
+    with the auto-accept and spawn lines and screenshots; then the host's own solo
+    Continue still loads the world."""
+    tag = "lf_jn"
+    setup_tomls()
+    relay_log = open(os.path.join(OUT, f"relay_{tag}.log"), "w")
+    relay = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                           "coop_relay.py")], stdout=relay_log, stderr=relay_log)
+    a, b = Game("mod-a", "host"), Game("mod-b", "partner")
+    a.start({"FABLE2_TEST_INPUT": "1"})
+    b.start({"FABLE2_TEST_INPUT": "1"})
+    try:
+        ok = oak_join(a, b, tag)
+        bl = b.lines()
+        opened = [l[24:200] for l in bl if "the game's join screen is open" in l]
+        auto = [l[24:200] for l in bl if "auto-accepted stock join screen" in l]
+        timed = [l[24:200] for l in bl if "partner: A for the join screen" in l]
+        dropped = [l[24:200] for l in bl if "join screen is still open after 10 s" in l]
+        spawn = [l[24:200] for l in a.lines() if "henchman spawned" in l or "player 2 body" in l]
+        note("PASS" if ok and opened and auto and not timed else "FAIL",
+             f"{tag}: partner answered its own join screen: open {opened[:1]}; auto-accept {auto[:4]}; "
+             f"timed presses {timed[:2]} (expected none)")
+        note("INFO", f"{tag}: spawn on the host {spawn[-2:]}; cover dropped by the 10 s timeout: {dropped[:1] or 'no'}")
+        b.shot(f"{tag}_partner_in_world.png")
+        a.shot(f"{tag}_host_in_world.png")
+    finally:
+        for g in (a, b):
+            g.stop()
+        relay.kill()
+    # A new co-op campaign (the skip-childhood path), again with no manual A: the
+    # partner's timed presses are gone, so this proves nothing else relied on them.
+    a, b, relay, ok = lf_start_campaign(tag + "_new")
+    try:
+        bl = b.lines()
+        opened = [l[24:200] for l in bl if "the game's join screen is open" in l]
+        auto = [l[24:200] for l in bl if "auto-accepted stock join screen" in l]
+        timed = [l[24:200] for l in bl if "partner: A for the join screen" in l]
+        dropped = [l[24:200] for l in bl if "join screen is still open after 10 s" in l]
+        note("PASS" if ok and opened and auto and not timed else "FAIL",
+             f"{tag}_new: new campaign: partner answered its own join screen: open {opened[:1]}; "
+             f"auto-accept {auto[:4]}; timed presses {timed[:2]} (expected none); cover timeout {dropped[:1] or 'no'}")
+        time.sleep(4)
+        b.shot(f"{tag}_new_partner_in_world.png")
+        a.shot(f"{tag}_new_host_in_world.png")
+    finally:
+        for g in (a, b):
+            g.stop()
+        relay.kill()
+    # The host's solo Continue (the stock main menu's top row) still loads a world.
+    a = Game("mod-a", "host")
+    a.start({"FABLE2_TEST_INPUT": "1"})
+    try:
+        n_menu = a.count(r"main menu: Co-op entry added")
+        a.past_title()
+        a.wait(f"{tag}: solo: main menu built", r"main menu: Co-op entry added", n_menu, 30)
+        time.sleep(2)
+        a.shot(f"{tag}_solo_menu.png")
+        n = a.count(r"front-end scans paused \(the game's Lua is running\)")
+        a.press("E")  # Continue: the top row
+        ok = a.wait(f"{tag}: solo Continue loads the world (the game's Lua runs)",
+                    r"front-end scans paused \(the game's Lua is running\)", n, 120)
+        time.sleep(20)
+        a.shot(f"{tag}_solo_world.png")
+        crashes = a.count(r"Unhandled guest")
+        note("PASS" if ok and crashes == 0 and a.proc.is_running() else "FAIL",
+             f"{tag}: solo Continue: world loaded, {crashes} crash(es)")
+    finally:
+        a.stop()
+
+
 def run_livefix():
     phases = sys.argv[sys.argv.index("--phases") + 1].split(",") if "--phases" in sys.argv else ["empty", "male", "female"]
     if "empty" in phases:
@@ -3354,6 +3428,8 @@ def run_livefix():
         lf_use23()
     if "next" in phases:
         lf_next()
+    if "jn" in phases:
+        lf_jn()
 
 
 def run_dynsync():

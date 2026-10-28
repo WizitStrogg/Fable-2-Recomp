@@ -1302,7 +1302,9 @@ end
           s.joined_since_ms = now;
           s.accept_presses = 0;
         }
-        accept_tick(s, s.joined_since_ms, now, "partner");
+        // No timed A here (001jn): they were spent before a slow load opened the screens
+        // (round two). The partner answers while the screens are open
+        // (fable2_coop_joinscreen.h partner_screen_tick).
         if (now - s.joined_since_ms > kAcceptFirstMs + kAcceptPresses * kAcceptEveryMs) {
           REXSYS_INFO("[coop] partner: in the host's world (after {} attempt(s))", s.tries);
           g_past_title = false;
