@@ -42,6 +42,21 @@ local function item_info(entity)
 end
 
 local RANGED_SLOTS = {[DummyObjects.SHEATHE_RANGED_BACK] = true}
+-- A carried weapon is ranged by its own item name tag (001eq, rig 2026-10-28: player
+-- 2's pistol sits in SHEATHE_FRONT, which the slot test counted as melee); the slot
+-- test stays the fallback for a weapon whose tag cannot be read.
+local RANGED_TAGS = {"PISTOL", "RIFLE", "CROSSBOW", "BLUNDERBUSS", "CLOCKWORK", "TURRET"}
+local function is_ranged(w, slot)
+  local _, tag = item_info(w)
+  tag = tostring(tag or ""):upper()
+  if tag ~= "" then
+    for _, t in ipairs(RANGED_TAGS) do
+      if tag:find(t, 1, true) then return true end
+    end
+    return false
+  end
+  return RANGED_SLOTS[slot] == true
+end
 local WEAPON_SLOTS = {
   DummyObjects.HAND_RIGHT, DummyObjects.HAND_LEFT, DummyObjects.SHEATHE_BACK,
   DummyObjects.SHEATHE_RANGED_BACK, DummyObjects.SHEATHE_FRONT, DummyObjects.SHEATHE_HIP
@@ -99,7 +114,7 @@ local function weapons(entity)
     if w and w:IsAlive() then
       local hex = record_hex(w)
       if hex then
-        if RANGED_SLOTS[slot] then
+        if is_ranged(w, slot) then
           if ranged == "" then ranged = hex end
         elseif melee == "" then
           melee = hex
@@ -181,7 +196,7 @@ function CoopKit.Apply(entity, op, hex)
     local done = 0
     for _, slot in ipairs(WEAPON_SLOTS) do
       local w = try("GetEntityInSlot", Carrying.GetEntityInSlot, entity, slot)
-      if w and w:IsAlive() and (RANGED_SLOTS[slot] and true or false) == want_ranged then
+      if w and w:IsAlive() and is_ranged(w, slot) == want_ranged then
         -- The working form (rig 2026-10-28, eqdiag): out of the slot, into the bag.
         -- ReturnEntityToInventory returned true and changed nothing.
         try("RemoveEntityFromSlot", Carrying.RemoveEntityFromSlot, entity, slot)
