@@ -57,6 +57,7 @@
 #include "fable2_coop_camera.h"
 #include "fable2_coop_campaign.h"
 #include "fable2_coop_frontend.h"
+#include "fable2_coop_hero.h"
 #include "fable2_coop_kit_proto.h"
 #include "fable2_f5_lua.h"
 #include "fable2_lua_console.h"
@@ -78,6 +79,8 @@ REXCVAR_DEFINE_BOOL(coop_kit_send_wear, true, "Network",
                     "Co-op kit (partner): wear / take off on the Clothing page is sent to the host");
 REXCVAR_DEFINE_BOOL(coop_kit_send_use, true, "Network",
                     "Co-op kit (partner): use (potions, food) on the Items page is sent to the host");
+REXCVAR_DEFINE_BOOL(coop_kit_mirror_worn, true, "Network",
+                    "Co-op kit (partner): wear on the copy what the host wears on player 2 (001eq)");
 REXCVAR_DEFINE_BOOL(coop_kit_send_equip, true, "Network",
                     "Co-op kit (partner): equip on the Weapons page is sent to the host");
 // Off: L4 of 17:14Z, the henchman quit question opened from the full wheel did
@@ -592,6 +595,35 @@ inline void OnStateLine(std::string_view line) {
 // removed here; with coop_kit_mirror_clothing, owned clothing missing from the
 // copy is added (L1b: the copy lists its worn clothes as inventory stacks, and
 // a hat given on the host never reached the Clothing page).
+// 001eq (b1, wear): the joiner's own state decides its player 2's look (the host's
+// wear on player 2 is reset by it, fable2_coop_hero.h dress_player2), so what the
+// host wears on player 2 is put on the copy here with the core appearance add
+// sub_8256FC80(appearance, record id): every record newly in kit_state's worn list
+// since the last mirror (all of it after a new spawn). Taking off has no known
+// native yet: the host's unwear is shown as a toast instead (b2, joiner_tick).
+inline uint32_t g_worn_epoch = ~0u;
+inline std::vector<std::string> g_worn_applied;
+inline void mirror_worn(PPCContext& ctx, uint8_t* base, const KitState& want) {
+  if (!REXCVAR_GET(coop_kit_mirror_worn)) return;
+  const uint32_t epoch = fable2::coophero::g_spawn_epoch.load();
+  if (epoch != g_worn_epoch) {
+    g_worn_epoch = epoch;
+    g_worn_applied.clear();
+  }
+  const uint32_t appearance = fable2::coophero::find_appearance(base, fable2::coopcam::g_p2_entity.load());
+  if (!appearance) return;
+  int worn = 0;
+  for (const auto& rec : want.worn) {
+    if (std::find(g_worn_applied.begin(), g_worn_applied.end(), rec) != g_worn_applied.end()) continue;
+    ctx.r3.u64 = appearance;
+    ctx.r4.u64 = HexToId(rec);
+    sub_8256FC80(ctx, base);
+    ++worn;
+  }
+  g_worn_applied = want.worn;
+  if (worn) REXSYS_INFO("[coopkit] mirror rev {}: wore {} item(s) on the copy ({} worn on the host)", want.rev, worn, want.worn.size());
+}
+
 inline void mirror_now(PPCContext& ctx, uint8_t* base, const KitState& want) {
   const uint32_t inv = component(base, fable2::coopcam::g_p2_entity.load(), kInventoryEC);
   if (!inv) return;
@@ -619,6 +651,25 @@ inline void mirror_now(PPCContext& ctx, uint8_t* base, const KitState& want) {
         adds += native_add(ctx, base, inv, HexToId(i.rec)) ? 1 : 0;
   if (adds || removes)
     REXSYS_INFO("[coopkit] mirror rev {}: +{} -{} on the copy's inventory", want.rev, adds, removes);
+  mirror_worn(ctx, base, want);
+}
+
+// 001eq (b2): the copy's weapon slots and taken-off clothes are not mirrored (no
+// known native), so the partner is told what the host did with a toast.
+extern "C" void rex_ui_set_toast(const char* text, int ms);
+inline std::map<uint32_t, Op> g_sent_ops;  // seq -> op, for the ack toast
+inline void ack_toast(const Result& r) {
+  const auto it = g_sent_ops.find(r.seq);
+  if (it == g_sent_ops.end()) return;
+  const Op op = it->second;
+  g_sent_ops.erase(it);
+  std::string text;
+  if (r.res != "ok") text = ReasonText(r.res);
+  else if (op == Op::kEquip) text = "Equipped (on the host)";
+  else if (op == Op::kUnwear) text = "Taken off (on the host)";
+  else if (op == Op::kWear) text = "Worn";
+  else return;
+  rex_ui_set_toast(text.c_str(), 2500);
 }
 
 inline void joiner_tick(const Peer& host_pc, int64_t /*now*/) {
@@ -631,7 +682,10 @@ inline void joiner_tick(const Peer& host_pc, int64_t /*now*/) {
   for (const auto& d : lobby::GetPeerData("kit_ack")) {
     if (!from_peer(d, host_pc)) continue;
     if (auto a = ParseAck(d.value))
-      for (const auto& r : j.queue.OnAck(*a)) REXSYS_INFO("[coopkit] command {}: {} ({})", r.seq, r.res, ReasonText(r.res));
+      for (const auto& r : j.queue.OnAck(*a)) {
+        REXSYS_INFO("[coopkit] command {}: {} ({})", r.seq, r.res, ReasonText(r.res));
+        ack_toast(r);
+      }
   }
   for (const auto& d : lobby::GetPeerData("kit_state")) {
     if (!from_peer(d, host_pc)) continue;
@@ -650,6 +704,7 @@ inline void joiner_tick(const Peer& host_pc, int64_t /*now*/) {
 inline void SendCommand(Op op, uint32_t id) {
   std::lock_guard<std::mutex> l(mtx());
   const uint32_t seq = joiner().queue.Add(op, IdToHex(id));
+  g_sent_ops[seq] = op;
   REXSYS_INFO("[coopkit] partner: command {} {} {}", seq, OpName(op), IdToHex(id));
 }
 
