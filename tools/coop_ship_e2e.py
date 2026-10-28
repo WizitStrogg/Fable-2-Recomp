@@ -4403,6 +4403,147 @@ def lf_eqproof():
         relay.kill()
 
 
+
+PERF_RIG_PS1 = r"C:\Users\josh_\AppData\Local\Temp\claude\D--VoiceBank\2c833dc8-b1f5-4a88-af94-d98cc46c47dc\scratchpad\rig_release.ps1"
+
+
+def perf_one(rel, settle=30, window=90):
+    """mod-a <- release `rel`; solo Continue (the stock save picker's first card: the
+    same newest save every run, no input after); after `settle` s, the runtime's own
+    5 s counters for `window` s: swaps, frames over 20/33/50 ms, longest frame."""
+    out = subprocess.run(["powershell", "-NoProfile", "-File", PERF_RIG_PS1, "-Rel", rel], capture_output=True, text=True)
+    note("INFO", f"perf {rel}: install {out.stdout.strip()[-200:]} {out.stderr.strip()[-200:]}")
+    setup_tomls()
+    if "--josh-res" in sys.argv:
+        # Josh's own display settings (mod's toml), so throughput below the vsync cap shows.
+        josh = {}
+        for line in open(os.path.join(ROOT, "mod", "fable_2.toml"), encoding="utf-8"):
+            k = line.split("=", 1)[0].strip()
+            if k in ("fullscreen", "fullscreen_exclusive", "window_width", "window_height", "resolution", "resolution_scale",
+                     "vsync", "frame_limit"):
+                josh[k] = line.rstrip("\r\n")
+        tp = os.path.join(ROOT, "mod-a", "fable_2.toml")
+        lines = [josh.get(l.split("=", 1)[0].strip(), l.rstrip("\r\n")) for l in open(tp, encoding="utf-8")]
+        open(tp, "w", encoding="utf-8", newline="\n").write("\n".join(lines) + "\n")
+        note("INFO", f"perf {rel}: mod-a display = Josh's: {sorted(josh.values())}")
+    a = Game("mod-a", "host")
+    a.start({"FABLE2_TEST_INPUT": "1"})
+    try:
+        n_menu = a.count(r"main menu: Co-op entry added")
+        a.past_title()
+        a.wait(f"perf {rel}: main menu", r"main menu: Co-op entry added", n_menu, 240)
+        time.sleep(2)
+        n = a.count(r"front-end scans paused \(the game's Lua is running\)")
+        a.press("Down")
+        time.sleep(1.0)
+        a.press("E")
+        time.sleep(12)
+        a.press("E")
+        time.sleep(4)
+        if not a.count(r"front-end scans paused \(the game's Lua is running\)") > n:
+            a.press("E")
+        if not a.wait(f"perf {rel}: the world loads", r"front-end scans paused \(the game's Lua is running\)", n, 180):
+            return None
+        time.sleep(settle)
+        start = len(a.lines())
+        time.sleep(window)
+        rows = []
+        for l in a.lines()[start:]:
+            m = re.search(r"Guest-visible writes in 5 s: (\d+) swaps", l)
+            f = re.search(r"frames over 20/33/50 ms (\d+)/(\d+)/(\d+), longest (\d+) ms", l)
+            if m and f:
+                rows.append((int(m.group(1)), int(f.group(1)), int(f.group(2)), int(f.group(3)), int(f.group(4))))
+        if not rows:
+            note("FAIL", f"perf {rel}: no counter lines")
+            return None
+        k = len(rows)
+        res = (sum(r[0] for r in rows) / k, sum(r[1] for r in rows), sum(r[2] for r in rows), sum(r[3] for r in rows),
+               max(r[4] for r in rows), k)
+        a.shot(f"perf_{rel}.png")
+        note("INFO", f"perf {rel}: swaps/5s {res[0]:.1f}; frames over 20/33/50 ms {res[1]}/{res[2]}/{res[3]}; longest {res[4]} ms; "
+                     f"{k} windows; crashes {a.count(r'Unhandled guest')}")
+        return res
+    finally:
+        a.stop()
+
+
+def run_perfab():
+    rels = sys.argv[sys.argv.index("--rels") + 1].split(",") if "--rels" in sys.argv else ["release-001nx", "release-001jn", "release-001eq", "release-001eq2", "release-001nx"]
+    table = []
+    for rel in rels:
+        table.append((rel, perf_one(rel)))
+    for rel, res in table:
+        if res:
+            note("INFO", f"PERF TABLE {rel:16s} swaps/5s {res[0]:6.1f}  >20ms {res[1]:4d}  >33ms {res[2]:3d}  >50ms {res[3]:3d}  longest {res[4]:4d} ms  ({res[5]} windows)")
+        else:
+            note("INFO", f"PERF TABLE {rel:16s} no data")
+
+
+
+def lf_uptrace():
+    """001up trace (rig build with FABLE2_RIG_TRACE): the partner's Abilities page with
+    the XP redirect (host gives player 2 XP first; the page should now show it); then
+    the host buys a level on its own page (its wheel opens on Quests/Maps: Down to
+    Abilities) with coop_trace_xp on, so the callers (thunks) of the Modify core and
+    the Stats functions are logged for learn-on-host."""
+    tag = "lf_uptrace"
+    slot, cid = eq_fresh_slot()
+    if not cid:
+        note("FAIL", f"{tag}: no fresh slot")
+        return
+    setup_tomls()
+    relay_log = open(os.path.join(OUT, f"relay_{tag}.log"), "w")
+    relay = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                           "coop_relay.py")], stdout=relay_log, stderr=relay_log)
+    a, b = Game("mod-a", "host"), Game("mod-b", "partner")
+    a.start({"FABLE2_TEST_INPUT": "1"})
+    b.start({"FABLE2_TEST_INPUT": "1"})
+    try:
+        if not eq_host_lobby(a, tag, cid) or not partner_continue_join(a, b, tag):
+            return
+        a.window_capture = b.window_capture = True
+        time.sleep(15)
+        # player 2 gets XP on the host; the partner's page should show it (the redirect)
+        lua_lines(a, ("local h = GetPlayerHenchman(); local t = EExperienceType; "
+                      "pcall(Experience.Modify, h, t.EXPERIENCE_GENERAL, 1500, false); pcall(Experience.Modify, h, t.EXPERIENCE_STRENGTH, 5000, false); "
+                      "print('LFXPSET ok')"), "LFXPSET", 10)
+        time.sleep(8)
+        kit = [l for l in a.lines() if "[lua] COOPKIT:v1" in l][-1:]
+        note("INFO", f"{tag}: host player 2 XP {eq_xp(a, 'p2')}; kit xp {re.search(r'[|]xp=([^|]*)', kit[0]).group(1) if kit and '|xp=' in kit[0] else '?'}")
+        nb = len(b.lines())
+        b.send("cvar coop_trace_xp true")
+        eq_page_path(b, 0, [(None, "p_abilities"), ("A", "p_strength"), ("A", "p_after_learn")], tag)
+        eq_close_pages(b)
+        note("INFO", f"{tag}: partner trace while it pressed Learn: {[l[24:240] for l in b.lines()[nb:] if '[eqtrace]' in l][:30]}")
+        note("INFO", f"{tag}: player 2 Brutal Styles on the host after the partner's Learn: "
+                     f"{lua_lines(a, 'local o, l = pcall(Stats.GetHeroAbilityLevel, GetPlayerHenchman(), EHeroAbilityType.HERO_ABILITY_STRENGTH_MELEE_WEAPONS); print(' + chr(39) + 'LFLVL ' + chr(39) + ' .. tostring(o and l))', 'LFLVL', 10)}; "
+                     f"XP {eq_xp(a, 'p2')}")
+        # the host buys on its own page (the learn path's calls)
+        lua_lines(a, "pcall(Experience.Modify, GetPlayerHero(), EExperienceType.EXPERIENCE_STRENGTH, 6000, false); print('LFHXP ok')", "LFHXP", 10)
+        lvl = ("local o, l = pcall(Stats.GetHeroAbilityLevel, GetPlayerHero(), EHeroAbilityType.HERO_ABILITY_STRENGTH_MELEE_WEAPONS); "
+               "print('LFHLVL ' .. tostring(o and l))")
+        l0 = lua_lines(a, lvl, "LFHLVL", 10)
+        na = len(a.lines())
+        a.send("cvar coop_trace_xp true")
+        a.send("press Start 200")
+        time.sleep(2.5)
+        a.shot(f"{tag}_h_wheel.png")
+        for k, key in enumerate(("Down", "A", "A", "A", "A")):
+            a.send(f"press {key} 200")
+            time.sleep(2.5)
+            a.shot(f"{tag}_h_{k}_{key}.png")
+        eq_close_pages(a, 5)
+        a.send("cvar coop_trace_xp false")
+        l1 = lua_lines(a, lvl, "LFHLVL", 10)
+        note("INFO", f"{tag}: host purchase: Brutal Styles {l0} -> {l1}; XP {eq_xp(a, 'hero')}")
+        note("INFO", f"{tag}: host trace: {[l[24:240] for l in a.lines()[na:] if '[eqtrace]' in l][:60]}")
+        note("INFO", f"{tag}: crashes: partner {b.count(r'Unhandled guest')}, host {a.count(r'Unhandled guest')}")
+    finally:
+        for g in (a, b):
+            g.stop()
+        relay.kill()
+
+
 def run_livefix():
     phases = sys.argv[sys.argv.index("--phases") + 1].split(",") if "--phases" in sys.argv else ["empty", "male", "female"]
     if "empty" in phases:
@@ -4441,6 +4582,8 @@ def run_livefix():
         lf_eqtrace()
     if "eqproof" in phases:
         lf_eqproof()
+    if "uptrace" in phases:
+        lf_uptrace()
 
 
 def run_dynsync():
@@ -4676,7 +4819,7 @@ def run_continue2():
 def main():
     os.makedirs(OUT, exist_ok=True)
     mode = sys.argv[1] if len(sys.argv) > 1 else "coop"
-    {"coop": run_coop, "solo": run_solo, "multi": run_multi, "menu": run_menu, "menu2": run_menu2, "err": run_err, "final": run_final, "last": run_last, "start": run_start, "purse": run_purse, "fps": run_fps, "combo": run_combo, "camera": run_camera, "luaq": run_luaq, "luaq_kept": run_luaq_kept, "continue2": run_continue2, "boots": run_boots, "worldgold": run_worldgold, "batch1": run_batch1, "savestress": run_savestress, "solowalk": run_solowalk, "dynsync": run_dynsync, "livefix": run_livefix}[mode]()
+    {"coop": run_coop, "solo": run_solo, "multi": run_multi, "menu": run_menu, "menu2": run_menu2, "err": run_err, "final": run_final, "last": run_last, "start": run_start, "purse": run_purse, "fps": run_fps, "combo": run_combo, "camera": run_camera, "luaq": run_luaq, "luaq_kept": run_luaq_kept, "continue2": run_continue2, "boots": run_boots, "worldgold": run_worldgold, "batch1": run_batch1, "savestress": run_savestress, "solowalk": run_solowalk, "dynsync": run_dynsync, "livefix": run_livefix, "perfab": run_perfab}[mode]()
     with open(os.path.join(OUT, f"results_{mode}.txt"), "w", encoding="utf-8") as f:
         f.write("\n".join(results) + "\n")
     return 0 if not any(r.startswith("FAIL") for r in results) else 1
