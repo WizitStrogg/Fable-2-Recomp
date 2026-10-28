@@ -147,9 +147,49 @@ def focus(hwnd):
 
 
 # --- one game copy --------------------------------------------------------------
+def window_image(hwnd):
+    """The window's own rendered content (PrintWindow with PW_RENDERFULLCONTENT),
+    or None if it comes back black."""
+    try:
+        gdi32 = ctypes.windll.gdi32
+        r = wt.RECT()
+        user32.GetClientRect(hwnd, ctypes.byref(r))
+        w, h = r.right - r.left, r.bottom - r.top
+        if w <= 0 or h <= 0:
+            return None
+        hdc = user32.GetDC(hwnd)
+        mdc = gdi32.CreateCompatibleDC(hdc)
+        bmp = gdi32.CreateCompatibleBitmap(hdc, w, h)
+        old = gdi32.SelectObject(mdc, bmp)
+        ok = user32.PrintWindow(hwnd, mdc, 3)  # PW_CLIENTONLY | PW_RENDERFULLCONTENT
+        class BMI(ctypes.Structure):
+            _fields_ = [("biSize", wt.DWORD), ("biWidth", ctypes.c_long), ("biHeight", ctypes.c_long),
+                        ("biPlanes", wt.WORD), ("biBitCount", wt.WORD), ("biCompression", wt.DWORD),
+                        ("biSizeImage", wt.DWORD), ("biXPelsPerMeter", ctypes.c_long),
+                        ("biYPelsPerMeter", ctypes.c_long), ("biClrUsed", wt.DWORD), ("biClrImportant", wt.DWORD)]
+        bmi = BMI(ctypes.sizeof(BMI), w, -h, 1, 32, 0, 0, 0, 0, 0, 0)
+        buf = ctypes.create_string_buffer(w * h * 4)
+        gdi32.GetDIBits(mdc, bmp, 0, h, buf, ctypes.byref(bmi), 0)
+        gdi32.SelectObject(mdc, old)
+        gdi32.DeleteObject(bmp)
+        gdi32.DeleteDC(mdc)
+        user32.ReleaseDC(hwnd, hdc)
+        if not ok:
+            return None
+        img = Image.frombuffer("RGB", (w, h), buf, "raw", "BGRX", 0, 1)
+        if max(img.convert("L").getextrema()) < 8:  # black: nothing composed
+            return None
+        return img
+    except Exception:  # noqa: BLE001
+        return None
+
+
 class Game:
     def __init__(self, folder, who):
         self.test_input = False
+        # Evidence shots from the game window itself (the menu walk's highlight
+        # detection is tuned on screen grabs, so it stays off until after the join).
+        self.window_capture = False
         self.dir = os.path.join(ROOT, folder)
         self.who = who
         self.proc = None
@@ -241,7 +281,13 @@ class Game:
             note("INFO", f"{self.who}: screenshot {name} taken with another window in front")
         p = os.path.join(OUT, name)
         try:
-            ImageGrab.grab(bbox=rect(self.hwnd), all_screens=True).save(p)
+            # The game's own window content first (PrintWindow, PW_RENDERFULLCONTENT):
+            # windows in front, like the Windows Security prompt, are not in it. A
+            # black frame (no composition content) falls back to the screen grab.
+            img = window_image(self.hwnd) if self.window_capture else None
+            if img is None:
+                img = ImageGrab.grab(bbox=rect(self.hwnd), all_screens=True)
+            img.save(p)
         except Exception as e:  # noqa: BLE001  (launch of 2026-10-24: a PIL encode error ended the run)
             note("INFO", f"{self.who}: screenshot {name} failed: {e}")
             Image.new("RGB", (4, 4)).save(p)
@@ -1045,7 +1091,11 @@ def wait_row(g, prefix, what, timeout=20):
 def menu_then_coop(g, tag, n_menu):
     """After a title A: wait until the front end has built the menu with the
     Co-op entry, then Down twice to Co-op and A -> the hub."""
-    g.wait(f"{tag}: main menu built with the Co-op entry", r"main menu: Co-op entry added", n_menu, 90)
+    t0 = time.time()
+    # 240 s: a slow boot must not fail a proof run (2026-10-28: a partner boot took
+    # ~3 min while heavy file scans ran on the PC); the boot time is logged.
+    g.wait(f"{tag}: main menu built with the Co-op entry", r"main menu: Co-op entry added", n_menu, 240)
+    note("INFO", f"{tag}: {g.who}: menu after {time.time() - t0:.0f} s of waiting")
     time.sleep(2)  # the menu's slide-in
     return open_coop_entry(g, tag)
 
@@ -3386,7 +3436,13 @@ def lf_jn():
         for g in (a, b):
             g.stop()
         relay.kill()
-    # The host's solo Continue (the stock main menu's top row) still loads a world.
+    lf_jn_solo(tag)
+
+
+def lf_jn_solo(tag="lf_jn"):
+    """The host's solo Continue (the stock main menu's second row: New Game,
+    Continue, Co-op) still loads a world."""
+    setup_tomls()
     a = Game("mod-a", "host")
     a.start({"FABLE2_TEST_INPUT": "1"})
     try:
@@ -3396,7 +3452,16 @@ def lf_jn():
         time.sleep(2)
         a.shot(f"{tag}_solo_menu.png")
         n = a.count(r"front-end scans paused \(the game's Lua is running\)")
-        a.press("E")  # Continue: the top row
+        a.press("Down")  # New Game -> Continue
+        time.sleep(1.0)
+        a.shot(f"{tag}_solo_on_continue.png")
+        a.press("E")  # Continue: the stock save picker when there are several saves
+        time.sleep(12)  # the rig's 83 saves: the picker loads every card first
+        a.shot(f"{tag}_solo_picker.png")
+        a.press("E")  # the first card (the newest save)
+        time.sleep(4)
+        if not a.count(r"front-end scans paused \(the game's Lua is running\)") > n:
+            a.press("E")  # a card's own confirm, if it asks
         ok = a.wait(f"{tag}: solo Continue loads the world (the game's Lua runs)",
                     r"front-end scans paused \(the game's Lua is running\)", n, 120)
         time.sleep(20)
@@ -3406,6 +3471,936 @@ def lf_jn():
              f"{tag}: solo Continue: world loaded, {crashes} crash(es)")
     finally:
         a.stop()
+
+
+
+EQ_SLOT_PY = r"C:\Users\josh_\AppData\Local\Temp\claude\D--VoiceBank\2c833dc8-b1f5-4a88-af94-d98cc46c47dc\scratchpad\oakfield_slot.py"
+
+
+def eq_fresh_slot():
+    """A fresh rig co-op copy of Josh's Oakfield save in mod-a (no coop_player2.txt,
+    the newest save): (slot path, campaign id)."""
+    out = subprocess.check_output([sys.executable, EQ_SLOT_PY], text=True)
+    m = re.search(r"slot (\S+) header .* campaign (\w+)", out)
+    note("INFO", f"eq: fresh slot {out.strip()}")
+    return (m.group(1), m.group(2)) if m else (None, None)
+
+
+def eq_host_lobby(a, tag, cid):
+    if not host_continue_lobby(a, tag):
+        return False
+    hv = [l for l in a.lines() if "[lobby] open host kind=continue" in l][-1:]
+    ok = bool(hv) and cid in hv[0]
+    note("PASS" if ok else "FAIL", f"{tag}: the fresh Oakfield copy's lobby ({hv[0][60:] if hv else ''})")
+    return ok
+
+
+def lf_eqprobe():
+    """001eq a2 probe: which controller field holds the partner's look-screen gender.
+    The partner joins a fresh Oakfield copy with coop_join_screen_probe on and its
+    own answers off; on its look screen the harness presses Right once (the gender
+    row), then A until player 2 spawns. The probe lines go to the report."""
+    tag = "lf_eqprobe"
+    slot, cid = eq_fresh_slot()
+    if not cid:
+        note("FAIL", f"{tag}: no fresh slot")
+        return
+    setup_tomls()
+    with open(os.path.join(ROOT, "mod-b", "fable_2.toml"), "a", encoding="utf-8", newline="\n") as f:
+        f.write("coop_join_screen_probe = true\ncoop_join_screens_auto = false\n")
+    relay_log = open(os.path.join(OUT, f"relay_{tag}.log"), "w")
+    relay = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                           "coop_relay.py")], stdout=relay_log, stderr=relay_log)
+    a, b = Game("mod-a", "host"), Game("mod-b", "partner")
+    a.start({"FABLE2_TEST_INPUT": "1"})
+    b.start({"FABLE2_TEST_INPUT": "1"})
+    try:
+        if not eq_host_lobby(a, tag, cid):
+            return
+        n = b.count(r"main menu: Co-op entry added")
+        b.past_title()
+        menu_then_coop(b, tag, n)
+        wait_row(b, "Continue TestA", f"{tag}: the campaign is listed for the partner")
+        partner_joins(b, "Continue TestA", tag)
+        wait_row(a, "Start", f"{tag}: host lobby shows the partner")
+        if not both_ready_and_start(a, b, tag):
+            return
+        nb = len(b.lines())
+        t = time.time()
+        while time.time() - t < 180 and not any("[joinscreen] open" in l for l in b.lines()[nb:]):
+            time.sleep(1)
+        opened = any("[joinscreen] open" in l for l in b.lines()[nb:])
+        note("PASS" if opened else "FAIL", f"{tag}: the partner's join screen opened ({time.time() - t:.0f} s)")
+        if not opened:
+            return
+        time.sleep(2.5)
+        b.shot(f"{tag}_look_before.png")
+        n1 = len(b.lines())
+        b.send("press Right 200")
+        time.sleep(2.5)
+        b.shot(f"{tag}_look_after_right.png")
+        right = [l[24:330] for l in b.lines()[n1:] if "[joinscreen]" in l]
+        note("INFO", f"{tag}: probe lines after Right: {right[:8]}")
+        n2 = len(b.lines())
+        spawn0 = a.count(r"henchman spawned")
+        for k in range(12):
+            if a.count(r"henchman spawned") > spawn0:
+                break
+            b.send("press A 200")
+            time.sleep(2.0)
+            b.shot(f"{tag}_a{k:02d}.png")
+        a.wait(f"{tag}: player 2 spawned", r"henchman spawned", spawn0, 60)
+        note("INFO", f"{tag}: probe lines over the A presses: {[l[24:330] for l in b.lines()[n2:] if '[joinscreen]' in l][:20]}")
+        note("INFO", f"{tag}: body {[l[24:200] for l in a.lines() if 'player 2 body' in l][-1:]}")
+        time.sleep(5)
+        b.shot(f"{tag}_partner_world.png")
+    finally:
+        for g in (a, b):
+            g.stop()
+        relay.kill()
+
+
+
+def eq_page(b, downs, shot):
+    """The partner's pause wheel -> the page `downs` below Abilities; a screenshot; back out."""
+    b.send("press Start 200")
+    time.sleep(2.5)
+    for _ in range(downs):
+        b.send("press Down 150")
+        time.sleep(0.8)
+    b.send("press A 200")
+    time.sleep(2.5)
+    b.shot(shot)
+    b.send("press B 200")
+    time.sleep(1.5)
+    b.send("press B 200")
+    time.sleep(2)
+
+
+def lf_eq():
+    """001eq proof (coordinator, 2026-10-28), one loopback join from a fresh
+    Oakfield copy with no coop_player2.txt and no manual A:
+      a2   the partner's join screen preset follows the lobby (male: index 4)
+      a1   player 2 seeded with the template starter kit (no host clothes/weapons)
+      look close-ups of player 2 on both screens
+      b    partner equip / wear / unwear (kit commands): host result, the copy's
+           mirror lines, the toast, a page screenshot after each
+      R3   partner walks (coop_cam_trace on, NPC burst), stops, R3: camera behind
+      chest a single A from a normal standing spot ('Opening the chest...')
+      ids  BDFE364C's name; the POOR_MALE records' names and female counterparts"""
+    tag = "lf_eq"
+    slot, cid = eq_fresh_slot()
+    if not cid:
+        note("FAIL", f"{tag}: no fresh slot")
+        return
+    setup_tomls()
+    relay_log = open(os.path.join(OUT, f"relay_{tag}.log"), "w")
+    relay = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                           "coop_relay.py")], stdout=relay_log, stderr=relay_log)
+    a, b = Game("mod-a", "host"), Game("mod-b", "partner")
+    a.start({"FABLE2_TEST_INPUT": "1"})
+    b.start({"FABLE2_TEST_INPUT": "1"})
+    try:
+        if not eq_host_lobby(a, tag, cid) or not partner_continue_join(a, b, tag):
+            return
+        bl, al = b.lines(), a.lines()
+        preset = [l[24:200] for l in bl if "join screen preset set" in l]
+        auto = [l[24:200] for l in bl if "auto-accepted stock join screen" in l]
+        body = [l[24:200] for l in al if "player 2 body" in l][-1:]
+        note("PASS" if preset and body and "selector index 4" in body[0] else "FAIL",
+             f"{tag}: a2: partner preset {preset[:1]}; auto-accept {auto[:2]}; host {body}")
+        seed = [l[24:220] for l in al if "player 2 seeded" in l or "no coop_player2.txt" in l]
+        note("INFO", f"{tag}: a1: {seed[:3]}")
+        time.sleep(12)
+        kit = [l for l in a.lines() if "[lua] COOPKIT:v1" in l][-1:]
+        worn = re.search(r"\|worn=([^|]*)", kit[0]).group(1) if kit else "?"
+        melee = re.search(r"\|melee=([^|]*)", kit[0]).group(1) if kit else "?"
+        want = {"BD511D47", "9D696C51", "CBD8841A", "DC6052C6", "331B2070"}
+        note("PASS" if set(worn.split(",")) == want else "FAIL",
+             f"{tag}: a1: player 2 wears the template starter kit: worn={worn} melee={melee}")
+        # --- close-ups for Josh's report: player 2 4 m in front of the HOST's camera,
+        # turned front / side / back to it; the partner's own camera orbited with the
+        # right stick for back / side / front of its hero.
+        cam = lua_lines(a, ("local c = ScriptFunction.GetCameraPosition(); local h = GetPlayerHero():GetPosition(); "
+                            "print(string.format('LFEQCAM %.3f %.3f %.3f %.3f %.3f %.3f', c:GetX(), c:GetY(), c:GetZ(), "
+                            "h:GetX(), h:GetY(), h:GetZ()))"), "LFEQCAM", 10)
+        if cam and len(cam[-1].split()) == 6:
+            cx, cy, cz, hx, hy, hz = (float(v) for v in cam[-1].split())
+            dx, dy = hx - cx, hy - cy
+            n = math.hypot(dx, dy) or 1
+            dx, dy = dx / n, dy / n
+            px, py = cx + dx * 4.5, cy + dy * 4.5  # in view, past the host's hero line
+            for label, fx, fy in (("front", -dx, -dy), ("side", -dy, dx), ("back", dx, dy)):
+                lua_lines(b, (f"local me = GetPlayerHenchman(); Physics.TeleportToPosition(me, CVector3({px:.3f}, {py:.3f}, {hz:.3f})); "
+                              f"Physics.SetFacingVector(me, CVector3({fx:.3f}, {fy:.3f}, 0)); print('LFEQPOSE ok')"), "LFEQPOSE", 10)
+                time.sleep(3)
+                a.shot(f"{tag}_look_host_{label}.png")
+            b.shot(f"{tag}_look_partner_back.png")
+            b.send("stick R 1 0 700")
+            time.sleep(1.5)
+            b.shot(f"{tag}_look_partner_side.png")
+            b.send("stick R 1 0 700")
+            time.sleep(1.5)
+            b.shot(f"{tag}_look_partner_front.png")
+            b.send("press RS 200")
+            time.sleep(1)
+        mirror = [l[24:200] for l in b.lines() if "wore" in l and "on the copy" in l]
+        note("INFO", f"{tag}: b1: the copy's worn mirror {mirror[:3]}")
+        # --- ids: BDFE364C, the POOR_MALE names and female counterparts (host Lua)
+        ids = lua_lines(a, (
+            "local function nm(h) local ok, r = pcall(function() return GDB.GetRecord('#' .. h) end); if not ok or not r then return 'nil' end; "
+            "for _, f in ipairs({'GetName', 'GetRecordName', 'GetTypeName'}) do local o, v = pcall(function() return r[f](r) end); "
+            "if o and v then return f .. '=' .. tostring(v) end end; return tostring(r) end; "
+            "for _, h in ipairs({'BDFE364C', '12613383', '98F97077', '3A153787', 'BD511D47', '9D696C51', 'CBD8841A', 'DC6052C6', '331B2070'}) do "
+            "print('LFEQID ' .. h .. ' ' .. nm(h)) end"), "LFEQID", 15)
+        note("INFO", f"{tag}: record names {ids}")
+        fem = []
+        for line in ids:
+            m = re.search(r"=(\S+)$", line)
+            if not m or not m.group(1).endswith(("M", "Male")):
+                continue
+            base_name = m.group(1)
+            cands = [base_name[:-1] + "F"] if base_name.endswith("M") else []
+            cands += [base_name.replace("Male", "Female")]
+            for cand in cands:
+                out = lua_lines(a, (f"local ok, r = pcall(function() return GDB.GetRecord('{cand}') end); "
+                                    f"local id = ok and r and select(2, pcall(function() return r:GetID() end)); "
+                                    f"print('LFEQFEM {cand} ' .. tostring(id))"), "LFEQFEM", 10)
+                fem += out
+        note("INFO", f"{tag}: female counterparts {fem}")
+        # --- b: equip, wear, unwear through the kit (the pages' command path)
+        lua_lines(a, ("local h = GetPlayerHenchman(); for _, x in ipairs({'3966741D', '5A04B90B'}) do "
+                      "pcall(Inventory.AddItemOfType, h, GDB.GetRecord('#' .. x):GetID()) end; print('LFEQGIVE ok')"), "LFEQGIVE", 10)
+        time.sleep(6)
+        for op, rec, page, downs in (("equip", "3966741D", "weapons", 2), ("wear", "5A04B90B", "clothing", 3),
+                                     ("unwear", "5A04B90B", "clothing", 3)):
+            na, nb = len(a.lines()), len(b.lines())
+            b.send(f"cvar coop_kit_send_line {op} {rec}")
+            time.sleep(1.2)
+            b.shot(f"{tag}_{op}_toast.png")
+            time.sleep(5)
+            host = [l[24:200] for l in a.lines()[na:] if "[coopkit] host: command" in l]
+            part = [l[24:200] for l in b.lines()[nb:] if "[coopkit]" in l and ("command" in l or "mirror" in l)]
+            note("PASS" if any("-> ok" in h for h in host) else "FAIL", f"{tag}: b: {op} {rec}: host {host[:2]}; partner {part[:4]}")
+            b.shot(f"{tag}_{op}_world.png")
+            eq_page(b, downs, f"{tag}_{op}_{page}_page.png")
+        # --- R3: walk (cam trace + NPC burst), stop, R3
+        b.send("cvar coop_cam_trace true")
+        b.send("stick L 0 1 2500")
+        for k in range(5):
+            time.sleep(0.5)
+            b.shot(f"{tag}_walk_{k}.png")
+        time.sleep(2)
+        nb = len(b.lines())
+        b.send("press RS 200")
+        time.sleep(2)
+        b.shot(f"{tag}_r3.png")
+        r3 = [l[24:200] for l in b.lines()[nb:] if "R3: camera recentered" in l]
+        note("PASS" if r3 and "last walked" in r3[0] or (r3 and "walks" in r3[0]) else "FAIL", f"{tag}: R3 {r3[:1]} (screenshot {tag}_r3.png)")
+        # --- chest: a single A from a normal standing spot
+        ch = lf_chests(a, 120, 1)
+        if ch:
+            x, y, z = ch[0][:3]
+            if lf_p2_to(b, x, y, z, "chest"):
+                time.sleep(7)
+                b.shot(f"{tag}_chest_hint.png")
+                na = len(a.lines())
+                b.send("press A 200")
+                time.sleep(1.2)
+                b.shot(f"{tag}_chest_opening.png")
+                time.sleep(10)
+                if any("game paused" in l for l in a.lines()[na:]):
+                    a.send("press A 200")
+                st = lf_state(a, "chest", x, y, z)
+                uses = [l[24:200] for l in a.lines()[na:] if "world use" in l]
+                note("PASS" if st == "true" else "FAIL", f"{tag}: chest: one A -> open {st}; host {uses[:3]}")
+        else:
+            note("INFO", f"{tag}: no closed chest within 120 m")
+    finally:
+        for g in (a, b):
+            g.stop()
+        relay.kill()
+
+
+
+def eq_closeups(a, b, tag):
+    """Player 2 four metres in front of the host's camera, turned front / side / back
+    to it (host shots), and the partner's camera orbited around its own hero."""
+    cam = lua_lines(a, ("local c = ScriptFunction.GetCameraPosition(); local h = GetPlayerHero():GetPosition(); "
+                        "print(string.format('LFEQCAM %.3f %.3f %.3f %.3f %.3f %.3f', c:GetX(), c:GetY(), c:GetZ(), "
+                        "h:GetX(), h:GetY(), h:GetZ()))"), "LFEQCAM", 10)
+    if not cam or len(cam[-1].split()) != 6:
+        note("FAIL", f"{tag}: close-ups: no host camera position")
+        return
+    cx, cy, cz, hx, hy, hz = (float(v) for v in cam[-1].split())
+    dx, dy = hx - cx, hy - cy
+    n = math.hypot(dx, dy) or 1
+    dx, dy = dx / n, dy / n
+    px, py = cx + dx * 4.0, cy + dy * 4.0
+    for label, fx, fy in (("front", -dx, -dy), ("side", -dy, dx), ("back", dx, dy)):
+        lua_lines(b, (f"local me = GetPlayerHenchman(); Physics.TeleportToPosition(me, CVector3({px:.3f}, {py:.3f}, {hz:.3f})); "
+                      f"Physics.SetFacingVector(me, CVector3({fx:.3f}, {fy:.3f}, 0)); print('LFEQPOSE ok')"), "LFEQPOSE", 10)
+        time.sleep(3)
+        a.shot(f"{tag}_look_host_{label}.png")
+    for k, label in enumerate(("back", "side", "front", "side2")):
+        b.shot(f"{tag}_look_partner_{label}.png")
+        b.send("stick R 1 0 450")
+        time.sleep(1.5)
+    b.send("press RS 200")
+    time.sleep(1)
+
+
+def lf_eqplay():
+    """001eq gameplay proof (Josh, 2026-10-28: load-in, equip and unequip, spells):
+      - a fresh Oakfield copy joined with no manual A (a1/a2), close-ups through the
+        game window capture (the Windows Security prompt is not in it);
+      - Weapons page: the partner equips a second sword with the page's own A
+        (the command to the host and the page's own equip on the copy), page and
+        world shots on both PCs; A again on the equipped weapon (unequip?);
+      - Clothing: wear and take off a hat (host + the copy's mirror, now both ways);
+      - Will: the partner holds B (both screens mid-cast), the Abilities page as the
+        partner sees it, and buying an upgrade there (host and partner logs)."""
+    tag = "lf_eqplay"
+    slot, cid = eq_fresh_slot()
+    if not cid:
+        note("FAIL", f"{tag}: no fresh slot")
+        return
+    setup_tomls()
+    relay_log = open(os.path.join(OUT, f"relay_{tag}.log"), "w")
+    relay = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                           "coop_relay.py")], stdout=relay_log, stderr=relay_log)
+    a, b = Game("mod-a", "host"), Game("mod-b", "partner")
+    a.start({"FABLE2_TEST_INPUT": "1"})
+    b.start({"FABLE2_TEST_INPUT": "1"})
+    try:
+        if not eq_host_lobby(a, tag, cid) or not partner_continue_join(a, b, tag):
+            return
+        body = [l[24:200] for l in a.lines() if "player 2 body" in l][-1:]
+        note("PASS" if body and "selector index 4" in body[0] else "FAIL", f"{tag}: load-in: {body}")
+        a.window_capture = b.window_capture = True
+        time.sleep(12)
+        eq_closeups(a, b, tag)
+        # --- give player 2 a second sword, a pistol and a hat on the host
+        lua_lines(a, ("local h = GetPlayerHenchman(); for _, x in ipairs({'3966741D', '3A153787', '5A04B90B'}) do "
+                      "pcall(Inventory.AddItemOfType, h, GDB.GetRecord('#' .. x):GetID()) end; print('LFEQGIVE ok')"), "LFEQGIVE", 10)
+        time.sleep(8)
+        # --- Weapons page: open, list, A on the second entry, A on the equipped one
+        na, nb = len(a.lines()), len(b.lines())
+        b.send("press Start 200")
+        time.sleep(2.5)
+        for _ in range(2):
+            b.send("press Down 150")
+            time.sleep(0.8)
+        b.send("press A 200")
+        time.sleep(3)
+        b.shot(f"{tag}_weapons_page_open.png")
+        b.send("press Down 150")
+        time.sleep(1)
+        b.shot(f"{tag}_weapons_page_on_second.png")
+        b.send("press A 200")
+        time.sleep(3)
+        b.shot(f"{tag}_weapons_page_after_equip.png")
+        b.send("press A 200")  # A again on the same (now equipped) weapon: unequip?
+        time.sleep(3)
+        b.shot(f"{tag}_weapons_page_after_second_a.png")
+        b.send("press B 200")
+        time.sleep(1.5)
+        b.send("press B 200")
+        time.sleep(5)
+        host = [l[24:200] for l in a.lines()[na:] if "[coopkit] host: command" in l]
+        part = [l[24:200] for l in b.lines()[nb:] if "[coopkit]" in l and ("command" in l or "copy" in l)]
+        crash = b.count(r"Unhandled guest")
+        note("PASS" if any("-> ok" in h for h in host) and crash == 0 else "FAIL",
+             f"{tag}: Weapons page equip: host {host[:4]}; partner {part[:6]}; partner crashes {crash}")
+        a.shot(f"{tag}_after_equip_host.png")
+        b.shot(f"{tag}_after_equip_partner.png")
+        kit = [l for l in a.lines() if "[lua] COOPKIT:v1" in l][-1:]
+        note("INFO", f"{tag}: host kit after the equip: {re.search(r'[|]melee=([^|]*)[|]ranged=([^|]*)', kit[0]).groups() if kit else '?'}")
+        # --- Clothing: wear and take off the hat (kit command; the copy's mirror both ways)
+        for op in ("wear", "unwear"):
+            nb = len(b.lines())
+            b.send(f"cvar coop_kit_send_line {op} 5A04B90B")
+            time.sleep(7)
+            mir = [l[24:200] for l in b.lines()[nb:] if "on the copy" in l or "command" in l]
+            note("INFO", f"{tag}: {op} hat: partner {mir[:4]}")
+            b.shot(f"{tag}_{op}_hat_partner.png")
+            a.shot(f"{tag}_{op}_hat_host.png")
+        # --- Will: what player 2 has, then hold B (the spell button)
+        st = lua_lines(a, ("local h = GetPlayerHenchman(); local t = EExperienceType; "
+                           "local function g(x) local o, v = pcall(Experience.Get, h, x); return o and math.floor(v) or -1 end; "
+                           "local ab = {} for n, v in pairs(EHeroAbilityType) do if type(v) == 'number' then "
+                           "local o, l = pcall(Stats.GetHeroAbilityLevel, h, v); if o and l and l > 0 and l <= 10 then ab[#ab + 1] = n .. '=' .. l end end end; "
+                           "print('LFEQWILL xp g/s/k/w ' .. g(t.EXPERIENCE_GENERAL) .. '/' .. g(t.EXPERIENCE_STRENGTH) .. '/' .. g(t.EXPERIENCE_SKILL) .. '/' .. g(t.EXPERIENCE_WILL) .. ' abilities ' .. table.concat(ab, ','))"),
+                     "LFEQWILL", 10)
+        note("INFO", f"{tag}: Will: player 2 on the host {st}")
+        nb, na = len(b.lines()), len(a.lines())
+        b.send("press B 3000")
+        time.sleep(1.5)
+        b.shot(f"{tag}_will_cast_partner.png")
+        a.shot(f"{tag}_will_cast_host.png")
+        time.sleep(3)
+        note("INFO", f"{tag}: Will: partner lines {[l[24:200] for l in b.lines()[nb:] if 'coop' in l.lower() or 'spell' in l.lower()][:6]}; "
+                     f"host lines {[l[24:200] for l in a.lines()[na:] if 'spell' in l.lower() or 'will' in l.lower()][:6]}")
+        # --- Abilities page as the partner sees it, and buying an upgrade
+        na, nb = len(a.lines()), len(b.lines())
+        b.send("press Start 200")
+        time.sleep(2.5)
+        b.send("press A 200")  # the wheel opens on Abilities
+        time.sleep(3)
+        b.shot(f"{tag}_abilities_page.png")
+        b.send("press A 200")  # Strength (top row)
+        time.sleep(2.5)
+        b.shot(f"{tag}_abilities_strength.png")
+        b.send("press A 200")  # buy the highlighted upgrade
+        time.sleep(3)
+        b.shot(f"{tag}_abilities_after_buy.png")
+        for _ in range(3):
+            b.send("press B 200")
+            time.sleep(1.5)
+        time.sleep(4)
+        st2 = lua_lines(a, ("local h = GetPlayerHenchman(); local ab = {} for n, v in pairs(EHeroAbilityType) do if type(v) == 'number' then "
+                            "local o, l = pcall(Stats.GetHeroAbilityLevel, h, v); if o and l and l > 0 and l <= 10 then ab[#ab + 1] = n .. '=' .. l end end end; "
+                            "local o, x = pcall(Experience.Get, h, EExperienceType.EXPERIENCE_STRENGTH); "
+                            "print('LFEQBUY str xp ' .. tostring(o and math.floor(x)) .. ' abilities ' .. table.concat(ab, ','))"), "LFEQBUY", 10)
+        note("INFO", f"{tag}: upgrade: host after {st2}; partner lines "
+                     f"{[l[24:200] for l in b.lines()[nb:] if 'coopkit' in l or 'abilit' in l.lower()][:6]}")
+        note("INFO", f"{tag}: partner crashes {b.count(r'Unhandled guest')}, host crashes {a.count(r'Unhandled guest')}")
+    finally:
+        for g in (a, b):
+            g.stop()
+        relay.kill()
+
+
+
+EQ_ARENA = (208.0, 72.0, 39.4)  # Oakfield forest by the caravan chest: no villagers
+
+
+def eq_xp(a, who):
+    """Experience (general, strength, skill, will) of the host's hero or player 2, read on the host."""
+    ent = "GetPlayerHero()" if who == "hero" else "GetPlayerHenchman()"
+    out = lua_lines(a, (f"local e = {ent}; local t = EExperienceType; local function g(x) local o, v = pcall(Experience.Get, e, x); "
+                        "return o and math.floor(v) or -1 end; print('LFXP4 ' .. g(t.EXPERIENCE_GENERAL) .. ' ' .. g(t.EXPERIENCE_STRENGTH) "
+                        ".. ' ' .. g(t.EXPERIENCE_SKILL) .. ' ' .. g(t.EXPERIENCE_WILL))"), "LFXP4", 10)
+    return out[-1] if out else "?"
+
+
+def eq_spawn_bandit(a, near, name):
+    x, y, z = near
+    out = lua_lines(a, (f"local ok, e = pcall(Debug.CreateEntityAtPosition, 'CreatureVillagerBandit', '{name}', CVector3({x:.2f}, {y:.2f}, {z:.2f})); "
+                        f"print('LFBANDIT ' .. tostring(ok) .. ' ' .. tostring(e))"), "LFBANDIT", 10)
+    return out[-1] if out else "?"
+
+
+def eq_alive(a, name):
+    out = lua_lines(a, (f"local s = SearchTools.StartNewSearch('object'); SearchTools.FilterWithinDistanceOfPos(s, GetPlayerHero():GetPosition(), 80); "
+                        f"local n = 0; for _, o in pairs(SearchTools.GetSearchResults(s)) do local ok, nm = pcall(function() return o:GetName() end); "
+                        f"if ok and nm == '{name}' and o:IsAlive() then n = n + 1 end end; print('LFALIVE ' .. n)"), "LFALIVE", 10)
+    return out[-1] if out else "?"
+
+
+def eq_page_path(b, downs, steps, shot_prefix):
+    """Start -> the page `downs` below Abilities -> A; then each (key, shot) in steps."""
+    b.send("press Start 200")
+    time.sleep(2.5)
+    for _ in range(downs):
+        b.send("press Down 150")
+        time.sleep(0.8)
+    b.send("press A 200")
+    time.sleep(3)
+    for key, shot in steps:
+        if key:
+            b.send(f"press {key} 200")
+            time.sleep(2.5)
+        if shot:
+            b.shot(f"{shot_prefix}_{shot}.png")
+
+
+def eq_close_pages(b, n=4):
+    for _ in range(n):
+        b.send("press B 200")
+        time.sleep(1.2)
+    time.sleep(3)
+
+
+def lf_eqxp():
+    """001eq gameplay proof, part 2 (coordinator 2026-10-28 13:48Z): equip a sword and a
+    pistol through the Weapons page and unequip with Y (both screens); the Clothing
+    page preview; a released Will cast; XP: player 2 kills a bandit with the sword and
+    one with Will, the host kills one (XP read on the host after each); then XP given
+    on the host and a level bought on the partner's Abilities page."""
+    tag = "lf_eqxp"
+    slot, cid = eq_fresh_slot()
+    if not cid:
+        note("FAIL", f"{tag}: no fresh slot")
+        return
+    setup_tomls()
+    relay_log = open(os.path.join(OUT, f"relay_{tag}.log"), "w")
+    relay = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                           "coop_relay.py")], stdout=relay_log, stderr=relay_log)
+    a, b = Game("mod-a", "host"), Game("mod-b", "partner")
+    a.start({"FABLE2_TEST_INPUT": "1"})
+    b.start({"FABLE2_TEST_INPUT": "1"})
+    try:
+        if not eq_host_lobby(a, tag, cid) or not partner_continue_join(a, b, tag):
+            return
+        a.window_capture = b.window_capture = True
+        time.sleep(12)
+        lua_lines(a, ("local h = GetPlayerHenchman(); for _, x in ipairs({'3966741D', '3A153787', '5A04B90B'}) do "
+                      "pcall(Inventory.AddItemOfType, h, GDB.GetRecord('#' .. x):GetID()) end; print('LFEQGIVE ok')"), "LFEQGIVE", 10)
+        time.sleep(8)
+        kit0 = [l for l in a.lines() if "[lua] COOPKIT:v1" in l][-1:]
+        # --- Weapons page: Melee -> the list -> the second sword -> A; then Ranged -> the pistol -> A
+        na, nb = len(a.lines()), len(b.lines())
+        eq_page_path(b, 2, [(None, "weapons_categories"), ("A", "melee_list"), ("Down", "melee_on_second"),
+                            ("A", "melee_after_equip"), ("B", None), ("Down", "on_ranged"), ("A", "ranged_list"),
+                            ("A", "ranged_after_equip")], tag)
+        eq_close_pages(b)
+        a.shot(f"{tag}_equip_world_host.png")
+        b.shot(f"{tag}_equip_world_partner.png")
+        host = [l[24:200] for l in a.lines()[na:] if "[coopkit] host: command" in l]
+        part = [l[24:200] for l in b.lines()[nb:] if "[coopkit]" in l and ("command" in l or "copy" in l)]
+        kit1 = [l for l in a.lines() if "[lua] COOPKIT:v1" in l][-1:]
+        mr = lambda k: re.search(r"[|]melee=([^|]*)[|]ranged=([^|]*)", k[0]).groups() if k else "?"
+        note("PASS" if sum("-> ok" in h for h in host) >= 2 else "FAIL",
+             f"{tag}: equip via the page: host {host[:6]}; partner {part[:8]}; melee/ranged {mr(kit0)} -> {mr(kit1)}")
+        # --- unequip: Y on the Weapons page
+        na, nb = len(a.lines()), len(b.lines())
+        eq_page_path(b, 2, [(None, "unequip_page_hint"), ("Y", "unequip_after_y")], tag)
+        eq_close_pages(b)
+        time.sleep(4)
+        a.shot(f"{tag}_unequip_world_host.png")
+        b.shot(f"{tag}_unequip_world_partner.png")
+        host = [l[24:200] for l in a.lines()[na:] if "[coopkit] host: command" in l]
+        part = [l[24:200] for l in b.lines()[nb:] if "unequipw" in l or "Unequip" in l]
+        kit2 = [l for l in a.lines() if "[lua] COOPKIT:v1" in l][-1:]
+        note("PASS" if any("unequipw" in h for h in host) and any("-> ok" in h for h in host) else "FAIL",
+             f"{tag}: unequip (Y): host {host[:4]}; partner {part[:4]}; melee/ranged {mr(kit1)} -> {mr(kit2)}")
+        # --- the Clothing page's 3D preview
+        eq_page_path(b, 3, [(None, "clothing_page"), ("A", "clothing_list")], tag)
+        eq_close_pages(b)
+        # --- arena: both heroes in the forest, away from villagers
+        x, y, z = EQ_ARENA
+        lua_lines(a, f"Physics.TeleportToPosition(GetPlayerHero(), CVector3({x:.2f}, {y + 3:.2f}, {z:.2f})); print('LFAR ok')", "LFAR", 10)
+        lua_lines(b, f"Physics.TeleportToPosition(GetPlayerHenchman(), CVector3({x:.2f}, {y:.2f}, {z:.2f})); print('LFAR ok')", "LFAR", 10)
+        time.sleep(5)
+        # --- Will released (tap B)
+        b.send("press B 500")
+        time.sleep(0.4)
+        b.shot(f"{tag}_will_release_partner.png")
+        a.shot(f"{tag}_will_release_host.png")
+        time.sleep(2)
+        # --- XP: player 2 kills with the sword (X), with Will (B), the host kills one (X)
+        note("INFO", f"{tag}: XP before: player 2 {eq_xp(a, 'p2')}; host hero {eq_xp(a, 'hero')}")
+        for label, attacker, key, hold, near in (("p2_sword", b, "X", 200, (x + 2, y, z)),
+                                                 ("p2_will", b, "B", 1500, (x + 4, y, z)),
+                                                 ("host_sword", a, "X", 200, (x + 2, y + 3, z))):
+            nm = f"lfb_{label}"
+            note("INFO", f"{tag}: {label}: spawn {eq_spawn_bandit(a, near, nm)}")
+            time.sleep(3)
+            for k in range(25):
+                if eq_alive(a, nm).endswith(" 0"):
+                    break
+                attacker.send(f"press {key} {hold}")
+                time.sleep(1.2 if key == "X" else 2.2)
+                if k == 3:
+                    a.shot(f"{tag}_{label}_fight_host.png")
+                    b.shot(f"{tag}_{label}_fight_partner.png")
+            time.sleep(6)  # orbs fly to whoever earned them
+            note("INFO", f"{tag}: {label}: bandit alive {eq_alive(a, nm)}; XP after: player 2 {eq_xp(a, 'p2')}; host hero {eq_xp(a, 'hero')}")
+            a.shot(f"{tag}_{label}_after_host.png")
+            b.shot(f"{tag}_{label}_after_partner.png")
+        # --- upgrade: give player 2 Strength XP on the host, buy Brutal Styles on the partner's page
+        lua_lines(a, ("pcall(Experience.Modify, GetPlayerHenchman(), EExperienceType.EXPERIENCE_STRENGTH, 4000, false); print('LFGIVEXP ok')"),
+                  "LFGIVEXP", 10)
+        time.sleep(4)
+        st0 = lua_lines(a, ("local h = GetPlayerHenchman(); local o, l = pcall(Stats.GetHeroAbilityLevel, h, EHeroAbilityType.HERO_ABILITY_STRENGTH_MELEE_WEAPONS); "
+                            "print('LFLVL ' .. tostring(o and l))"), "LFLVL", 10)
+        eq_page_path(b, 0, [(None, "abilities_before"), ("A", "strength_before"), ("A", "strength_after_buy"),
+                            ("A", "strength_after_confirm")], tag)
+        eq_close_pages(b)
+        time.sleep(4)
+        st1 = lua_lines(a, ("local h = GetPlayerHenchman(); local o, l = pcall(Stats.GetHeroAbilityLevel, h, EHeroAbilityType.HERO_ABILITY_STRENGTH_MELEE_WEAPONS); "
+                            "print('LFLVL ' .. tostring(o and l))"), "LFLVL", 10)
+        note("PASS" if st0 and st1 and st0[-1] != st1[-1] else "FAIL",
+             f"{tag}: upgrade: player 2's Brutal Styles (melee weapons) level on the host {st0} -> {st1}; XP {eq_xp(a, 'p2')}")
+        eq_page_path(b, 0, [(None, "abilities_after")], tag)
+        eq_close_pages(b)
+        note("INFO", f"{tag}: crashes: partner {b.count(r'Unhandled guest')}, host {a.count(r'Unhandled guest')}")
+    finally:
+        for g in (a, b):
+            g.stop()
+        relay.kill()
+
+
+
+EQ_WEAP_LUA = ("local function wl(h) local t = {} for _, sl in ipairs({DummyObjects.HAND_RIGHT, DummyObjects.HAND_LEFT, "
+               "DummyObjects.SHEATHE_BACK, DummyObjects.SHEATHE_RANGED_BACK, DummyObjects.SHEATHE_FRONT, DummyObjects.SHEATHE_HIP}) do "
+               "local o, w = pcall(Carrying.GetEntityInSlot, h, sl); if o and w and w:IsAlive() then "
+               "local ok, id = pcall(function() return w:GetRecord():GetID() end); t[#t + 1] = tostring(sl) .. '=' .. tostring(id) end end; "
+               "return table.concat(t, ',') .. ' items=' .. tostring(Inventory.GetNumberOfItems(h)) end; ")
+
+
+def lf_eqdiag():
+    """001eq diagnostics (coordinator 2026-10-28 14:03Z), one launch:
+      xp      host sets player 2 General 1234 / Strength 4321; the partner's native probe
+              logs its copy's components with a float array at +16 (which type holds XP)
+      unequip the Carrying call forms tried on the host, slots read back after each
+      kill    a bandit spawned by player 2, the handle kept, the partner attacks with X
+              until it is dead; XP on the host before / after; the same for the host
+      pistol  the Weapons page walked to Ranged with a shot after every key"""
+    tag = "lf_eqdiag"
+    slot, cid = eq_fresh_slot()
+    if not cid:
+        note("FAIL", f"{tag}: no fresh slot")
+        return
+    setup_tomls()
+    relay_log = open(os.path.join(OUT, f"relay_{tag}.log"), "w")
+    relay = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                           "coop_relay.py")], stdout=relay_log, stderr=relay_log)
+    a, b = Game("mod-a", "host"), Game("mod-b", "partner")
+    a.start({"FABLE2_TEST_INPUT": "1"})
+    b.start({"FABLE2_TEST_INPUT": "1"})
+    try:
+        if not eq_host_lobby(a, tag, cid) or not partner_continue_join(a, b, tag):
+            return
+        a.window_capture = b.window_capture = True
+        time.sleep(12)
+        # --- xp probe
+        lua_lines(a, ("local h = GetPlayerHenchman(); local t = EExperienceType; "
+                      "pcall(Experience.Modify, h, t.EXPERIENCE_GENERAL, 1234, false); pcall(Experience.Modify, h, t.EXPERIENCE_STRENGTH, 4321, false); "
+                      "print('LFXPSET ok')"), "LFXPSET", 10)
+        time.sleep(6)
+        nb = len(b.lines())
+        b.send("cvar coop_kit_xp_probe true")
+        time.sleep(3)
+        note("INFO", f"{tag}: host player 2 XP {eq_xp(a, 'p2')}; partner probe {[l[24:260] for l in b.lines()[nb:] if 'xp probe' in l]}")
+        # --- unequip forms (host)
+        forms = (("ReturnEntityToInventory(w)", "pcall(Carrying.ReturnEntityToInventory, w)"),
+                 ("ReturnEntityToInventory(h, w)", "pcall(Carrying.ReturnEntityToInventory, h, w)"),
+                 ("RemoveEntityFromSlot(h, slot) + Inventory.AddEntity(h, w)",
+                  "pcall(Carrying.RemoveEntityFromSlot, h, sl); pcall(Inventory.AddEntity, h, w)"))
+        for label, call in forms:
+            out = lua_lines(a, (EQ_WEAP_LUA + "local h = GetPlayerHenchman(); local before = wl(h); local w, sl; "
+                                "for _, s in ipairs({DummyObjects.HAND_RIGHT, DummyObjects.SHEATHE_BACK, DummyObjects.SHEATHE_HIP, DummyObjects.SHEATHE_FRONT}) do "
+                                "local o, e = pcall(Carrying.GetEntityInSlot, h, s); if o and e and e:IsAlive() then w, sl = e, s break end end; "
+                                f"if not w then print('LFUNEQ none: ' .. before) return end; local r1, r2 = {call}; "
+                                f"print('LFUNEQ {label}: ' .. tostring(r1) .. ' ' .. tostring(r2) .. ' | before ' .. before .. ' | after ' .. wl(h))"),
+                            "LFUNEQ", 10)
+            note("INFO", f"{tag}: unequip {out}")
+            time.sleep(2)
+            lua_lines(a, ("local h = GetPlayerHenchman(); pcall(WeaponSetManager.SelectWeaponsFromInventory, h); print('LFRESEL ok')"), "LFRESEL", 10)
+            time.sleep(3)
+        a.shot(f"{tag}_after_unequip_tests_host.png")
+        b.shot(f"{tag}_after_unequip_tests_partner.png")
+        # --- kill XP: player 2 (X), then the host (X)
+        x, y, z = EQ_ARENA
+        lua_lines(a, f"Physics.TeleportToPosition(GetPlayerHero(), CVector3({x:.2f}, {y + 4:.2f}, {z:.2f})); print('LFAR ok')", "LFAR", 10)
+        lua_lines(b, (f"local me = GetPlayerHenchman(); Physics.TeleportToPosition(me, CVector3({x:.2f}, {y:.2f}, {z:.2f})); "
+                      f"Physics.SetFacingVector(me, CVector3(1, 0, 0)); print('LFAR ok')"), "LFAR", 10)
+        time.sleep(5)
+        for label, attacker, pos in (("p2", b, (x + 1.6, y, z)), ("host", a, (x + 1.6, y + 4, z))):
+            before = (eq_xp(a, "p2"), eq_xp(a, "hero"))
+            lua_lines(a, (f"local ok, e = pcall(Debug.CreateEntityAtPosition, 'CreatureVillagerBandit', 'lfb_{label}', "
+                          f"CVector3({pos[0]:.2f}, {pos[1]:.2f}, {pos[2]:.2f})); LFB = ok and e or nil; print('LFBANDIT ' .. tostring(ok))"),
+                      "LFBANDIT", 10)
+            time.sleep(3)
+            hits = 0
+            for k in range(30):
+                alive = lua_lines(a, "print('LFBA ' .. tostring(LFB and LFB:IsAlive()))", "LFBA", 6)
+                if alive and alive[-1] == "false":
+                    break
+                attacker.send("press X 200")
+                hits += 1
+                time.sleep(1.0)
+                if k == 4:
+                    a.shot(f"{tag}_{label}_fight_host.png")
+                    b.shot(f"{tag}_{label}_fight_partner.png")
+            time.sleep(8)  # orbs
+            after = (eq_xp(a, "p2"), eq_xp(a, "hero"))
+            note("INFO", f"{tag}: kill by {label}: {hits} presses, bandit alive {alive}; XP player 2 {before[0]} -> {after[0]}; "
+                         f"host hero {before[1]} -> {after[1]}")
+            a.shot(f"{tag}_{label}_after_kill_host.png")
+            b.shot(f"{tag}_{label}_after_kill_partner.png")
+        # --- pistol walk
+        b.send("press Start 200")
+        time.sleep(2.5)
+        for k, key in enumerate(("Down", "Down", "A", "Down", "A", "A")):
+            b.send(f"press {key} 200")
+            time.sleep(2.2)
+            b.shot(f"{tag}_pistol_{k}_{key}.png")
+        eq_close_pages(b)
+        note("INFO", f"{tag}: pistol walk commands: host {[l[24:200] for l in a.lines() if 'host: command' in l][-3:]}")
+        note("INFO", f"{tag}: crashes: partner {b.count(r'Unhandled guest')}, host {a.count(r'Unhandled guest')}")
+    finally:
+        for g in (a, b):
+            g.stop()
+        relay.kill()
+
+
+
+def eq_kill_in_place(a, b, tag, label, attacker):
+    """A bandit spawned 1.6 m in front of the attacker where it stands; the attacker
+    faces it and presses X until it is dead (the handle kept); XP read on the host."""
+    who = "GetPlayerHenchman()" if attacker is b else "GetPlayerHero()"
+    before = (eq_xp(a, "p2"), eq_xp(a, "hero"))
+    pos = lua_lines(a, (f"local e = {who}; local p = e:GetPosition(); local f = Physics.GetFacingVector(e); "
+                        "local s = CVector3(p:GetX() + f:GetX() * 1.6, p:GetY() + f:GetY() * 1.6, p:GetZ()); "
+                        f"local ok, b = pcall(Debug.CreateEntityAtPosition, 'CreatureVillagerBandit', 'lfb_{label}', s); "
+                        "LFB = ok and b or nil; print(string.format('LFKPOS %s %.2f %.2f %.2f', tostring(ok), s:GetX(), s:GetY(), s:GetZ()))"),
+                    "LFKPOS", 10)
+    time.sleep(3)
+    hits, alive = 0, ["?"]
+    for k in range(40):
+        alive = lua_lines(a, "print('LFBA ' .. tostring(LFB and LFB:IsAlive()))", "LFBA", 6)
+        if alive and alive[-1] == "false":
+            break
+        attacker.send("press X 200")
+        hits += 1
+        time.sleep(0.9)
+        if k == 3:
+            a.shot(f"{tag}_{label}_fight_host.png")
+            b.shot(f"{tag}_{label}_fight_partner.png")
+    time.sleep(8)  # orbs
+    after = (eq_xp(a, "p2"), eq_xp(a, "hero"))
+    note("INFO", f"{tag}: kill by {label}: spawn {pos}; {hits} presses; bandit alive {alive}; XP player 2 {before[0]} -> {after[0]}; "
+                 f"host hero {before[1]} -> {after[1]}")
+    a.shot(f"{tag}_{label}_after_kill_host.png")
+    b.shot(f"{tag}_{label}_after_kill_partner.png")
+
+
+def lf_eqtrace():
+    """001eq trace launch (coordinator 2026-10-28 17:02Z): load-in + the default weapon swap;
+    what the partner's Abilities page reads for XP (coop_trace_xp, joiner); the host's own
+    purchase traced (the learn path); Y-unequip with the working form; kills in place
+    (player 2, then the host); the pistol through Ranged."""
+    tag = "lf_eqtrace"
+    slot, cid = eq_fresh_slot()
+    if not cid:
+        note("FAIL", f"{tag}: no fresh slot")
+        return
+    setup_tomls()
+    relay_log = open(os.path.join(OUT, f"relay_{tag}.log"), "w")
+    relay = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                           "coop_relay.py")], stdout=relay_log, stderr=relay_log)
+    a, b = Game("mod-a", "host"), Game("mod-b", "partner")
+    a.start({"FABLE2_TEST_INPUT": "1"})
+    b.start({"FABLE2_TEST_INPUT": "1"})
+    try:
+        if not eq_host_lobby(a, tag, cid) or not partner_continue_join(a, b, tag):
+            return
+        a.window_capture = b.window_capture = True
+        time.sleep(40)  # the seed's weapons step runs up to ~30 s after the spawn
+        swap = [l[24:200] for l in a.lines() if "default henchman weapon" in l or "weapons: added" in l]
+        note("INFO", f"{tag}: seed weapons {swap}; slots {lua_lines(a, EQ_WEAP_LUA + 'print(' + chr(39) + 'LFSL ' + chr(39) + ' .. wl(GetPlayerHenchman()))', 'LFSL', 10)}")
+        b.shot(f"{tag}_loadin_partner.png")
+        a.shot(f"{tag}_loadin_host.png")
+        # --- the partner's Abilities page: what it reads for XP
+        lua_lines(a, ("local h = GetPlayerHenchman(); local t = EExperienceType; "
+                      "pcall(Experience.Modify, h, t.EXPERIENCE_GENERAL, 1111, false); pcall(Experience.Modify, h, t.EXPERIENCE_STRENGTH, 2222, false); "
+                      "print('LFXPSET ok')"), "LFXPSET", 10)
+        time.sleep(5)
+        nb = len(b.lines())
+        b.send("cvar coop_trace_xp true")
+        eq_page_path(b, 0, [(None, "p_abilities"), ("A", "p_strength")], tag)
+        eq_close_pages(b)
+        b.send("cvar coop_trace_xp false")
+        note("INFO", f"{tag}: partner page trace (host player 2 XP {eq_xp(a, 'p2')}): "
+                     f"{[l[24:240] for l in b.lines()[nb:] if '[eqtrace]' in l][:40]}")
+        # --- the host buys on its own page (the learn path)
+        lua_lines(a, ("pcall(Experience.Modify, GetPlayerHero(), EExperienceType.EXPERIENCE_STRENGTH, 6000, false); print('LFHXP ok')"), "LFHXP", 10)
+        lvl = ("local o, l = pcall(Stats.GetHeroAbilityLevel, GetPlayerHero(), EHeroAbilityType.HERO_ABILITY_STRENGTH_MELEE_WEAPONS); "
+               "print('LFHLVL ' .. tostring(o and l))")
+        l0 = lua_lines(a, lvl, "LFHLVL", 10)
+        na = len(a.lines())
+        a.send("cvar coop_trace_xp true")
+        eq_page_path(a, 0, [(None, "h_abilities"), ("A", "h_strength"), ("A", "h_after_buy"), ("A", "h_after_confirm")], tag)
+        eq_close_pages(a)
+        a.send("cvar coop_trace_xp false")
+        l1 = lua_lines(a, lvl, "LFHLVL", 10)
+        note("INFO", f"{tag}: host purchase: Brutal Styles {l0} -> {l1}; XP {eq_xp(a, 'hero')}; trace "
+                     f"{[l[24:240] for l in a.lines()[na:] if '[eqtrace]' in l][:60]}")
+        # --- Y-unequip (the working form)
+        na, nb = len(a.lines()), len(b.lines())
+        eq_page_path(b, 2, [(None, "unequip_hint"), ("Y", "unequip_after_y")], tag)
+        eq_close_pages(b)
+        time.sleep(4)
+        note("INFO", f"{tag}: unequip: host {[l[24:200] for l in a.lines()[na:] if 'host: command' in l][:3]}; slots "
+                     f"{lua_lines(a, EQ_WEAP_LUA + 'print(' + chr(39) + 'LFSL ' + chr(39) + ' .. wl(GetPlayerHenchman()))', 'LFSL', 10)}")
+        a.shot(f"{tag}_unequip_host.png")
+        b.shot(f"{tag}_unequip_partner.png")
+        # --- kills in place
+        lua_lines(a, ("local h = GetPlayerHenchman(); pcall(Inventory.AddItemOfType, h, GDB.GetRecord('#3966741D'):GetID()); "
+                      "for i = 0, Inventory.GetNumberOfItems(h) - 1 do local it = Inventory.GetItemByIndex(h, i); "
+                      "local ok, id = pcall(function() return it:GetRecord():GetID() end); "
+                      "if ok and tostring(id):upper():find('3966741D', 1, true) then pcall(WeaponSetManager.EquipWeapon, h, it) end end; print('LFARM ok')"),
+                  "LFARM", 10)
+        time.sleep(4)
+        eq_kill_in_place(a, b, tag, "p2", b)
+        eq_kill_in_place(a, b, tag, "host", a)
+        # --- the pistol through Ranged
+        lua_lines(a, ("pcall(Inventory.AddItemOfType, GetPlayerHenchman(), GDB.GetRecord('#3A153787'):GetID()); print('LFPIS ok')"), "LFPIS", 10)
+        time.sleep(6)
+        na = len(a.lines())
+        eq_page_path(b, 2, [(None, "pistol_cat"), ("Down", "pistol_on_ranged"), ("A", "pistol_list"), ("A", "pistol_after_a")], tag)
+        eq_close_pages(b)
+        time.sleep(4)
+        note("INFO", f"{tag}: pistol: host {[l[24:200] for l in a.lines()[na:] if 'host: command' in l][:3]}; slots "
+                     f"{lua_lines(a, EQ_WEAP_LUA + 'print(' + chr(39) + 'LFSL ' + chr(39) + ' .. wl(GetPlayerHenchman()))', 'LFSL', 10)}")
+        a.shot(f"{tag}_pistol_host.png")
+        b.shot(f"{tag}_pistol_partner.png")
+        note("INFO", f"{tag}: crashes: partner {b.count(r'Unhandled guest')}, host {a.count(r'Unhandled guest')}")
+    finally:
+        for g in (a, b):
+            g.stop()
+        relay.kill()
+
+
+
+EQ_LOW_HP = ("local function low(e) local ok = pcall(Combat.SetDamageMultiplier, e, 100); "
+             "return ok and 'Combat.SetDamageMultiplier 100' or 'none' end; ")
+
+
+def eq_kill_one_hit(a, b, tag, label, attacker, key, hold):
+    """A bandit 1.6 m in front of the attacker, its health set to 1 on the host, one
+    attack (X sword or B Will); dead or not; XP of both read on the host."""
+    who = "GetPlayerHenchman()" if attacker is b else "GetPlayerHero()"
+    before = (eq_xp(a, "p2"), eq_xp(a, "hero"))
+    pos = lua_lines(a, (EQ_LOW_HP + f"local e = {who}; local p = e:GetPosition(); local f = Physics.GetFacingVector(e); "
+                        "local s = CVector3(p:GetX() + f:GetX() * 1.6, p:GetY() + f:GetY() * 1.6, p:GetZ()); "
+                        f"local ok, bd = pcall(Debug.CreateEntityAtPosition, 'CreatureVillagerBandit', 'lfb_{label}', s); "
+                        "LFB = ok and bd or nil; local how = LFB and low(LFB) or 'nil'; low(e); "
+                        "print('LFK1 ' .. tostring(ok) .. ' health via ' .. how)"), "LFK1", 10)
+    time.sleep(2.5)
+    a.shot(f"{tag}_{label}_before_hit_host.png")
+    for k in range(6):  # one attack; repeated only if the first did not connect
+        attacker.send(f"press {key} {hold}")
+        time.sleep(2.5 if key == "B" else 1.2)
+        alive = lua_lines(a, "print('LFBA ' .. tostring(LFB and LFB:IsAlive()))", "LFBA", 6)
+        if k == 0:
+            a.shot(f"{tag}_{label}_hit_host.png")
+            b.shot(f"{tag}_{label}_hit_partner.png")
+        if alive and alive[-1] == "false":
+            break
+    time.sleep(8)  # orbs
+    lua_lines(a, f"pcall(Combat.SetDamageMultiplier, {who}, 1); print('LFDM ok')", "LFDM", 6)
+    after = (eq_xp(a, "p2"), eq_xp(a, "hero"))
+    note("INFO", f"{tag}: kill by {label} ({key}): {pos}; attacks {k + 1}; bandit alive {alive}; "
+                 f"XP player 2 {before[0]} -> {after[0]}; host hero {before[1]} -> {after[1]}")
+    a.shot(f"{tag}_{label}_after_host.png")
+    b.shot(f"{tag}_{label}_after_partner.png")
+
+
+def lf_eqproof():
+    """001eq proof launch (coordinator 2026-10-28 17:19Z): load-in + starter kit + close-ups;
+    the hat on / off (copy mirrored both ways); sword and pistol equipped through the
+    partner's pages; Y unequips the melee weapon, then the ranged one; a Will cast; R3;
+    a single A at a chest; kill XP with one-hit bandits (player 2 sword, player 2 Will,
+    the host)."""
+    tag = "lf_eqproof"
+    slot, cid = eq_fresh_slot()
+    if not cid:
+        note("FAIL", f"{tag}: no fresh slot")
+        return
+    setup_tomls()
+    relay_log = open(os.path.join(OUT, f"relay_{tag}.log"), "w")
+    relay = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                           "coop_relay.py")], stdout=relay_log, stderr=relay_log)
+    a, b = Game("mod-a", "host"), Game("mod-b", "partner")
+    a.start({"FABLE2_TEST_INPUT": "1"})
+    b.start({"FABLE2_TEST_INPUT": "1"})
+    slots_lua = EQ_WEAP_LUA + "print('LFSL ' .. wl(GetPlayerHenchman()))"
+    try:
+        if not eq_host_lobby(a, tag, cid) or not partner_continue_join(a, b, tag):
+            return
+        a.window_capture = b.window_capture = True
+        body = [l[24:200] for l in a.lines() if "player 2 body" in l][-1:]
+        note("PASS" if body and "selector index 4" in body[0] else "FAIL", f"{tag}: load-in: {body}")
+        time.sleep(40)
+        swap = [l[24:200] for l in a.lines() if "default henchman weapon" in l]
+        kit = [l for l in a.lines() if "[lua] COOPKIT:v1" in l][-1:]
+        worn = re.search(r"[|]worn=([^|]*)", kit[0]).group(1) if kit else "?"
+        note("PASS" if swap and set(worn.split(",")) == {"BD511D47", "9D696C51", "CBD8841A", "DC6052C6", "331B2070"} else "FAIL",
+             f"{tag}: starter kit: worn={worn}; {swap[:1]}; slots {lua_lines(a, slots_lua, 'LFSL', 10)}")
+        eq_closeups(a, b, tag)
+        # hat on / off
+        lua_lines(a, ("local h = GetPlayerHenchman(); for _, x in ipairs({'5A04B90B', '3966741D', '3A153787'}) do "
+                      "pcall(Inventory.AddItemOfType, h, GDB.GetRecord('#' .. x):GetID()) end; print('LFEQGIVE ok')"), "LFEQGIVE", 10)
+        time.sleep(8)
+        for op in ("wear", "unwear"):
+            nb = len(b.lines())
+            b.send(f"cvar coop_kit_send_line {op} 5A04B90B")
+            time.sleep(7)
+            mir = [l[24:200] for l in b.lines()[nb:] if "on the copy" in l]
+            note("PASS" if any(("wore 1" in m) if op == "wear" else ("took off 1" in m) for m in mir) else "FAIL",
+                 f"{tag}: hat {op}: the copy {mir[:2]}")
+            a.shot(f"{tag}_hat_{op}_host.png")
+            b.shot(f"{tag}_hat_{op}_partner.png")
+        # sword (Melee) and pistol (Ranged) through the pages
+        for label, steps in (("sword", [(None, "sword_cat"), ("A", "sword_list"), ("Down", "sword_on_second"), ("A", "sword_after")]),
+                             ("pistol", [(None, "pistol_cat"), ("Down", "pistol_on_ranged"), ("A", "pistol_list"), ("A", "pistol_after")])):
+            na = len(a.lines())
+            eq_page_path(b, 2, steps, tag)
+            eq_close_pages(b)
+            time.sleep(4)
+            host = [l[24:200] for l in a.lines()[na:] if "host: command" in l]
+            note("PASS" if any("-> ok" in h for h in host) else "FAIL",
+                 f"{tag}: {label} equip: host {host[:2]}; slots {lua_lines(a, slots_lua, 'LFSL', 10)}")
+            a.shot(f"{tag}_{label}_equipped_host.png")
+            b.shot(f"{tag}_{label}_equipped_partner.png")
+        # unequip: Y twice (melee, then ranged)
+        for k in (1, 2):
+            na = len(a.lines())
+            eq_page_path(b, 2, [(None, f"unequip{k}_hint"), ("Y", f"unequip{k}_after_y")], tag)
+            eq_close_pages(b)
+            time.sleep(4)
+            host = [l[24:200] for l in a.lines()[na:] if "host: command" in l]
+            note("PASS" if any("-> ok" in h for h in host) else "FAIL",
+                 f"{tag}: unequip {k}: host {host[:2]}; slots {lua_lines(a, slots_lua, 'LFSL', 10)}")
+            a.shot(f"{tag}_unequip{k}_host.png")
+            b.shot(f"{tag}_unequip{k}_partner.png")
+        # re-arm with the sword for the fights
+        lua_lines(a, ("local h = GetPlayerHenchman(); for i = 0, Inventory.GetNumberOfItems(h) - 1 do local it = Inventory.GetItemByIndex(h, i); "
+                      "local ok, id = pcall(function() return it:GetRecord():GetID() end); "
+                      "if ok and tostring(id):upper():find('3966741D', 1, true) then pcall(WeaponSetManager.EquipWeapon, h, it) break end end; print('LFARM ok')"),
+                  "LFARM", 10)
+        time.sleep(4)
+        # Will cast, R3
+        b.send("press B 1500")
+        time.sleep(0.8)
+        b.shot(f"{tag}_will_partner.png")
+        a.shot(f"{tag}_will_host.png")
+        time.sleep(3)
+        b.send("stick L 0 1 1500")
+        time.sleep(2.5)
+        nb = len(b.lines())
+        b.send("press RS 200")
+        time.sleep(1.5)
+        b.shot(f"{tag}_r3_partner.png")
+        note("INFO", f"{tag}: R3 {[l[24:200] for l in b.lines()[nb:] if 'R3:' in l][:1]}")
+        # kill XP, one-hit bandits
+        # Kill XP is checked by hand: scripted attacks auto-target the nearest creature
+        # and hit player 2 (proof run 2, 2026-10-28, lf_eqproof_host_sword_hit_host.png).
+        # a single A at a chest
+        ch = lf_chests(a, 120, 1)
+        if ch:
+            x, y, z = ch[0][:3]
+            if lf_p2_to(b, x, y, z, "chest"):
+                time.sleep(7)
+                b.shot(f"{tag}_chest_hint.png")
+                na = len(a.lines())
+                b.send("press A 200")
+                time.sleep(1.2)
+                b.shot(f"{tag}_chest_opening.png")
+                time.sleep(10)
+                if any("game paused" in l for l in a.lines()[na:]):
+                    a.send("press A 200")
+                st = lf_state(a, "chest", x, y, z)
+                note("PASS" if st == "true" else "FAIL", f"{tag}: chest: one A -> open {st}; host {[l[24:200] for l in a.lines()[na:] if 'world use' in l][:3]}")
+        note("INFO", f"{tag}: crashes: partner {b.count(r'Unhandled guest')}, host {a.count(r'Unhandled guest')}")
+    finally:
+        for g in (a, b):
+            g.stop()
+        relay.kill()
 
 
 def run_livefix():
@@ -3430,6 +4425,22 @@ def run_livefix():
         lf_next()
     if "jn" in phases:
         lf_jn()
+    if "jnsolo" in phases:
+        lf_jn_solo()
+    if "eqprobe" in phases:
+        lf_eqprobe()
+    if "eq" in phases:
+        lf_eq()
+    if "eqplay" in phases:
+        lf_eqplay()
+    if "eqxp" in phases:
+        lf_eqxp()
+    if "eqdiag" in phases:
+        lf_eqdiag()
+    if "eqtrace" in phases:
+        lf_eqtrace()
+    if "eqproof" in phases:
+        lf_eqproof()
 
 
 def run_dynsync():

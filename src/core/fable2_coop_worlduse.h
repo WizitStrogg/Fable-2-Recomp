@@ -60,7 +60,7 @@ namespace lobby = rex::kernel::xam::lobby;
 
 // Lua (host), shared by the A and the hint: coop_near(p2) returns the nearest
 // closed chest or unlocked closed door within 2.5 m in front of player 2
-// (anything within 0.8 m counts) and its kind, or nil. coop_owned(o): someone
+// (anything within 1.5 m counts: 001eq, the partner's facing may not have reached the host yet) and its kind, or nil. coop_owned(o): someone
 // else's (the stock handler's theft test: an owner building that is not the
 // hero's, or rented).
 inline const char* const kNearLua = R"lua(
@@ -74,7 +74,7 @@ local function coop_near(p2)
     for _, o in pairs(SearchTools.GetSearchResults(s)) do
       local d = o:GetPosition() - p
       local dist = d:GetLength()
-      if closed(o) and dist < bd and (dist <= 0.8 or (d:GetX() * f:GetX() + d:GetY() * f:GetY()) / dist >= 0.3) then
+      if closed(o) and dist < bd and (dist <= 1.5 or (d:GetX() * f:GetX() + d:GetY() * f:GetY()) / dist >= 0.3) then
         best, bd, kind = o, dist, k
       end
     end
@@ -254,7 +254,7 @@ inline void drive_tick(int64_t now) {
 // Testing trigger: coop_world_use = "<kind>:<x>,<y>,<z>" (host).
 inline std::string g_last_test;
 inline void test_tick() {
-  const std::string v = REXCVAR_GET(coop_world_use);
+  const std::string& v = REXCVAR_GET(coop_world_use);
   if (v == g_last_test) return;
   g_last_test = v;
   const auto colon = v.find(':');
@@ -293,7 +293,10 @@ inline void on_hint_line(std::string_view line) {
   g_hint = std::string(line.substr(std::string_view("COOPWHINT:").size()));
 }
 
+inline bool g_hint_idle = false;  // solo: no partner and "none" already published
 inline void host_hint_tick(int64_t now, bool partner_here) {
+  if (!partner_here && g_hint_idle) return;  // 001eq2: nothing per tick in solo
+  g_hint_idle = !partner_here && g_hint_sent == "none";
   std::string what;
   {
     std::lock_guard<std::mutex> l(g_hint_mtx);
@@ -367,6 +370,11 @@ inline bool joiner_settled(int64_t now) {
 extern "C" void rex_ui_set_toast(const char* text, int ms);
 constexpr int kToastMs = 1500;
 inline bool g_toast_up = false;
+// What the hint last said ("chest", "door" or ""), and until when the toast
+// shows the "Opening..." answer to the partner's A instead (001eq: round two's
+// chest took ~7 s from the A to the items, and Calvin pressed 5 more times).
+inline std::string g_hint_what;
+inline int64_t g_opening_until_ms = 0;
 inline void joiner_hint_tick(int64_t now) {
   std::string what;
   if (joiner_in_campaign() && joiner_settled(now) && !fable2::coopkit::g_wheel_open.load()) {
@@ -378,6 +386,8 @@ inline void joiner_hint_tick(int64_t now) {
       if (d.value.rfind("COOPWHINT:v1|", 0) == 0 && at != std::string::npos) what = d.value.substr(at + 6);
     }
   }
+  g_hint_what = what;
+  if (now < g_opening_until_ms) return;  // "Opening the ..." stays up
   const char* text = what == "chest" ? "A: Open the chest" : what == "door" ? "A: Open the door" : nullptr;
   if (text) {
     rex_ui_set_toast(text, kToastMs);
@@ -397,6 +407,13 @@ inline void joiner_tick(int64_t now) {
   std::snprintf(rec, sizeof(rec), "COOPWUSE:v1|n=%lld|kind=near", static_cast<long long>(now));
   lobby::PublishData("coop_wuse", rec);
   REXSYS_INFO("[coop] world use: the partner's A, the host looks in front of player 2 ({})", rec);
+  // An A with the hint up is answered at once on the partner's screen.
+  if (g_hint_what == "chest" || g_hint_what == "door") {
+    const int64_t ms = g_hint_what == "chest" ? 8000 : 3000;
+    rex_ui_set_toast(g_hint_what == "chest" ? "Opening the chest..." : "Opening the door...", static_cast<int>(ms));
+    g_opening_until_ms = now + ms;
+    g_toast_up = true;
+  }
 }
 
 // --- the host's part ----------------------------------------------------------

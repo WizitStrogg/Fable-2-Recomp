@@ -144,25 +144,44 @@ inline void check_fallback() {
 // when coop_join_screen_skip answers them in code.
 constexpr int64_t kScreenFirstAMs = 1500, kScreenAEveryMs = 2000, kScreenCoverMs = 10000;
 constexpr int kScreenMaxA = 10;
+// 001eq a2: the partner's look screen opens on its preset row at the stock
+// henchman preset 1 (female, neutral: every join so far spawned "selector index 1"),
+// and Right steps it by one (eqprobe 2026-10-28: one Right -> index 2). Presets 0-2
+// are female, 3-5 male (sub_8231EEE0). The body is the lobby's either way, but the
+// partner's look data (head, hair) follows this preset: a male lobby gets three
+// Rights (1 -> 4, male neutral) before the first A, which then waits for them.
+constexpr int kMaleRights = 3;
+constexpr int64_t kRightsAtMs = 1000, kRightGapMs = 400, kFirstAAfterRightsMs = 2800;
+inline bool g_screen_rights_sent = false;
 inline int64_t g_screen_seen_open = 0, g_screen_last_a_ms = 0;
 inline int g_screen_a = 0;
 inline bool g_screen_cover_dropped = false;
 inline void partner_screen_tick() {
+  const int64_t open = g_open_ms.load(std::memory_order_relaxed);  // solo: 0, nothing else runs
+  if (!open || !g_controller.load()) return;
   if (!REXCVAR_GET(coop_campaign) || !REXCVAR_GET(coop_join_screens_auto) || REXCVAR_GET(coop_join_screen_skip))
     return;
-  const int64_t open = g_open_ms.load();
-  if (!open || !g_controller.load()) return;
   if (rex::kernel::xam::lobby::GetLobbyStatus().joined_host_ip == 0) return;  // the host keeps its timed answers
   if (open != g_screen_seen_open) {
     g_screen_seen_open = open;
     g_screen_a = 0;
     g_screen_last_a_ms = 0;
     g_screen_cover_dropped = false;
+    g_screen_rights_sent = false;
     REXSYS_INFO("[coop] partner: the game's join screen is open");
   }
   if (fable2::coopfrontend::g_cover_hide_at_ms.load()) return;  // player 2 spawned: A would act in the world
   const int64_t now = fable2::f5lua::steady_ms();
-  if (g_screen_a < kScreenMaxA && now - open >= kScreenFirstAMs && now - g_screen_last_a_ms >= kScreenAEveryMs) {
+  const bool male = fable2::coophero::g_campaign_p2_female.load() == 0;
+  if (male && !g_screen_rights_sent && now - open >= kRightsAtMs) {
+    g_screen_rights_sent = true;
+    for (int i = 0; i < kMaleRights; ++i)
+      fable2::cooplobby::InjectPress(static_cast<uint16_t>(fable2::cooplobby::kRight), i * kRightGapMs, 200);
+    REXSYS_INFO("[coop] partner: join screen preset set for the lobby's male hero ({} x Right: preset 1 -> 4)",
+                kMaleRights);
+  }
+  const int64_t first_a = male ? kFirstAAfterRightsMs : kScreenFirstAMs;
+  if (g_screen_a < kScreenMaxA && now - open >= first_a && now - g_screen_last_a_ms >= kScreenAEveryMs) {
     g_screen_last_a_ms = now;
     ++g_screen_a;
     fable2::cooplobby::InjectPress(static_cast<uint16_t>(fable2::cooplobby::kA), 0, 200);

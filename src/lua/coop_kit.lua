@@ -1,6 +1,6 @@
 -- CoopKit (feature 002, slice 1): player 2's kit on the host.
 --   CoopKit.Snapshot(entity, rev) -> one COOPKIT:v1 line (src/core/fable2_coop_kit_proto.h)
---   CoopKit.Apply(entity, op, hex) -> "ok" or "no:<reason>"; op = equip, wear, unwear, use
+--   CoopKit.Apply(entity, op, hex) -> "ok" or "no:<reason>"; op = equip, wear, unwear, use, unequipw
 -- Run as a file (luafile coop_kit) it defines CoopKit and prints the
 -- henchman's snapshot. Every engine call is wrapped in pcall.
 -- Record ids travel as 8 hex digits; "#XXXXXXXX" names resolve to that id
@@ -42,6 +42,21 @@ local function item_info(entity)
 end
 
 local RANGED_SLOTS = {[DummyObjects.SHEATHE_RANGED_BACK] = true}
+-- A carried weapon is ranged by its own item name tag (001eq, rig 2026-10-28: player
+-- 2's pistol sits in SHEATHE_FRONT, which the slot test counted as melee); the slot
+-- test stays the fallback for a weapon whose tag cannot be read.
+local RANGED_TAGS = {"PISTOL", "RIFLE", "CROSSBOW", "BLUNDERBUSS", "CLOCKWORK", "TURRET"}
+local function is_ranged(w, slot)
+  local _, tag = item_info(w)
+  tag = tostring(tag or ""):upper()
+  if tag ~= "" then
+    for _, t in ipairs(RANGED_TAGS) do
+      if tag:find(t, 1, true) then return true end
+    end
+    return false
+  end
+  return RANGED_SLOTS[slot] == true
+end
 local WEAPON_SLOTS = {
   DummyObjects.HAND_RIGHT, DummyObjects.HAND_LEFT, DummyObjects.SHEATHE_BACK,
   DummyObjects.SHEATHE_RANGED_BACK, DummyObjects.SHEATHE_FRONT, DummyObjects.SHEATHE_HIP
@@ -99,7 +114,7 @@ local function weapons(entity)
     if w and w:IsAlive() then
       local hex = record_hex(w)
       if hex then
-        if RANGED_SLOTS[slot] then
+        if is_ranged(w, slot) then
           if ranged == "" then ranged = hex end
         elseif melee == "" then
           melee = hex
@@ -174,13 +189,40 @@ end
 function CoopKit.Apply(entity, op, hex)
   CoopKit.Tick()
   if not entity or not entity:IsAlive() then return "no:busy" end
+  -- 001eq: take the carried weapon back into the bag (the stock pages have no
+  -- unequip). hex 00000001 = the melee weapon, 00000002 = the ranged one.
+  if op == "unequipw" then
+    local want_ranged = hex == "00000002"
+    local done = 0
+    for _, slot in ipairs(WEAPON_SLOTS) do
+      local w = try("GetEntityInSlot", Carrying.GetEntityInSlot, entity, slot)
+      if w and w:IsAlive() and is_ranged(w, slot) == want_ranged then
+        -- The working form (rig 2026-10-28, eqdiag): out of the slot, into the bag.
+        -- ReturnEntityToInventory returned true and changed nothing.
+        try("RemoveEntityFromSlot", Carrying.RemoveEntityFromSlot, entity, slot)
+        try("Inventory.AddEntity", Inventory.AddEntity, entity, w)
+        done = done + 1
+      end
+    end
+    if done == 0 then return "no:noitem" end
+    local m, r = weapons(entity)
+    return ((want_ranged and r == "") or (not want_ranged and m == "")) and "ok" or "no:pending"
+  end
   local items = collect(entity)
   local item = items[hex]
   if op == "equip" and CoopKitEquipping[hex] and equip_done(entity, hex) then
     CoopKitEquipping[hex] = nil  -- a retry after the weapon left the bag for the hand
     return "ok"
   end
-  if not item then return "no:noitem" end
+  if not item then
+    -- An equip of a weapon already carried (the page lists the one in hand by its
+    -- hand record) is already done.
+    if op == "equip" then
+      local m, r = weapons(entity)
+      if hex == m or hex == r then return "ok" end
+    end
+    return "no:noitem"
+  end
   local name = "#" .. hex
   if op == "equip" then
     if item.cat ~= "WEAPONS" and not item.cat:match("^WEAPONS") then return "no:cannotuse" end

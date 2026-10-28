@@ -57,6 +57,7 @@
 #include "fable2_coop_camera.h"
 #include "fable2_coop_campaign.h"
 #include "fable2_coop_frontend.h"
+#include "fable2_coop_hero.h"
 #include "fable2_coop_kit_proto.h"
 #include "fable2_f5_lua.h"
 #include "fable2_lua_console.h"
@@ -78,6 +79,17 @@ REXCVAR_DEFINE_BOOL(coop_kit_send_wear, true, "Network",
                     "Co-op kit (partner): wear / take off on the Clothing page is sent to the host");
 REXCVAR_DEFINE_BOOL(coop_kit_send_use, true, "Network",
                     "Co-op kit (partner): use (potions, food) on the Items page is sent to the host");
+REXCVAR_DEFINE_STRING(coop_kit_send_line, "", "Network",
+                      "Co-op kit test (partner): set to '<equip|wear|unwear|use> <record hex>' to send it "
+                      "to the host once (the coop_kit_send command, as a setting the test input can set)");
+REXCVAR_DEFINE_BOOL(coop_kit_xp_probe, false, "Network",
+                    "Testing (partner): log player 2's components with a float array at +16 (experience probe), once");
+REXCVAR_DEFINE_BOOL(coop_kit_unequip, true, "Network",
+                    "Co-op kit (partner): Y on the Weapons page takes the carried weapon back into the bag (001eq)");
+REXCVAR_DEFINE_BOOL(coop_kit_equip_local, true, "Network",
+                    "Co-op kit (partner): an equip sent to the host also runs on the copy with the page's own call (001eq)");
+REXCVAR_DEFINE_BOOL(coop_kit_mirror_worn, true, "Network",
+                    "Co-op kit (partner): wear on the copy what the host wears on player 2 (001eq)");
 REXCVAR_DEFINE_BOOL(coop_kit_send_equip, true, "Network",
                     "Co-op kit (partner): equip on the Weapons page is sent to the host");
 // Off: L4 of 17:14Z, the henchman quit question opened from the full wheel did
@@ -592,6 +604,65 @@ inline void OnStateLine(std::string_view line) {
 // removed here; with coop_kit_mirror_clothing, owned clothing missing from the
 // copy is added (L1b: the copy lists its worn clothes as inventory stacks, and
 // a hat given on the host never reached the Clothing page).
+// 001eq (b1, wear): the joiner's own state decides its player 2's look (the host's
+// wear on player 2 is reset by it, fable2_coop_hero.h dress_player2), so what the
+// host wears on player 2 is put on the copy here with the core appearance add
+// sub_8256FC80(appearance, record id): every record newly in kit_state's worn list
+// since the last mirror (all of it after a new spawn). Taking off is its mirror:
+// AppearanceModifierManager.RemoveItemOfType (binding sub_8256FFC0) turns the type
+// name into a record id and calls sub_82570000(appearance, record id), so every
+// record that left the worn list is taken off the copy with that call.
+extern "C" void sub_82570000(PPCContext& ctx, uint8_t* base);
+inline uint32_t g_worn_epoch = ~0u;
+inline std::vector<std::string> g_worn_applied;
+inline void mirror_worn(PPCContext& ctx, uint8_t* base, const KitState& want) {
+  if (!REXCVAR_GET(coop_kit_mirror_worn)) return;
+  const uint32_t epoch = fable2::coophero::g_spawn_epoch.load();
+  if (epoch != g_worn_epoch) {
+    g_worn_epoch = epoch;
+    g_worn_applied.clear();
+  }
+  // The appearance manager component (EC 15) from the copy's component table, the
+  // object the AppearanceModifierManager bindings get; the vtable scan of the entity's
+  // first 0x400 bytes (fable2_coop_hero.h) found nothing on this copy (proof run
+  // 2026-10-28: "appearance 0x00000000" every revision) and stays the fallback.
+  const uint32_t p2 = fable2::coopcam::g_p2_entity.load();
+  uint32_t appearance = component(base, p2, kAppearanceEC);
+  if (!appearance) appearance = fable2::coophero::find_appearance(base, p2);
+  static uint32_t s_logged_rev = 0;
+  if (want.rev != s_logged_rev) {  // 001eq proof: why a worn change did not reach the copy
+    s_logged_rev = want.rev;
+    const uint32_t vt = appearance && ta::rdable2(base, appearance, 8) ? ta::load_be(base, appearance) : 0;
+    const uint32_t back = appearance && ta::rdable2(base, appearance, 8) ? ta::load_be(base, appearance + 4) : 0;
+    REXSYS_INFO("[coopkit] worn mirror rev {}: appearance 0x{:08X} (vtable 0x{:08X}, +4 0x{:08X}, entity 0x{:08X}), "
+                "host wears {}, applied {}", want.rev, appearance, vt, back, p2, want.worn.size(), g_worn_applied.size());
+    if (appearance && vt != fable2::coophero::kAppearanceVtable) {
+      REXSYS_WARN("[coopkit] worn mirror: component 15 is not the appearance object (vtable 0x{:08X}); not wearing", vt);
+    }
+  }
+  if (!appearance || !ta::rdable2(base, appearance, 4) || ta::load_be(base, appearance) != fable2::coophero::kAppearanceVtable)
+    return;
+  int worn = 0, off = 0;
+  for (const auto& rec : g_worn_applied) {
+    if (std::find(want.worn.begin(), want.worn.end(), rec) != want.worn.end()) continue;
+    ctx.r3.u64 = appearance;
+    ctx.r4.u64 = HexToId(rec);
+    sub_82570000(ctx, base);
+    ++off;
+  }
+  for (const auto& rec : want.worn) {
+    if (std::find(g_worn_applied.begin(), g_worn_applied.end(), rec) != g_worn_applied.end()) continue;
+    ctx.r3.u64 = appearance;
+    ctx.r4.u64 = HexToId(rec);
+    sub_8256FC80(ctx, base);
+    ++worn;
+  }
+  g_worn_applied = want.worn;
+  if (worn || off)
+    REXSYS_INFO("[coopkit] mirror rev {}: wore {}, took off {} item(s) on the copy ({} worn on the host)", want.rev,
+                worn, off, want.worn.size());
+}
+
 inline void mirror_now(PPCContext& ctx, uint8_t* base, const KitState& want) {
   const uint32_t inv = component(base, fable2::coopcam::g_p2_entity.load(), kInventoryEC);
   if (!inv) return;
@@ -619,10 +690,65 @@ inline void mirror_now(PPCContext& ctx, uint8_t* base, const KitState& want) {
         adds += native_add(ctx, base, inv, HexToId(i.rec)) ? 1 : 0;
   if (adds || removes)
     REXSYS_INFO("[coopkit] mirror rev {}: +{} -{} on the copy's inventory", want.rev, adds, removes);
+  mirror_worn(ctx, base, want);
 }
 
-inline void joiner_tick(const Peer& host_pc, int64_t /*now*/) {
+// 001eq (b2): the copy's weapon slots and taken-off clothes are not mirrored (no
+// known native), so the partner is told what the host did with a toast.
+extern "C" void rex_ui_set_toast(const char* text, int ms);
+inline std::map<uint32_t, Op> g_sent_ops;  // seq -> op, for the ack toast
+constexpr uint16_t kPadY = 0x8000;
+inline std::atomic<bool> g_weapons_page{false};
+inline std::atomic<int> g_unequip_pending{0};  // -1: Y pressed on the Weapons page (pad_hook)
+inline void ack_toast(const Result& r) {
+  const auto it = g_sent_ops.find(r.seq);
+  if (it == g_sent_ops.end()) return;
+  const Op op = it->second;
+  g_sent_ops.erase(it);
+  std::string text;
+  if (r.res != "ok") text = ReasonText(r.res);
+  else if (op == Op::kEquip) text = "Equipped (on the host)";
+  else if (op == Op::kUnwear) text = "Taken off (on the host)";
+  else if (op == Op::kUnequipWeapon) text = "Unequipped";
+  else if (op == Op::kWear) text = "Worn";
+  else return;
+  rex_ui_set_toast(text.c_str(), 2500);
+}
+
+inline std::string g_send_line_seen;
+inline int64_t g_unequip_hint_ms = 0;
+inline void joiner_tick(const Peer& host_pc, int64_t now) {
   auto& j = joiner();
+  if (g_weapons_page.load() && j.state && REXCVAR_GET(coop_kit_unequip)) {
+    const bool armed = !j.state->melee.empty() || !j.state->ranged.empty();
+    if (armed && now > g_unequip_hint_ms) {
+      rex_ui_set_toast("Y: Unequip weapon", 1500);
+      g_unequip_hint_ms = now + 1000;
+    }
+    if (g_unequip_pending.exchange(0) == -1) {
+      if (!j.state->melee.empty() || !j.state->ranged.empty()) {
+        const bool melee = !j.state->melee.empty();
+        const char* code = melee ? "00000001" : "00000002";
+        const uint32_t seq = j.queue.Add(Op::kUnequipWeapon, code);
+        g_sent_ops[seq] = Op::kUnequipWeapon;
+        REXSYS_INFO("[coopkit] partner: command {} unequipw {} (Y on the Weapons page: the {} weapon)", seq, code,
+                    melee ? "melee" : "ranged");
+      } else {
+        rex_ui_set_toast("No weapon equipped", 1500);
+      }
+    }
+  }
+  if (const std::string line = REXCVAR_GET(coop_kit_send_line); line != g_send_line_seen) {
+    g_send_line_seen = line;
+    std::istringstream in(line);
+    std::string op_s, hex;
+    in >> op_s >> hex;
+    if (const auto op = ParseOp(op_s); op && hex.size() == 8) {
+      const uint32_t seq = j.queue.Add(*op, hex);
+      g_sent_ops[seq] = *op;
+      REXSYS_INFO("[coopkit] partner: command {} {} {} (coop_kit_send_line)", seq, op_s, hex);
+    }
+  }
   const std::string pub = j.queue.Published();
   if (pub != j.published) {
     j.published = pub;
@@ -631,7 +757,10 @@ inline void joiner_tick(const Peer& host_pc, int64_t /*now*/) {
   for (const auto& d : lobby::GetPeerData("kit_ack")) {
     if (!from_peer(d, host_pc)) continue;
     if (auto a = ParseAck(d.value))
-      for (const auto& r : j.queue.OnAck(*a)) REXSYS_INFO("[coopkit] command {}: {} ({})", r.seq, r.res, ReasonText(r.res));
+      for (const auto& r : j.queue.OnAck(*a)) {
+        REXSYS_INFO("[coopkit] command {}: {} ({})", r.seq, r.res, ReasonText(r.res));
+        ack_toast(r);
+      }
   }
   for (const auto& d : lobby::GetPeerData("kit_state")) {
     if (!from_peer(d, host_pc)) continue;
@@ -650,6 +779,7 @@ inline void joiner_tick(const Peer& host_pc, int64_t /*now*/) {
 inline void SendCommand(Op op, uint32_t id) {
   std::lock_guard<std::mutex> l(mtx());
   const uint32_t seq = joiner().queue.Add(op, IdToHex(id));
+  g_sent_ops[seq] = op;
   REXSYS_INFO("[coopkit] partner: command {} {} {}", seq, OpName(op), IdToHex(id));
 }
 
@@ -682,9 +812,17 @@ inline void menu_event(bool up, const char* what) {
   REXSYS_INFO("[coopkit] partner menu: {}", what);  // once per menu action: not capped
 }
 // Input thread: pad 0 as the game will see it (fable2_coop_lobby.h).
+// 001eq: the stock Weapons page has no unequip. While the partner's Weapons page is
+// open, Y takes the carried weapon back into the bag: the melee one first, then the
+// ranged one (the host's Carrying.ReturnEntityToInventory, CoopKit.Apply
+// "unequipw"); the page's own Y is not passed on. A toast shows the hint.
 inline uint16_t pad_hook(uint16_t buttons) {
   const uint16_t pressed = buttons & ~g_prev_pad;
   g_prev_pad = buttons;
+  if (g_weapons_page.load() && joiner_active() && REXCVAR_GET(coop_kit_unequip)) {
+    if (pressed & kPadY) g_unequip_pending = -1;  // which weapon: decided with the kit state
+    buttons &= ~kPadY;
+  }
   if (!(buttons & kPadStart)) g_mask_start = false;  // kept away until released
   if (!REXCVAR_GET(coop_kit_start_closes) || !joiner_active()) return buttons;
   if ((pressed & kPadStart) && g_menu_up.load() && g_b_left.load() == 0) {
@@ -744,8 +882,32 @@ inline void start_close_tick() {
 
 inline int64_t g_next_tick_ms = 0;
 inline void (*g_prev_frame_hook)() = nullptr;
+// 001eq probe (rig): which of player 2's components holds its experience. The
+// Experience binding's Get (sub_8251C068) reads the float at *(component + 16) +
+// type * 4; this logs every component of the copy whose +16 points at readable
+// memory, with its first six floats, so a known value set on the host shows the type.
+inline void log_xp_components(PPCContext& /*ctx*/, uint8_t* base) {
+  const uint32_t entity = fable2::coopcam::g_p2_entity.load();
+  for (const auto& c : components(base, entity)) {
+    if (!c.ptr || !ta::rdable2(base, c.ptr + 16, 4)) continue;
+    const uint32_t arr = ta::load_be(base, c.ptr + 16);
+    if (!arr || !ta::rdable2(base, arr, 24)) continue;
+    float f[6];
+    for (int i = 0; i < 6; ++i) {
+      const uint32_t v = ta::load_be(base, arr + 4 * i);
+      std::memcpy(&f[i], &v, 4);
+    }
+    REXSYS_INFO("[coopkit] xp probe: type {} comp 0x{:08X} +16 -> 0x{:08X}: {:.1f} {:.1f} {:.1f} {:.1f} {:.1f} {:.1f}", c.type,
+                c.ptr, arr, f[0], f[1], f[2], f[3], f[4], f[5]);
+  }
+}
+
 inline void OnFrame() {
   if (g_prev_frame_hook) g_prev_frame_hook();
+  if (REXCVAR_GET(coop_kit_xp_probe)) {
+    rex::cvar::SetFlagByName("coop_kit_xp_probe", "false");
+    fable2::f5lua::request_native(&log_xp_components);
+  }
   if (!REXCVAR_GET(coop_kit)) return;
   start_close_tick();
   const int64_t now = now_ms();
@@ -756,6 +918,10 @@ inline void OnFrame() {
   const bool as_host = host_active(s), as_joiner = !as_host && joiner_active();
   if (!as_host && !as_joiner) return;
   const Peer peer = as_host ? campaign_partner() : campaign_host(s);  // before mtx(): S().m is the front end's
+  // 001eq: solo with coop_campaign on (Josh's toml) is "in the world, not joined"
+  // too; the host side ran a Lua snapshot every 5-7 s for nobody (graphics thread,
+  // 2026-10-28). Only a hosted co-op campaign with a known partner snapshots.
+  if (as_host && (!fable2::coophero::g_campaign_on.load() || (!peer.xuid && !peer.ip))) return;
   std::lock_guard<std::mutex> l(mtx());
   if (as_host) host_tick(s, peer, now);
   else joiner_tick(peer, now);
@@ -906,7 +1072,16 @@ extern "C" void sub_8257F0A0(PPCContext& ctx, uint8_t* base) {
 }
 extern "C" void __imp__sub_825A6020(PPCContext& ctx, uint8_t* base);
 extern "C" void sub_825A6020(PPCContext& ctx, uint8_t* base) {
-  if (fable2::coopkit::screen_action(ctx, base, "equip", REXCVAR_GET(coop_kit_send_equip))) return;
+  // 001eq: the host still owns player 2 (the command is sent), and with
+  // coop_kit_equip_local the page's own equip also runs on the copy, so the
+  // partner's Weapons page and hands show the weapon (the copy's weapon slots
+  // were never mirrored: Calvin's page kept showing the old sword).
+  const PPCContext saved = ctx;
+  if (fable2::coopkit::screen_action(ctx, base, "equip", REXCVAR_GET(coop_kit_send_equip))) {
+    if (!REXCVAR_GET(coop_kit_equip_local)) return;
+    ctx = saved;
+    REXSYS_INFO("[coopkit] partner: equip also run on the copy (the page's own call)");
+  }
   __imp__sub_825A6020(ctx, base);
 }
 extern "C" void __imp__sub_825A60F8(PPCContext& ctx, uint8_t* base);
@@ -960,6 +1135,7 @@ extern "C" void __imp__sub_825832B0(PPCContext& ctx, uint8_t* base);
 extern "C" void sub_825832B0(PPCContext& ctx, uint8_t* base) {
   __imp__sub_825832B0(ctx, base);
   fable2::coopkit::g_wheel_open = false;
+  fable2::coopkit::g_weapons_page = false;
   if (fable2::coopkit::joiner_active()) fable2::coopkit::menu_event(false, "pause screen exit (sub_825832B0)");
 }
 
@@ -1011,6 +1187,7 @@ extern "C" void sub_8240EAA0(PPCContext& ctx, uint8_t* base) {
              REXCVAR_GET(coop_kit_redirect_kick)});
   static const char* kRouteNames[] = {"as is", "henchman abilities", "henchman quit", "ignored"};
   REXSYS_INFO("[coopkit] pause page '{}' chosen: {}", name, kRouteNames[static_cast<int>(route)]);
+  ck::g_weapons_page = std::strcmp(name, "Weapons") == 0;
   if (route == ck::PageRoute::kSwallow) return;
   if (route == ck::PageRoute::kPass) {
     ck::t_full_page_open = true;  // sub_82336D70 below: the stock pause, unless coop_kit_no_host_pause

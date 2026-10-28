@@ -66,7 +66,9 @@ inline Command Parse(std::string line) {
   std::string cmd;
   w >> cmd;
   if (cmd == "cvar") {
-    w >> c.text >> c.value_text;
+    w >> c.text >> std::ws;
+    std::getline(w, c.value_text);  // the rest: a command's arguments may have spaces
+    while (!c.value_text.empty() && (c.value_text.back() == '\r' || c.value_text.back() == ' ')) c.value_text.pop_back();
     if (!c.text.empty()) c.kind = Kind::kCvar;
   } else if (cmd == "press") {
     std::string name;

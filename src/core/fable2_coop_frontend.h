@@ -333,6 +333,17 @@ inline void inject_continue(int64_t delay) {
 // height), without the host's own state (morality, purity, renown, title,
 // items). Taken from the host's hero when player 2 spawns. Until T031 reads
 // coop_player2.txt, a continued campaign seeds the same way.
+// 001eq (round two, 2026-10-28): the seed no longer copies the host's clothes or
+// weapons. On a continued campaign the host's hero is the host's own late-game
+// hero (Josh's Spartan armour went onto Calvin). Player 2 starts in the template
+// hero's adult starter outfit and starter weapons instead: what the template hero
+// wears right after the childhood skip (rig new campaigns, fable_2_203.log). Its
+// hairstyle 331B2070 (INV_ITEM_HAIR_CHILD_MALE) is the game's own grown-hero
+// default (Josh's adult hero wears it too), so it stays. Female: the template is
+// male only and the POOR_FEMALE records are not known yet, so a female player 2
+// gets the starter weapons and no clothes from the seed (known gap).
+constexpr const char* kStarterWornMale = "'BD511D47', '9D696C51', 'CBD8841A', 'DC6052C6', '331B2070'";
+constexpr const char* kStarterWeapons = "'98F97077', '3A153787'";
 inline std::string seed_player2_chunk(bool male) {
   std::string c;
   c += "local hero, hench = GetPlayerHero(), GetPlayerHenchman()\n";
@@ -341,9 +352,11 @@ inline std::string seed_player2_chunk(bool male) {
   c += std::string("p.male = ") + (male ? "true" : "false") + "\n";
   c += "p.mor, p.pur, p.ren, p.title = 0, 0, 0, nil\n";
   c += "p.items = {}\n";
+  c += std::string("p.worn = {") + (male ? kStarterWornMale : "") + "}\n";
+  c += std::string("p.weap = {") + kStarterWeapons + "}\n";
   c += "CoopHero.Apply(hench, p, {body = false, weapons = false})\n";
   c += "CoopWeaponsDue = {e = hench, p = p}\n";  // weapons after the spawn settles (fable2_coop_hero.h)
-  c += "print('[coop] player 2 seeded from the host starter profile')\n";
+  c += "print('[coop] player 2 seeded: the template starter outfit and weapons, abilities, age and height from the host hero')\n";
   c += "print(CoopHero.SerializeV2(CoopHero.Capture(hench), 0))\n";
   return c;
 }
@@ -954,8 +967,13 @@ inline void partner_return_watchdog(int64_t now) {
 // teardown: the hold ends and the chunks run.
 constexpr int64_t kTeardownHoldMs = 60000;
 inline int64_t g_hold_since_ms = 0;
+inline int64_t g_next_hold_check_ms = 0;
 inline void teardown_hold_tick(int64_t now) {
   namespace fl = fable2::f5lua;
+  // Every 250 ms while no hold runs (the arming needs no frame precision: the
+  // runner itself latches the hold), every frame while one does.
+  if (!fl::g_teardown_hold.load() && now < g_next_hold_check_ms) return;
+  g_next_hold_check_ms = now + 250;
   const bool in_campaign = g_purse_host_xuid.load() != 0 && lobby::GetLobbyStatus().joined_host_ip != 0;
   const int s = fable2::stateprobe::CurrentState();
   const bool front = s == fable2::stateprobe::kMainMenuMovie || s == fable2::stateprobe::kPressAScreen;
@@ -1522,7 +1540,7 @@ inline void OnFrame() {
   // Rig only: narrow the save list to one slot so Continue loads it with no
   // picker (launch 21: test a starter slot without a campaign lobby).
   static std::string s_rig_filter;
-  if (const std::string f = REXCVAR_GET(coop_rig_save_filter); f != s_rig_filter) {
+  if (const std::string& f = REXCVAR_GET(coop_rig_save_filter); f != s_rig_filter) {  // compare, no copy per frame
     s_rig_filter = f;
     rex_content_set_save_filter(f.c_str());
   }
