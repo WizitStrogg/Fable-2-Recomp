@@ -730,11 +730,10 @@ inline void ack_toast(const Result& r) {
 // The page reads the joiner's own hero record (GetPlayerHero(), like the purse;
 // rig 2026-10-28: the mirrored purse 1456 and 0 XP while the host's player 2 had
 // 1500/5000), not player 2's copy. coop_abilities.lua puts kit_state's experience
-// on that record outside the page (the open page pauses the game, and queued Lua
-// waits). Levels are never written there (crashed the partner): the page's own
-// Learn raises the record's level, and a rise above the levels seen when the
-// check was armed is sent with the experience it cost (OnLearnLine); the mirror
-// then waits until kit_state shows both.
+// and levels (1 and up) on that record outside the page (the open page pauses the
+// game, and queued Lua waits). The page's own Learn raises the record's level, and
+// a rise above the levels seen when the check was armed is sent with the
+// experience it cost (OnLearnLine); the mirror then waits until kit_state shows both.
 constexpr int64_t kAbilitiesEveryMs = 2000, kLearnWaitMs = 20000;
 inline bool g_ab_armed = false;
 inline std::map<int, int> g_ab_base;  // the record's levels when armed (and after each Learn)
@@ -797,8 +796,10 @@ inline void abilities_tick(int64_t now) {
     g_xp_write[i] = j.state->xp[i];
   }
   g_xp_write_valid = true;
+  std::string lvl;
   for (const auto& [a, l] : g_ab_base) base += "[" + std::to_string(a) + "]=" + std::to_string(l) + ",";
-  if (!fable2::luaconsole::RunChunk("local XP, BASE, ARMED = {" + xp + "}, {" + base + "}, " +
+  for (const auto& [a, l] : j.state->lvl) lvl += "[" + std::to_string(a) + "]=" + std::to_string(l) + ",";
+  if (!fable2::luaconsole::RunChunk("local XP, LVL, BASE, ARMED = {" + xp + "}, {" + lvl + "}, {" + base + "}, " +
                                     (g_ab_armed ? "true" : "false") + "\n" + body))
     return;
   g_ab_mirrored_rev = j.state->rev;
@@ -813,7 +814,7 @@ inline void OnMirrorLine(std::string_view line) {
                        "COOPMIRROR");
   if (!f) return;
   const int n = std::atoi((*f)["n"].c_str());
-  if (n) REXSYS_INFO("[coopkit] abilities: experience put on the page's hero (xp {})", (*f)["xp"]);
+  if (n) REXSYS_INFO("[coopkit] abilities: {} change(s) put on the page's hero (xp {}, levels before {})", n, (*f)["xp"], (*f)["cur"]);
   if (n == 0 && !g_ab_armed) {
     g_ab_armed = true;
     g_ab_base = parse_levels((*f)["cur"]);
