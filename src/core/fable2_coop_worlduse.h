@@ -60,7 +60,7 @@ namespace lobby = rex::kernel::xam::lobby;
 
 // Lua (host), shared by the A and the hint: coop_near(p2) returns the nearest
 // closed chest or unlocked closed door within 2.5 m in front of player 2
-// (anything within 0.8 m counts) and its kind, or nil. coop_owned(o): someone
+// (anything within 1.5 m counts: 001eq, the partner's facing may not have reached the host yet) and its kind, or nil. coop_owned(o): someone
 // else's (the stock handler's theft test: an owner building that is not the
 // hero's, or rented).
 inline const char* const kNearLua = R"lua(
@@ -74,7 +74,7 @@ local function coop_near(p2)
     for _, o in pairs(SearchTools.GetSearchResults(s)) do
       local d = o:GetPosition() - p
       local dist = d:GetLength()
-      if closed(o) and dist < bd and (dist <= 0.8 or (d:GetX() * f:GetX() + d:GetY() * f:GetY()) / dist >= 0.3) then
+      if closed(o) and dist < bd and (dist <= 1.5 or (d:GetX() * f:GetX() + d:GetY() * f:GetY()) / dist >= 0.3) then
         best, bd, kind = o, dist, k
       end
     end

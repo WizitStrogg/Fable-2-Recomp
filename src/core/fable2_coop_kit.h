@@ -79,6 +79,11 @@ REXCVAR_DEFINE_BOOL(coop_kit_send_wear, true, "Network",
                     "Co-op kit (partner): wear / take off on the Clothing page is sent to the host");
 REXCVAR_DEFINE_BOOL(coop_kit_send_use, true, "Network",
                     "Co-op kit (partner): use (potions, food) on the Items page is sent to the host");
+REXCVAR_DEFINE_STRING(coop_kit_send_line, "", "Network",
+                      "Co-op kit test (partner): set to '<equip|wear|unwear|use> <record hex>' to send it "
+                      "to the host once (the coop_kit_send command, as a setting the test input can set)");
+REXCVAR_DEFINE_BOOL(coop_kit_equip_local, true, "Network",
+                    "Co-op kit (partner): an equip sent to the host also runs on the copy with the page's own call (001eq)");
 REXCVAR_DEFINE_BOOL(coop_kit_mirror_worn, true, "Network",
                     "Co-op kit (partner): wear on the copy what the host wears on player 2 (001eq)");
 REXCVAR_DEFINE_BOOL(coop_kit_send_equip, true, "Network",
@@ -599,8 +604,11 @@ inline void OnStateLine(std::string_view line) {
 // wear on player 2 is reset by it, fable2_coop_hero.h dress_player2), so what the
 // host wears on player 2 is put on the copy here with the core appearance add
 // sub_8256FC80(appearance, record id): every record newly in kit_state's worn list
-// since the last mirror (all of it after a new spawn). Taking off has no known
-// native yet: the host's unwear is shown as a toast instead (b2, joiner_tick).
+// since the last mirror (all of it after a new spawn). Taking off is its mirror:
+// AppearanceModifierManager.RemoveItemOfType (binding sub_8256FFC0) turns the type
+// name into a record id and calls sub_82570000(appearance, record id), so every
+// record that left the worn list is taken off the copy with that call.
+extern "C" void sub_82570000(PPCContext& ctx, uint8_t* base);
 inline uint32_t g_worn_epoch = ~0u;
 inline std::vector<std::string> g_worn_applied;
 inline void mirror_worn(PPCContext& ctx, uint8_t* base, const KitState& want) {
@@ -612,7 +620,14 @@ inline void mirror_worn(PPCContext& ctx, uint8_t* base, const KitState& want) {
   }
   const uint32_t appearance = fable2::coophero::find_appearance(base, fable2::coopcam::g_p2_entity.load());
   if (!appearance) return;
-  int worn = 0;
+  int worn = 0, off = 0;
+  for (const auto& rec : g_worn_applied) {
+    if (std::find(want.worn.begin(), want.worn.end(), rec) != want.worn.end()) continue;
+    ctx.r3.u64 = appearance;
+    ctx.r4.u64 = HexToId(rec);
+    sub_82570000(ctx, base);
+    ++off;
+  }
   for (const auto& rec : want.worn) {
     if (std::find(g_worn_applied.begin(), g_worn_applied.end(), rec) != g_worn_applied.end()) continue;
     ctx.r3.u64 = appearance;
@@ -621,7 +636,9 @@ inline void mirror_worn(PPCContext& ctx, uint8_t* base, const KitState& want) {
     ++worn;
   }
   g_worn_applied = want.worn;
-  if (worn) REXSYS_INFO("[coopkit] mirror rev {}: wore {} item(s) on the copy ({} worn on the host)", want.rev, worn, want.worn.size());
+  if (worn || off)
+    REXSYS_INFO("[coopkit] mirror rev {}: wore {}, took off {} item(s) on the copy ({} worn on the host)", want.rev,
+                worn, off, want.worn.size());
 }
 
 inline void mirror_now(PPCContext& ctx, uint8_t* base, const KitState& want) {
@@ -672,8 +689,20 @@ inline void ack_toast(const Result& r) {
   rex_ui_set_toast(text.c_str(), 2500);
 }
 
+inline std::string g_send_line_seen;
 inline void joiner_tick(const Peer& host_pc, int64_t /*now*/) {
   auto& j = joiner();
+  if (const std::string line = REXCVAR_GET(coop_kit_send_line); line != g_send_line_seen) {
+    g_send_line_seen = line;
+    std::istringstream in(line);
+    std::string op_s, hex;
+    in >> op_s >> hex;
+    if (const auto op = ParseOp(op_s); op && hex.size() == 8) {
+      const uint32_t seq = j.queue.Add(*op, hex);
+      g_sent_ops[seq] = *op;
+      REXSYS_INFO("[coopkit] partner: command {} {} {} (coop_kit_send_line)", seq, op_s, hex);
+    }
+  }
   const std::string pub = j.queue.Published();
   if (pub != j.published) {
     j.published = pub;
@@ -965,7 +994,16 @@ extern "C" void sub_8257F0A0(PPCContext& ctx, uint8_t* base) {
 }
 extern "C" void __imp__sub_825A6020(PPCContext& ctx, uint8_t* base);
 extern "C" void sub_825A6020(PPCContext& ctx, uint8_t* base) {
-  if (fable2::coopkit::screen_action(ctx, base, "equip", REXCVAR_GET(coop_kit_send_equip))) return;
+  // 001eq: the host still owns player 2 (the command is sent), and with
+  // coop_kit_equip_local the page's own equip also runs on the copy, so the
+  // partner's Weapons page and hands show the weapon (the copy's weapon slots
+  // were never mirrored: Calvin's page kept showing the old sword).
+  const PPCContext saved = ctx;
+  if (fable2::coopkit::screen_action(ctx, base, "equip", REXCVAR_GET(coop_kit_send_equip))) {
+    if (!REXCVAR_GET(coop_kit_equip_local)) return;
+    ctx = saved;
+    REXSYS_INFO("[coopkit] partner: equip also run on the copy (the page's own call)");
+  }
   __imp__sub_825A6020(ctx, base);
 }
 extern "C" void __imp__sub_825A60F8(PPCContext& ctx, uint8_t* base);

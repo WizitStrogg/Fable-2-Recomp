@@ -147,6 +147,43 @@ def focus(hwnd):
 
 
 # --- one game copy --------------------------------------------------------------
+def window_image(hwnd):
+    """The window's own rendered content (PrintWindow with PW_RENDERFULLCONTENT),
+    or None if it comes back black."""
+    try:
+        gdi32 = ctypes.windll.gdi32
+        r = wt.RECT()
+        user32.GetClientRect(hwnd, ctypes.byref(r))
+        w, h = r.right - r.left, r.bottom - r.top
+        if w <= 0 or h <= 0:
+            return None
+        hdc = user32.GetDC(hwnd)
+        mdc = gdi32.CreateCompatibleDC(hdc)
+        bmp = gdi32.CreateCompatibleBitmap(hdc, w, h)
+        old = gdi32.SelectObject(mdc, bmp)
+        ok = user32.PrintWindow(hwnd, mdc, 3)  # PW_CLIENTONLY | PW_RENDERFULLCONTENT
+        class BMI(ctypes.Structure):
+            _fields_ = [("biSize", wt.DWORD), ("biWidth", ctypes.c_long), ("biHeight", ctypes.c_long),
+                        ("biPlanes", wt.WORD), ("biBitCount", wt.WORD), ("biCompression", wt.DWORD),
+                        ("biSizeImage", wt.DWORD), ("biXPelsPerMeter", ctypes.c_long),
+                        ("biYPelsPerMeter", ctypes.c_long), ("biClrUsed", wt.DWORD), ("biClrImportant", wt.DWORD)]
+        bmi = BMI(ctypes.sizeof(BMI), w, -h, 1, 32, 0, 0, 0, 0, 0, 0)
+        buf = ctypes.create_string_buffer(w * h * 4)
+        gdi32.GetDIBits(mdc, bmp, 0, h, buf, ctypes.byref(bmi), 0)
+        gdi32.SelectObject(mdc, old)
+        gdi32.DeleteObject(bmp)
+        gdi32.DeleteDC(mdc)
+        user32.ReleaseDC(hwnd, hdc)
+        if not ok:
+            return None
+        img = Image.frombuffer("RGB", (w, h), buf, "raw", "BGRX", 0, 1)
+        if max(img.convert("L").getextrema()) < 8:  # black: nothing composed
+            return None
+        return img
+    except Exception:  # noqa: BLE001
+        return None
+
+
 class Game:
     def __init__(self, folder, who):
         self.test_input = False
@@ -241,7 +278,13 @@ class Game:
             note("INFO", f"{self.who}: screenshot {name} taken with another window in front")
         p = os.path.join(OUT, name)
         try:
-            ImageGrab.grab(bbox=rect(self.hwnd), all_screens=True).save(p)
+            # The game's own window content first (PrintWindow, PW_RENDERFULLCONTENT):
+            # windows in front, like the Windows Security prompt, are not in it. A
+            # black frame (no composition content) falls back to the screen grab.
+            img = window_image(self.hwnd)
+            if img is None:
+                img = ImageGrab.grab(bbox=rect(self.hwnd), all_screens=True)
+            img.save(p)
         except Exception as e:  # noqa: BLE001  (launch of 2026-10-24: a PIL encode error ended the run)
             note("INFO", f"{self.who}: screenshot {name} failed: {e}")
             Image.new("RGB", (4, 4)).save(p)
@@ -1045,7 +1088,11 @@ def wait_row(g, prefix, what, timeout=20):
 def menu_then_coop(g, tag, n_menu):
     """After a title A: wait until the front end has built the menu with the
     Co-op entry, then Down twice to Co-op and A -> the hub."""
-    g.wait(f"{tag}: main menu built with the Co-op entry", r"main menu: Co-op entry added", n_menu, 90)
+    t0 = time.time()
+    # 240 s: a slow boot must not fail a proof run (2026-10-28: a partner boot took
+    # ~3 min while heavy file scans ran on the PC); the boot time is logged.
+    g.wait(f"{tag}: main menu built with the Co-op entry", r"main menu: Co-op entry added", n_menu, 240)
+    note("INFO", f"{tag}: {g.who}: menu after {time.time() - t0:.0f} s of waiting")
     time.sleep(2)  # the menu's slide-in
     return open_coop_entry(g, tag)
 
@@ -3510,6 +3557,316 @@ def lf_eqprobe():
         relay.kill()
 
 
+
+def eq_page(b, downs, shot):
+    """The partner's pause wheel -> the page `downs` below Abilities; a screenshot; back out."""
+    b.send("press Start 200")
+    time.sleep(2.5)
+    for _ in range(downs):
+        b.send("press Down 150")
+        time.sleep(0.8)
+    b.send("press A 200")
+    time.sleep(2.5)
+    b.shot(shot)
+    b.send("press B 200")
+    time.sleep(1.5)
+    b.send("press B 200")
+    time.sleep(2)
+
+
+def lf_eq():
+    """001eq proof (coordinator, 2026-10-28), one loopback join from a fresh
+    Oakfield copy with no coop_player2.txt and no manual A:
+      a2   the partner's join screen preset follows the lobby (male: index 4)
+      a1   player 2 seeded with the template starter kit (no host clothes/weapons)
+      look close-ups of player 2 on both screens
+      b    partner equip / wear / unwear (kit commands): host result, the copy's
+           mirror lines, the toast, a page screenshot after each
+      R3   partner walks (coop_cam_trace on, NPC burst), stops, R3: camera behind
+      chest a single A from a normal standing spot ('Opening the chest...')
+      ids  BDFE364C's name; the POOR_MALE records' names and female counterparts"""
+    tag = "lf_eq"
+    slot, cid = eq_fresh_slot()
+    if not cid:
+        note("FAIL", f"{tag}: no fresh slot")
+        return
+    setup_tomls()
+    relay_log = open(os.path.join(OUT, f"relay_{tag}.log"), "w")
+    relay = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                           "coop_relay.py")], stdout=relay_log, stderr=relay_log)
+    a, b = Game("mod-a", "host"), Game("mod-b", "partner")
+    a.start({"FABLE2_TEST_INPUT": "1"})
+    b.start({"FABLE2_TEST_INPUT": "1"})
+    try:
+        if not eq_host_lobby(a, tag, cid) or not partner_continue_join(a, b, tag):
+            return
+        bl, al = b.lines(), a.lines()
+        preset = [l[24:200] for l in bl if "join screen preset set" in l]
+        auto = [l[24:200] for l in bl if "auto-accepted stock join screen" in l]
+        body = [l[24:200] for l in al if "player 2 body" in l][-1:]
+        note("PASS" if preset and body and "selector index 4" in body[0] else "FAIL",
+             f"{tag}: a2: partner preset {preset[:1]}; auto-accept {auto[:2]}; host {body}")
+        seed = [l[24:220] for l in al if "player 2 seeded" in l or "no coop_player2.txt" in l]
+        note("INFO", f"{tag}: a1: {seed[:3]}")
+        time.sleep(12)
+        kit = [l for l in a.lines() if "[lua] COOPKIT:v1" in l][-1:]
+        worn = re.search(r"\|worn=([^|]*)", kit[0]).group(1) if kit else "?"
+        melee = re.search(r"\|melee=([^|]*)", kit[0]).group(1) if kit else "?"
+        want = {"BD511D47", "9D696C51", "CBD8841A", "DC6052C6", "331B2070"}
+        note("PASS" if set(worn.split(",")) == want else "FAIL",
+             f"{tag}: a1: player 2 wears the template starter kit: worn={worn} melee={melee}")
+        # --- close-ups for Josh's report: player 2 4 m in front of the HOST's camera,
+        # turned front / side / back to it; the partner's own camera orbited with the
+        # right stick for back / side / front of its hero.
+        cam = lua_lines(a, ("local c = ScriptFunction.GetCameraPosition(); local h = GetPlayerHero():GetPosition(); "
+                            "print(string.format('LFEQCAM %.3f %.3f %.3f %.3f %.3f %.3f', c:GetX(), c:GetY(), c:GetZ(), "
+                            "h:GetX(), h:GetY(), h:GetZ()))"), "LFEQCAM", 10)
+        if cam and len(cam[-1].split()) == 6:
+            cx, cy, cz, hx, hy, hz = (float(v) for v in cam[-1].split())
+            dx, dy = hx - cx, hy - cy
+            n = math.hypot(dx, dy) or 1
+            dx, dy = dx / n, dy / n
+            px, py = cx + dx * 4.5, cy + dy * 4.5  # in view, past the host's hero line
+            for label, fx, fy in (("front", -dx, -dy), ("side", -dy, dx), ("back", dx, dy)):
+                lua_lines(b, (f"local me = GetPlayerHenchman(); Physics.TeleportToPosition(me, CVector3({px:.3f}, {py:.3f}, {hz:.3f})); "
+                              f"Physics.SetFacingVector(me, CVector3({fx:.3f}, {fy:.3f}, 0)); print('LFEQPOSE ok')"), "LFEQPOSE", 10)
+                time.sleep(3)
+                a.shot(f"{tag}_look_host_{label}.png")
+            b.shot(f"{tag}_look_partner_back.png")
+            b.send("stick R 1 0 700")
+            time.sleep(1.5)
+            b.shot(f"{tag}_look_partner_side.png")
+            b.send("stick R 1 0 700")
+            time.sleep(1.5)
+            b.shot(f"{tag}_look_partner_front.png")
+            b.send("press RS 200")
+            time.sleep(1)
+        mirror = [l[24:200] for l in b.lines() if "wore" in l and "on the copy" in l]
+        note("INFO", f"{tag}: b1: the copy's worn mirror {mirror[:3]}")
+        # --- ids: BDFE364C, the POOR_MALE names and female counterparts (host Lua)
+        ids = lua_lines(a, (
+            "local function nm(h) local ok, r = pcall(function() return GDB.GetRecord('#' .. h) end); if not ok or not r then return 'nil' end; "
+            "for _, f in ipairs({'GetName', 'GetRecordName', 'GetTypeName'}) do local o, v = pcall(function() return r[f](r) end); "
+            "if o and v then return f .. '=' .. tostring(v) end end; return tostring(r) end; "
+            "for _, h in ipairs({'BDFE364C', '12613383', '98F97077', '3A153787', 'BD511D47', '9D696C51', 'CBD8841A', 'DC6052C6', '331B2070'}) do "
+            "print('LFEQID ' .. h .. ' ' .. nm(h)) end"), "LFEQID", 15)
+        note("INFO", f"{tag}: record names {ids}")
+        fem = []
+        for line in ids:
+            m = re.search(r"=(\S+)$", line)
+            if not m or not m.group(1).endswith(("M", "Male")):
+                continue
+            base_name = m.group(1)
+            cands = [base_name[:-1] + "F"] if base_name.endswith("M") else []
+            cands += [base_name.replace("Male", "Female")]
+            for cand in cands:
+                out = lua_lines(a, (f"local ok, r = pcall(function() return GDB.GetRecord('{cand}') end); "
+                                    f"local id = ok and r and select(2, pcall(function() return r:GetID() end)); "
+                                    f"print('LFEQFEM {cand} ' .. tostring(id))"), "LFEQFEM", 10)
+                fem += out
+        note("INFO", f"{tag}: female counterparts {fem}")
+        # --- b: equip, wear, unwear through the kit (the pages' command path)
+        lua_lines(a, ("local h = GetPlayerHenchman(); for _, x in ipairs({'3966741D', '5A04B90B'}) do "
+                      "pcall(Inventory.AddItemOfType, h, GDB.GetRecord('#' .. x):GetID()) end; print('LFEQGIVE ok')"), "LFEQGIVE", 10)
+        time.sleep(6)
+        for op, rec, page, downs in (("equip", "3966741D", "weapons", 2), ("wear", "5A04B90B", "clothing", 3),
+                                     ("unwear", "5A04B90B", "clothing", 3)):
+            na, nb = len(a.lines()), len(b.lines())
+            b.send(f"cvar coop_kit_send_line {op} {rec}")
+            time.sleep(1.2)
+            b.shot(f"{tag}_{op}_toast.png")
+            time.sleep(5)
+            host = [l[24:200] for l in a.lines()[na:] if "[coopkit] host: command" in l]
+            part = [l[24:200] for l in b.lines()[nb:] if "[coopkit]" in l and ("command" in l or "mirror" in l)]
+            note("PASS" if any("-> ok" in h for h in host) else "FAIL", f"{tag}: b: {op} {rec}: host {host[:2]}; partner {part[:4]}")
+            b.shot(f"{tag}_{op}_world.png")
+            eq_page(b, downs, f"{tag}_{op}_{page}_page.png")
+        # --- R3: walk (cam trace + NPC burst), stop, R3
+        b.send("cvar coop_cam_trace true")
+        b.send("stick L 0 1 2500")
+        for k in range(5):
+            time.sleep(0.5)
+            b.shot(f"{tag}_walk_{k}.png")
+        time.sleep(2)
+        nb = len(b.lines())
+        b.send("press RS 200")
+        time.sleep(2)
+        b.shot(f"{tag}_r3.png")
+        r3 = [l[24:200] for l in b.lines()[nb:] if "R3: camera recentered" in l]
+        note("PASS" if r3 and "last walked" in r3[0] or (r3 and "walks" in r3[0]) else "FAIL", f"{tag}: R3 {r3[:1]} (screenshot {tag}_r3.png)")
+        # --- chest: a single A from a normal standing spot
+        ch = lf_chests(a, 120, 1)
+        if ch:
+            x, y, z = ch[0][:3]
+            if lf_p2_to(b, x, y, z, "chest"):
+                time.sleep(7)
+                b.shot(f"{tag}_chest_hint.png")
+                na = len(a.lines())
+                b.send("press A 200")
+                time.sleep(1.2)
+                b.shot(f"{tag}_chest_opening.png")
+                time.sleep(10)
+                if any("game paused" in l for l in a.lines()[na:]):
+                    a.send("press A 200")
+                st = lf_state(a, "chest", x, y, z)
+                uses = [l[24:200] for l in a.lines()[na:] if "world use" in l]
+                note("PASS" if st == "true" else "FAIL", f"{tag}: chest: one A -> open {st}; host {uses[:3]}")
+        else:
+            note("INFO", f"{tag}: no closed chest within 120 m")
+    finally:
+        for g in (a, b):
+            g.stop()
+        relay.kill()
+
+
+
+def eq_closeups(a, b, tag):
+    """Player 2 four metres in front of the host's camera, turned front / side / back
+    to it (host shots), and the partner's camera orbited around its own hero."""
+    cam = lua_lines(a, ("local c = ScriptFunction.GetCameraPosition(); local h = GetPlayerHero():GetPosition(); "
+                        "print(string.format('LFEQCAM %.3f %.3f %.3f %.3f %.3f %.3f', c:GetX(), c:GetY(), c:GetZ(), "
+                        "h:GetX(), h:GetY(), h:GetZ()))"), "LFEQCAM", 10)
+    if not cam or len(cam[-1].split()) != 6:
+        note("FAIL", f"{tag}: close-ups: no host camera position")
+        return
+    cx, cy, cz, hx, hy, hz = (float(v) for v in cam[-1].split())
+    dx, dy = hx - cx, hy - cy
+    n = math.hypot(dx, dy) or 1
+    dx, dy = dx / n, dy / n
+    px, py = cx + dx * 4.0, cy + dy * 4.0
+    for label, fx, fy in (("front", -dx, -dy), ("side", -dy, dx), ("back", dx, dy)):
+        lua_lines(b, (f"local me = GetPlayerHenchman(); Physics.TeleportToPosition(me, CVector3({px:.3f}, {py:.3f}, {hz:.3f})); "
+                      f"Physics.SetFacingVector(me, CVector3({fx:.3f}, {fy:.3f}, 0)); print('LFEQPOSE ok')"), "LFEQPOSE", 10)
+        time.sleep(3)
+        a.shot(f"{tag}_look_host_{label}.png")
+    for k, label in enumerate(("back", "side", "front", "side2")):
+        b.shot(f"{tag}_look_partner_{label}.png")
+        b.send("stick R 1 0 450")
+        time.sleep(1.5)
+    b.send("press RS 200")
+    time.sleep(1)
+
+
+def lf_eqplay():
+    """001eq gameplay proof (Josh, 2026-10-28: load-in, equip and unequip, spells):
+      - a fresh Oakfield copy joined with no manual A (a1/a2), close-ups through the
+        game window capture (the Windows Security prompt is not in it);
+      - Weapons page: the partner equips a second sword with the page's own A
+        (the command to the host and the page's own equip on the copy), page and
+        world shots on both PCs; A again on the equipped weapon (unequip?);
+      - Clothing: wear and take off a hat (host + the copy's mirror, now both ways);
+      - Will: the partner holds B (both screens mid-cast), the Abilities page as the
+        partner sees it, and buying an upgrade there (host and partner logs)."""
+    tag = "lf_eqplay"
+    slot, cid = eq_fresh_slot()
+    if not cid:
+        note("FAIL", f"{tag}: no fresh slot")
+        return
+    setup_tomls()
+    relay_log = open(os.path.join(OUT, f"relay_{tag}.log"), "w")
+    relay = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                           "coop_relay.py")], stdout=relay_log, stderr=relay_log)
+    a, b = Game("mod-a", "host"), Game("mod-b", "partner")
+    a.start({"FABLE2_TEST_INPUT": "1"})
+    b.start({"FABLE2_TEST_INPUT": "1"})
+    try:
+        if not eq_host_lobby(a, tag, cid) or not partner_continue_join(a, b, tag):
+            return
+        body = [l[24:200] for l in a.lines() if "player 2 body" in l][-1:]
+        note("PASS" if body and "selector index 4" in body[0] else "FAIL", f"{tag}: load-in: {body}")
+        time.sleep(12)
+        eq_closeups(a, b, tag)
+        # --- give player 2 a second sword, a pistol and a hat on the host
+        lua_lines(a, ("local h = GetPlayerHenchman(); for _, x in ipairs({'3966741D', '3A153787', '5A04B90B'}) do "
+                      "pcall(Inventory.AddItemOfType, h, GDB.GetRecord('#' .. x):GetID()) end; print('LFEQGIVE ok')"), "LFEQGIVE", 10)
+        time.sleep(8)
+        # --- Weapons page: open, list, A on the second entry, A on the equipped one
+        na, nb = len(a.lines()), len(b.lines())
+        b.send("press Start 200")
+        time.sleep(2.5)
+        for _ in range(2):
+            b.send("press Down 150")
+            time.sleep(0.8)
+        b.send("press A 200")
+        time.sleep(3)
+        b.shot(f"{tag}_weapons_page_open.png")
+        b.send("press Down 150")
+        time.sleep(1)
+        b.shot(f"{tag}_weapons_page_on_second.png")
+        b.send("press A 200")
+        time.sleep(3)
+        b.shot(f"{tag}_weapons_page_after_equip.png")
+        b.send("press A 200")  # A again on the same (now equipped) weapon: unequip?
+        time.sleep(3)
+        b.shot(f"{tag}_weapons_page_after_second_a.png")
+        b.send("press B 200")
+        time.sleep(1.5)
+        b.send("press B 200")
+        time.sleep(5)
+        host = [l[24:200] for l in a.lines()[na:] if "[coopkit] host: command" in l]
+        part = [l[24:200] for l in b.lines()[nb:] if "[coopkit]" in l and ("command" in l or "copy" in l)]
+        crash = b.count(r"Unhandled guest")
+        note("PASS" if any("-> ok" in h for h in host) and crash == 0 else "FAIL",
+             f"{tag}: Weapons page equip: host {host[:4]}; partner {part[:6]}; partner crashes {crash}")
+        a.shot(f"{tag}_after_equip_host.png")
+        b.shot(f"{tag}_after_equip_partner.png")
+        kit = [l for l in a.lines() if "[lua] COOPKIT:v1" in l][-1:]
+        note("INFO", f"{tag}: host kit after the equip: {re.search(r'[|]melee=([^|]*)[|]ranged=([^|]*)', kit[0]).groups() if kit else '?'}")
+        # --- Clothing: wear and take off the hat (kit command; the copy's mirror both ways)
+        for op in ("wear", "unwear"):
+            nb = len(b.lines())
+            b.send(f"cvar coop_kit_send_line {op} 5A04B90B")
+            time.sleep(7)
+            mir = [l[24:200] for l in b.lines()[nb:] if "on the copy" in l or "command" in l]
+            note("INFO", f"{tag}: {op} hat: partner {mir[:4]}")
+            b.shot(f"{tag}_{op}_hat_partner.png")
+            a.shot(f"{tag}_{op}_hat_host.png")
+        # --- Will: what player 2 has, then hold B (the spell button)
+        st = lua_lines(a, ("local h = GetPlayerHenchman(); local t = EExperienceType; "
+                           "local function g(x) local o, v = pcall(Experience.Get, h, x); return o and math.floor(v) or -1 end; "
+                           "local ab = {} for n, v in pairs(EHeroAbilityType) do if type(v) == 'number' then "
+                           "local o, l = pcall(Stats.GetHeroAbilityLevel, h, v); if o and l and l > 0 and l <= 10 then ab[#ab + 1] = n .. '=' .. l end end end; "
+                           "print('LFEQWILL xp g/s/k/w ' .. g(t.EXPERIENCE_GENERAL) .. '/' .. g(t.EXPERIENCE_STRENGTH) .. '/' .. g(t.EXPERIENCE_SKILL) .. '/' .. g(t.EXPERIENCE_WILL) .. ' abilities ' .. table.concat(ab, ','))"),
+                     "LFEQWILL", 10)
+        note("INFO", f"{tag}: Will: player 2 on the host {st}")
+        nb, na = len(b.lines()), len(a.lines())
+        b.send("press B 3000")
+        time.sleep(1.5)
+        b.shot(f"{tag}_will_cast_partner.png")
+        a.shot(f"{tag}_will_cast_host.png")
+        time.sleep(3)
+        note("INFO", f"{tag}: Will: partner lines {[l[24:200] for l in b.lines()[nb:] if 'coop' in l.lower() or 'spell' in l.lower()][:6]}; "
+                     f"host lines {[l[24:200] for l in a.lines()[na:] if 'spell' in l.lower() or 'will' in l.lower()][:6]}")
+        # --- Abilities page as the partner sees it, and buying an upgrade
+        na, nb = len(a.lines()), len(b.lines())
+        b.send("press Start 200")
+        time.sleep(2.5)
+        b.send("press A 200")  # the wheel opens on Abilities
+        time.sleep(3)
+        b.shot(f"{tag}_abilities_page.png")
+        b.send("press A 200")  # Strength (top row)
+        time.sleep(2.5)
+        b.shot(f"{tag}_abilities_strength.png")
+        b.send("press A 200")  # buy the highlighted upgrade
+        time.sleep(3)
+        b.shot(f"{tag}_abilities_after_buy.png")
+        for _ in range(3):
+            b.send("press B 200")
+            time.sleep(1.5)
+        time.sleep(4)
+        st2 = lua_lines(a, ("local h = GetPlayerHenchman(); local ab = {} for n, v in pairs(EHeroAbilityType) do if type(v) == 'number' then "
+                            "local o, l = pcall(Stats.GetHeroAbilityLevel, h, v); if o and l and l > 0 and l <= 10 then ab[#ab + 1] = n .. '=' .. l end end end; "
+                            "local o, x = pcall(Experience.Get, h, EExperienceType.EXPERIENCE_STRENGTH); "
+                            "print('LFEQBUY str xp ' .. tostring(o and math.floor(x)) .. ' abilities ' .. table.concat(ab, ','))"), "LFEQBUY", 10)
+        note("INFO", f"{tag}: upgrade: host after {st2}; partner lines "
+                     f"{[l[24:200] for l in b.lines()[nb:] if 'coopkit' in l or 'abilit' in l.lower()][:6]}")
+        note("INFO", f"{tag}: partner crashes {b.count(r'Unhandled guest')}, host crashes {a.count(r'Unhandled guest')}")
+    finally:
+        for g in (a, b):
+            g.stop()
+        relay.kill()
+
+
 def run_livefix():
     phases = sys.argv[sys.argv.index("--phases") + 1].split(",") if "--phases" in sys.argv else ["empty", "male", "female"]
     if "empty" in phases:
@@ -3536,6 +3893,10 @@ def run_livefix():
         lf_jn_solo()
     if "eqprobe" in phases:
         lf_eqprobe()
+    if "eq" in phases:
+        lf_eq()
+    if "eqplay" in phases:
+        lf_eqplay()
 
 
 def run_dynsync():
