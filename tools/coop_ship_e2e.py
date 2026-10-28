@@ -3367,6 +3367,25 @@ def lf_jn():
         for g in (a, b):
             g.stop()
         relay.kill()
+    # A new co-op campaign (the skip-childhood path), again with no manual A: the
+    # partner's timed presses are gone, so this proves nothing else relied on them.
+    a, b, relay, ok = lf_start_campaign(tag + "_new")
+    try:
+        bl = b.lines()
+        opened = [l[24:200] for l in bl if "the game's join screen is open" in l]
+        auto = [l[24:200] for l in bl if "auto-accepted stock join screen" in l]
+        timed = [l[24:200] for l in bl if "partner: A for the join screen" in l]
+        dropped = [l[24:200] for l in bl if "join screen is still open after 10 s" in l]
+        note("PASS" if ok and opened and auto and not timed else "FAIL",
+             f"{tag}_new: new campaign: partner answered its own join screen: open {opened[:1]}; "
+             f"auto-accept {auto[:4]}; timed presses {timed[:2]} (expected none); cover timeout {dropped[:1] or 'no'}")
+        time.sleep(4)
+        b.shot(f"{tag}_new_partner_in_world.png")
+        a.shot(f"{tag}_new_host_in_world.png")
+    finally:
+        for g in (a, b):
+            g.stop()
+        relay.kill()
     # The host's solo Continue (the stock main menu's top row) still loads a world.
     a = Game("mod-a", "host")
     a.start({"FABLE2_TEST_INPUT": "1"})
