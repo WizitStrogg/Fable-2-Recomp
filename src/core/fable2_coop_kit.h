@@ -82,6 +82,8 @@ REXCVAR_DEFINE_BOOL(coop_kit_send_use, true, "Network",
 REXCVAR_DEFINE_STRING(coop_kit_send_line, "", "Network",
                       "Co-op kit test (partner): set to '<equip|wear|unwear|use> <record hex>' to send it "
                       "to the host once (the coop_kit_send command, as a setting the test input can set)");
+REXCVAR_DEFINE_BOOL(coop_kit_unequip, true, "Network",
+                    "Co-op kit (partner): Y on the Weapons page takes the carried weapon back into the bag (001eq)");
 REXCVAR_DEFINE_BOOL(coop_kit_equip_local, true, "Network",
                     "Co-op kit (partner): an equip sent to the host also runs on the copy with the page's own call (001eq)");
 REXCVAR_DEFINE_BOOL(coop_kit_mirror_worn, true, "Network",
@@ -675,6 +677,9 @@ inline void mirror_now(PPCContext& ctx, uint8_t* base, const KitState& want) {
 // known native), so the partner is told what the host did with a toast.
 extern "C" void rex_ui_set_toast(const char* text, int ms);
 inline std::map<uint32_t, Op> g_sent_ops;  // seq -> op, for the ack toast
+constexpr uint16_t kPadY = 0x8000;
+inline std::atomic<bool> g_weapons_page{false};
+inline std::atomic<int> g_unequip_pending{0};  // -1: Y pressed on the Weapons page (pad_hook)
 inline void ack_toast(const Result& r) {
   const auto it = g_sent_ops.find(r.seq);
   if (it == g_sent_ops.end()) return;
@@ -684,14 +689,35 @@ inline void ack_toast(const Result& r) {
   if (r.res != "ok") text = ReasonText(r.res);
   else if (op == Op::kEquip) text = "Equipped (on the host)";
   else if (op == Op::kUnwear) text = "Taken off (on the host)";
+  else if (op == Op::kUnequipWeapon) text = "Unequipped";
   else if (op == Op::kWear) text = "Worn";
   else return;
   rex_ui_set_toast(text.c_str(), 2500);
 }
 
 inline std::string g_send_line_seen;
-inline void joiner_tick(const Peer& host_pc, int64_t /*now*/) {
+inline int64_t g_unequip_hint_ms = 0;
+inline void joiner_tick(const Peer& host_pc, int64_t now) {
   auto& j = joiner();
+  if (g_weapons_page.load() && j.state && REXCVAR_GET(coop_kit_unequip)) {
+    const bool armed = !j.state->melee.empty() || !j.state->ranged.empty();
+    if (armed && now > g_unequip_hint_ms) {
+      rex_ui_set_toast("Y: Unequip weapon", 1500);
+      g_unequip_hint_ms = now + 1000;
+    }
+    if (g_unequip_pending.exchange(0) == -1) {
+      if (!j.state->melee.empty() || !j.state->ranged.empty()) {
+        const bool melee = !j.state->melee.empty();
+        const char* code = melee ? "00000001" : "00000002";
+        const uint32_t seq = j.queue.Add(Op::kUnequipWeapon, code);
+        g_sent_ops[seq] = Op::kUnequipWeapon;
+        REXSYS_INFO("[coopkit] partner: command {} unequipw {} (Y on the Weapons page: the {} weapon)", seq, code,
+                    melee ? "melee" : "ranged");
+      } else {
+        rex_ui_set_toast("No weapon equipped", 1500);
+      }
+    }
+  }
   if (const std::string line = REXCVAR_GET(coop_kit_send_line); line != g_send_line_seen) {
     g_send_line_seen = line;
     std::istringstream in(line);
@@ -766,9 +792,17 @@ inline void menu_event(bool up, const char* what) {
   REXSYS_INFO("[coopkit] partner menu: {}", what);  // once per menu action: not capped
 }
 // Input thread: pad 0 as the game will see it (fable2_coop_lobby.h).
+// 001eq: the stock Weapons page has no unequip. While the partner's Weapons page is
+// open, Y takes the carried weapon back into the bag: the melee one first, then the
+// ranged one (the host's Carrying.ReturnEntityToInventory, CoopKit.Apply
+// "unequipw"); the page's own Y is not passed on. A toast shows the hint.
 inline uint16_t pad_hook(uint16_t buttons) {
   const uint16_t pressed = buttons & ~g_prev_pad;
   g_prev_pad = buttons;
+  if (g_weapons_page.load() && joiner_active() && REXCVAR_GET(coop_kit_unequip)) {
+    if (pressed & kPadY) g_unequip_pending = -1;  // which weapon: decided with the kit state
+    buttons &= ~kPadY;
+  }
   if (!(buttons & kPadStart)) g_mask_start = false;  // kept away until released
   if (!REXCVAR_GET(coop_kit_start_closes) || !joiner_active()) return buttons;
   if ((pressed & kPadStart) && g_menu_up.load() && g_b_left.load() == 0) {
@@ -1057,6 +1091,7 @@ extern "C" void __imp__sub_825832B0(PPCContext& ctx, uint8_t* base);
 extern "C" void sub_825832B0(PPCContext& ctx, uint8_t* base) {
   __imp__sub_825832B0(ctx, base);
   fable2::coopkit::g_wheel_open = false;
+  fable2::coopkit::g_weapons_page = false;
   if (fable2::coopkit::joiner_active()) fable2::coopkit::menu_event(false, "pause screen exit (sub_825832B0)");
 }
 
@@ -1108,6 +1143,7 @@ extern "C" void sub_8240EAA0(PPCContext& ctx, uint8_t* base) {
              REXCVAR_GET(coop_kit_redirect_kick)});
   static const char* kRouteNames[] = {"as is", "henchman abilities", "henchman quit", "ignored"};
   REXSYS_INFO("[coopkit] pause page '{}' chosen: {}", name, kRouteNames[static_cast<int>(route)]);
+  ck::g_weapons_page = std::strcmp(name, "Weapons") == 0;
   if (route == ck::PageRoute::kSwallow) return;
   if (route == ck::PageRoute::kPass) {
     ck::t_full_page_open = true;  // sub_82336D70 below: the stock pause, unless coop_kit_no_host_pause

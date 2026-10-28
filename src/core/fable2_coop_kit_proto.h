@@ -89,7 +89,7 @@ inline std::string Clean(std::string_view s) {
 
 // --- commands ------------------------------------------------------------------
 
-enum class Op { kEquip, kWear, kUnwear, kUse };
+enum class Op { kEquip, kWear, kUnwear, kUse, kUnequipWeapon };
 
 inline const char* OpName(Op op) {
   switch (op) {
@@ -97,6 +97,7 @@ inline const char* OpName(Op op) {
     case Op::kWear: return "wear";
     case Op::kUnwear: return "unwear";
     case Op::kUse: return "use";
+    case Op::kUnequipWeapon: return "unequipw";
   }
   return "?";
 }
@@ -105,6 +106,7 @@ inline std::optional<Op> ParseOp(std::string_view s) {
   if (s == "wear") return Op::kWear;
   if (s == "unwear") return Op::kUnwear;
   if (s == "use") return Op::kUse;
+  if (s == "unequipw") return Op::kUnequipWeapon;
   return std::nullopt;
 }
 

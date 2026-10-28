@@ -1,6 +1,6 @@
 -- CoopKit (feature 002, slice 1): player 2's kit on the host.
 --   CoopKit.Snapshot(entity, rev) -> one COOPKIT:v1 line (src/core/fable2_coop_kit_proto.h)
---   CoopKit.Apply(entity, op, hex) -> "ok" or "no:<reason>"; op = equip, wear, unwear, use
+--   CoopKit.Apply(entity, op, hex) -> "ok" or "no:<reason>"; op = equip, wear, unwear, use, unequipw
 -- Run as a file (luafile coop_kit) it defines CoopKit and prints the
 -- henchman's snapshot. Every engine call is wrapped in pcall.
 -- Record ids travel as 8 hex digits; "#XXXXXXXX" names resolve to that id
@@ -174,6 +174,24 @@ end
 function CoopKit.Apply(entity, op, hex)
   CoopKit.Tick()
   if not entity or not entity:IsAlive() then return "no:busy" end
+  -- 001eq: take the carried weapon back into the bag (the stock pages have no
+  -- unequip). hex 00000001 = the melee weapon, 00000002 = the ranged one.
+  if op == "unequipw" then
+    local want_ranged = hex == "00000002"
+    local done = 0
+    for _, slot in ipairs(WEAPON_SLOTS) do
+      local w = try("GetEntityInSlot", Carrying.GetEntityInSlot, entity, slot)
+      if w and w:IsAlive() and (RANGED_SLOTS[slot] and true or false) == want_ranged then
+        if not pcall(Carrying.ReturnEntityToInventory, entity, w) then
+          try("ReturnEntityToInventory", Carrying.ReturnEntityToInventory, w)
+        end
+        done = done + 1
+      end
+    end
+    if done == 0 then return "no:noitem" end
+    local m, r = weapons(entity)
+    return ((want_ranged and r == "") or (not want_ranged and m == "")) and "ok" or "no:pending"
+  end
   local items = collect(entity)
   local item = items[hex]
   if op == "equip" and CoopKitEquipping[hex] and equip_done(entity, hex) then
