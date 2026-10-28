@@ -622,14 +622,26 @@ inline void mirror_worn(PPCContext& ctx, uint8_t* base, const KitState& want) {
     g_worn_epoch = epoch;
     g_worn_applied.clear();
   }
-  const uint32_t appearance = fable2::coophero::find_appearance(base, fable2::coopcam::g_p2_entity.load());
+  // The appearance manager component (EC 15) from the copy's component table, the
+  // object the AppearanceModifierManager bindings get; the vtable scan of the entity's
+  // first 0x400 bytes (fable2_coop_hero.h) found nothing on this copy (proof run
+  // 2026-10-28: "appearance 0x00000000" every revision) and stays the fallback.
+  const uint32_t p2 = fable2::coopcam::g_p2_entity.load();
+  uint32_t appearance = component(base, p2, kAppearanceEC);
+  if (!appearance) appearance = fable2::coophero::find_appearance(base, p2);
   static uint32_t s_logged_rev = 0;
   if (want.rev != s_logged_rev) {  // 001eq proof: why a worn change did not reach the copy
     s_logged_rev = want.rev;
-    REXSYS_INFO("[coopkit] worn mirror rev {}: appearance 0x{:08X}, host wears {}, applied {}", want.rev, appearance,
-                want.worn.size(), g_worn_applied.size());
+    const uint32_t vt = appearance && ta::rdable2(base, appearance, 8) ? ta::load_be(base, appearance) : 0;
+    const uint32_t back = appearance && ta::rdable2(base, appearance, 8) ? ta::load_be(base, appearance + 4) : 0;
+    REXSYS_INFO("[coopkit] worn mirror rev {}: appearance 0x{:08X} (vtable 0x{:08X}, +4 0x{:08X}, entity 0x{:08X}), "
+                "host wears {}, applied {}", want.rev, appearance, vt, back, p2, want.worn.size(), g_worn_applied.size());
+    if (appearance && vt != fable2::coophero::kAppearanceVtable) {
+      REXSYS_WARN("[coopkit] worn mirror: component 15 is not the appearance object (vtable 0x{:08X}); not wearing", vt);
+    }
   }
-  if (!appearance) return;
+  if (!appearance || !ta::rdable2(base, appearance, 4) || ta::load_be(base, appearance) != fable2::coophero::kAppearanceVtable)
+    return;
   int worn = 0, off = 0;
   for (const auto& rec : g_worn_applied) {
     if (std::find(want.worn.begin(), want.worn.end(), rec) != want.worn.end()) continue;

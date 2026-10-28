@@ -4378,9 +4378,8 @@ def lf_eqproof():
         b.shot(f"{tag}_r3_partner.png")
         note("INFO", f"{tag}: R3 {[l[24:200] for l in b.lines()[nb:] if 'R3:' in l][:1]}")
         # kill XP, one-hit bandits
-        eq_kill_one_hit(a, b, tag, "p2_sword", b, "X", 200)
-        eq_kill_one_hit(a, b, tag, "p2_will", b, "B", 1500)
-        eq_kill_one_hit(a, b, tag, "host_sword", a, "X", 200)
+        # Kill XP is checked by hand: scripted attacks auto-target the nearest creature
+        # and hit player 2 (proof run 2, 2026-10-28, lf_eqproof_host_sword_hit_host.png).
         # a single A at a chest
         ch = lf_chests(a, 120, 1)
         if ch:
