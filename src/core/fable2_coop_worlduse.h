@@ -367,6 +367,11 @@ inline bool joiner_settled(int64_t now) {
 extern "C" void rex_ui_set_toast(const char* text, int ms);
 constexpr int kToastMs = 1500;
 inline bool g_toast_up = false;
+// What the hint last said ("chest", "door" or ""), and until when the toast
+// shows the "Opening..." answer to the partner's A instead (001eq: round two's
+// chest took ~7 s from the A to the items, and Calvin pressed 5 more times).
+inline std::string g_hint_what;
+inline int64_t g_opening_until_ms = 0;
 inline void joiner_hint_tick(int64_t now) {
   std::string what;
   if (joiner_in_campaign() && joiner_settled(now) && !fable2::coopkit::g_wheel_open.load()) {
@@ -378,6 +383,8 @@ inline void joiner_hint_tick(int64_t now) {
       if (d.value.rfind("COOPWHINT:v1|", 0) == 0 && at != std::string::npos) what = d.value.substr(at + 6);
     }
   }
+  g_hint_what = what;
+  if (now < g_opening_until_ms) return;  // "Opening the ..." stays up
   const char* text = what == "chest" ? "A: Open the chest" : what == "door" ? "A: Open the door" : nullptr;
   if (text) {
     rex_ui_set_toast(text, kToastMs);
@@ -397,6 +404,13 @@ inline void joiner_tick(int64_t now) {
   std::snprintf(rec, sizeof(rec), "COOPWUSE:v1|n=%lld|kind=near", static_cast<long long>(now));
   lobby::PublishData("coop_wuse", rec);
   REXSYS_INFO("[coop] world use: the partner's A, the host looks in front of player 2 ({})", rec);
+  // An A with the hint up is answered at once on the partner's screen.
+  if (g_hint_what == "chest" || g_hint_what == "door") {
+    const int64_t ms = g_hint_what == "chest" ? 8000 : 3000;
+    rex_ui_set_toast(g_hint_what == "chest" ? "Opening the chest..." : "Opening the door...", static_cast<int>(ms));
+    g_opening_until_ms = now + ms;
+    g_toast_up = true;
+  }
 }
 
 // --- the host's part ----------------------------------------------------------

@@ -208,6 +208,8 @@ inline void input_filter(uint32_t /*user_index*/, rex::input::X_INPUT_STATE* sta
 
 // Follow camera state (render thread only).
 inline float g_yaw = 0;          // camera heading around the creature (radians)
+inline float g_walk_yaw = 0;     // camera heading behind player 2's last walk
+inline bool g_have_walk_yaw = false;
 inline bool g_have_yaw = false;
 inline Vec3 g_last_creature;
 inline Vec3 g_written_pos;       // what we last wrote (to tell network updates apart)
@@ -264,6 +266,7 @@ inline void follow_tick(bool enabled) {
                 view ? "found at" : "not found", view, component, camera);
     if (!view) return;
     g_have_yaw = false;
+    g_have_walk_yaw = false;
   }
   if (!ta::rdable2(base, entity + 124, 4)) return;
   const uint32_t placement = ta::load_be(base, entity + 124);
@@ -332,18 +335,34 @@ inline void follow_tick(bool enabled) {
   // The walk direction comes from a low-passed velocity, and the chase turns
   // the camera at most kMaxSwingRate (camera proof: the per-frame direction was
   // noise and swung the camera up to 1 m a frame).
+  // The way player 2 last walked: a standing hero faces it (001eq, R3 below).
+  if (g_follow.Speed() > kChaseMinSpeed) {
+    g_walk_yaw = std::atan2(-g_follow.vy, -g_follow.vx);
+    g_have_walk_yaw = true;
+  }
   if (REXCVAR_GET(coop_cam_chase) && now - g_look_ms.load() > 1500 && dt > 0 &&
       g_follow.Speed() > kChaseMinSpeed) {
     g_yaw = ChaseYawLimited(g_yaw, std::atan2(-g_follow.vy, -g_follow.vx), dt);
   }
   (void)moved;
-  // R3: back to the normal height, behind the way the hero walks (or faces
-  // the host's camera's way when standing).
+  // R3: back to the normal height, behind the way the hero walks; standing,
+  // behind the way it last walked (it faces that way). Round two: standing, the
+  // old fallback took the host camera's forward, which follows the HOST's hero,
+  // and put the camera in front of player 2. The host camera's way stays only
+  // for a player 2 that has not walked yet.
   if (g_recenter.exchange(false)) {
     g_pitch = 0;
-    g_yaw = g_follow.Speed() > kChaseMinSpeed ? std::atan2(-g_follow.vy, -g_follow.vx)
-                                              : std::atan2(-g_host_fwd.y, -g_host_fwd.x);
-    REXSYS_INFO("[coopcam] R3: camera recentered");
+    const char* how = "behind the way player 2 walks";
+    if (g_follow.Speed() > kChaseMinSpeed) {
+      g_yaw = std::atan2(-g_follow.vy, -g_follow.vx);
+    } else if (g_have_walk_yaw) {
+      g_yaw = g_walk_yaw;
+      how = "behind the way player 2 last walked";
+    } else {
+      g_yaw = std::atan2(-g_host_fwd.y, -g_host_fwd.x);
+      how = "the host camera's way (player 2 has not walked yet)";
+    }
+    REXSYS_INFO("[coopcam] R3: camera recentered, {}", how);
   }
   const float dist = kDistance * (1.0f - 0.12f * std::fmax(0.0f, g_pitch));
   const Vec3 pos = target + Vec3{std::cos(g_yaw) * dist, std::sin(g_yaw) * dist, kHeight + g_pitch};
