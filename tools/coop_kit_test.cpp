@@ -93,6 +93,20 @@ int main() {
   CHECK(k2->worn.size() == 2 && k2->items.size() == 2 && k2->items[1].count == 3);
   CHECK(ParseKitState("COOPKIT:v1|rev=1|items=zz:1:A:B,00000001:2:ITEMS_FOOD_AND_DRINK:X")->items.size() == 1);
 
+  // 001up: experience and ability levels survive the host's re-format (proof run 1 lost them).
+  {
+    const auto k = ParseKitState("COOPKIT:v1|rev=4|xp=1500,5000,0,0|xpt=1500,5000,0,0|lvl=0:1,3:2,9:9|items=");
+    CHECK(k && k->has_xp && k->xp[1] == 5000 && k->has_lvl && k->lvl.size() == 2 && k->lvl.at(3) == 2);
+    const auto r = ParseKitState(Format(*k));
+    CHECK(r && r->has_xp && r->xp[0] == 1500 && r->xpt[1] == 5000 && r->lvl == k->lvl);
+    CHECK(Format(*k).find("|lvl=0:1,3:2|") != std::string::npos);
+    const auto none = ParseKitState("COOPKIT:v1|rev=5|xp=0,0,0,0|xpt=0,0,0,0|lvl=-|items=");
+    CHECK(none && none->has_lvl && none->lvl.empty() && ParseKitState(Format(*none))->has_lvl);
+    CHECK(!ParseKitState("COOPKIT:v1|rev=5|items=")->has_lvl);
+    CHECK(ParseCommand("COOPCMD:v1|sid=s1|seq=4|op=learn|rec=00020000")->op == Op::kLearn);
+    CHECK(ParseCommand("COOPCMD:v1|sid=s1|seq=5|op=xpspend|rec=10000BB8")->op == Op::kXpSpend);
+  }
+
   // Mirror diff.
   auto d = MirrorDiff(k, {{"00000010", 1}, {"00000030", 1}, {"00000099", 2}});
   CHECK(d.size() == 2);

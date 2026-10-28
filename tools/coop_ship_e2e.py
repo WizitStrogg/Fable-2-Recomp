@@ -4503,7 +4503,7 @@ def lf_uptrace():
             return
         a.window_capture = b.window_capture = True
         time.sleep(15)
-        # player 2 gets XP on the host; the partner's page should show it (the redirect)
+        # player 2 gets XP on the host; the partner's page shows it (the native write)
         lua_lines(a, ("local h = GetPlayerHenchman(); local t = EExperienceType; "
                       "pcall(Experience.Modify, h, t.EXPERIENCE_GENERAL, 1500, false); pcall(Experience.Modify, h, t.EXPERIENCE_STRENGTH, 5000, false); "
                       "print('LFXPSET ok')"), "LFXPSET", 10)
@@ -4524,6 +4524,12 @@ def lf_uptrace():
                "print('LFHLVL ' .. tostring(o and l))")
         l0 = lua_lines(a, lvl, "LFHLVL", 10)
         na = len(a.lines())
+        # wait until the partner's pause has ended (its pages pause both games)
+        t = time.time()
+        while time.time() - t < 40 and b.count(r"partner menu: PauseGame") > b.count(r"partner menu: UnpauseGame"):
+            time.sleep(1)
+        time.sleep(5)
+        a.shot(f"{tag}_h_before_wheel.png")
         a.send("cvar coop_trace_xp true")
         a.send("press Start 200")
         time.sleep(2.5)
@@ -4537,6 +4543,145 @@ def lf_uptrace():
         l1 = lua_lines(a, lvl, "LFHLVL", 10)
         note("INFO", f"{tag}: host purchase: Brutal Styles {l0} -> {l1}; XP {eq_xp(a, 'hero')}")
         note("INFO", f"{tag}: host trace: {[l[24:240] for l in a.lines()[na:] if '[eqtrace]' in l][:60]}")
+        note("INFO", f"{tag}: crashes: partner {b.count(r'Unhandled guest')}, host {a.count(r'Unhandled guest')}")
+    finally:
+        for g in (a, b):
+            g.stop()
+        relay.kill()
+
+
+
+def lf_upproof():
+    """001up proof: the partner's Abilities page shows player 2's experience (given on
+    the host) and levels; a Learn there is applied to player 2 on the host (level up,
+    experience spent); the page shows the learned level after it is reopened."""
+    tag = "lf_upproof"
+    slot, cid = eq_fresh_slot()
+    if not cid:
+        note("FAIL", f"{tag}: no fresh slot")
+        return
+    setup_tomls()
+    relay_log = open(os.path.join(OUT, f"relay_{tag}.log"), "w")
+    relay = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                           "coop_relay.py")], stdout=relay_log, stderr=relay_log)
+    a, b = Game("mod-a", "host"), Game("mod-b", "partner")
+    a.start({"FABLE2_TEST_INPUT": "1"})
+    b.start({"FABLE2_TEST_INPUT": "1"})
+    lvl = ("local o, l = pcall(Stats.GetHeroAbilityLevel, GetPlayerHenchman(), EHeroAbilityType.HERO_ABILITY_STRENGTH_MELEE_WEAPONS); "
+           "print('LFLVL ' .. tostring(o and l))")
+    try:
+        if not eq_host_lobby(a, tag, cid) or not partner_continue_join(a, b, tag):
+            return
+        a.window_capture = b.window_capture = True
+        time.sleep(15)
+        l0 = lua_lines(a, lvl, "LFLVL", 10)
+        lua_lines(a, ("local h = GetPlayerHenchman(); local t = EExperienceType; "
+                      "pcall(Experience.Modify, h, t.EXPERIENCE_GENERAL, 1500, false); pcall(Experience.Modify, h, t.EXPERIENCE_STRENGTH, 5000, false); "
+                      "print('LFXPSET ok')"), "LFXPSET", 10)
+        x0 = eq_xp(a, 'p2')
+        note("INFO", f"{tag}: host: player 2 Brutal Styles {l0}, XP {x0}")
+        time.sleep(10)
+        note("INFO", f"{tag}: partner mirror: {[l[24:200] for l in b.lines() if '[coopkit] abilities' in l][-3:]}")
+        eq_page_path(b, 0, [(None, "p_abilities"), ("A", "p_strength"), ("A", "p_after_learn"), ("A", "p_after_continue")], tag)
+        eq_close_pages(b)
+        time.sleep(15)
+        note("INFO", f"{tag}: partner commands: {[l[24:200] for l in b.lines() if re.search(r'coopkit.*(learn|xpspend|abilities|command [0-9]+: )', l)][-8:]}")
+        l1 = lua_lines(a, lvl, "LFLVL", 10)
+        x1 = eq_xp(a, 'p2')
+        note("PASS" if l1 and l1[-1] != (l0[-1] if l0 else None) else "FAIL",
+             f"{tag}: host: player 2 Brutal Styles {l0} -> {l1}; XP {x0} -> {x1}")
+        # cycle 2 (coordinator 20:52Z: two full open / Learn / close cycles): more XP, Level 3
+        lua_lines(a, ("pcall(Experience.Modify, GetPlayerHenchman(), EExperienceType.EXPERIENCE_STRENGTH, 20000, false); "
+                      "print('LFXPSET2 ok')"), "LFXPSET2", 10)
+        x2 = eq_xp(a, 'p2')
+        time.sleep(10)
+        eq_page_path(b, 0, [(None, "p_abilities2"), ("A", "p_strength2"), ("A", "p_after_learn2"), ("A", "p_after_continue2")], tag)
+        eq_close_pages(b)
+        time.sleep(15)
+        l3 = lua_lines(a, lvl, "LFLVL", 10)
+        x3 = eq_xp(a, 'p2')
+        note("PASS" if l3 and l1 and l3[-1] != l1[-1] else "FAIL",
+             f"{tag}: cycle 2: host: player 2 Brutal Styles {l1} -> {l3}; XP {x2} -> {x3}")
+        time.sleep(6)
+        eq_page_path(b, 0, [(None, "p_abilities3"), ("A", "p_strength3")], tag)
+        eq_close_pages(b)
+        note("INFO", f"{tag}: partner commands: {[l[24:200] for l in b.lines() if re.search(r'coopkit.*(learn|xpspend|abilities|command [0-9]+: )', l)][-12:]}")
+        # coordinator 22:21Z: after the partner's last page close the host still works
+        time.sleep(5)
+        a.shot(f"{tag}_h_after_pages.png")
+        t0 = time.time()
+        ping = lua_lines(a, "print('LFPING ok')", "LFPING", 15)
+        note("PASS" if ping else "FAIL", f"{tag}: host Lua answers after the partner's pages: {ping} ({time.time() - t0:.1f} s)")
+        nk = b.count(r"coopkit\] command [0-9]+: ok")
+        nall = b.count(r"coopkit\] command [0-9]+: ")
+        b.send("cvar coop_kit_send_line unequipw 00000001")
+        t = time.time()
+        while time.time() - t < 20 and b.count(r"coopkit\] command [0-9]+: ") <= nall:
+            time.sleep(0.5)
+        note("PASS" if b.count(r"coopkit\] command [0-9]+: ok") > nk else "FAIL",
+             f"{tag}: a kit command after the pages: {[l[24:160] for l in b.lines() if re.search(r'coopkit\] command [0-9]+: ', l)][-1:]}")
+        sv = lua_lines(a, "print('LFSAVE ' .. tostring(pcall(AutoSaveGame, true, true)))", "LFSAVE", 30)
+        time.sleep(10)
+        note("PASS" if sv and sv[-1].startswith("true") and not a.count(r"Unhandled guest") else "FAIL",
+             f"{tag}: host Save after the pages: {sv}; host crashes {a.count(r'Unhandled guest')}")
+        note("INFO", f"{tag}: partner spend capture: {[l[24:200] for l in b.lines() if 'experience changed' in l or 'xpspend' in l][-6:]}")
+        note("INFO", f"{tag}: crashes: partner {b.count(r'Unhandled guest')}, host {a.count(r'Unhandled guest')}")
+    finally:
+        for g in (a, b):
+            g.stop()
+        relay.kill()
+
+
+
+def lf_upprobe():
+    """001up: which Lua call on the partner's own hero record (GetPlayerHero()) is
+    unsafe (proof pair 1 crashed after a read-only mirror pass). The abilities mirror
+    is off; one probe at a time, each followed by an alive check."""
+    tag = "lf_upprobe"
+    slot, cid = eq_fresh_slot()
+    if not cid:
+        note("FAIL", f"{tag}: no fresh slot")
+        return
+    setup_tomls()
+    relay_log = open(os.path.join(OUT, f"relay_{tag}.log"), "w")
+    relay = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                           "coop_relay.py")], stdout=relay_log, stderr=relay_log)
+    a, b = Game("mod-a", "host"), Game("mod-b", "partner")
+    a.start({"FABLE2_TEST_INPUT": "1"})
+    b.start({"FABLE2_TEST_INPUT": "1"})
+    b.send("cvar coop_kit_abilities false")
+    H = "local h = GetPlayerHero(); "
+    L = ("local n = 0; for _, k in ipairs({'STRENGTH_MELEE_WEAPONS','STRENGTH_PHYSIQUE','STRENGTH_TOUGHNESS','SKILL_RANGED_WEAPONS',"
+         "'SKILL_ACCURACY','SKILL_SPEED','WILL_LIGHTNING','WILL_FIREBALL','WILL_SLOW_TIME','WILL_SWORDS','WILL_VORTEX','WILL_CHAOS',"
+         "'WILL_FORCE_PUSH','WILL_DEAD_RISING'}) do local o, v = pcall(Stats.GetHeroAbilityLevel, h, EHeroAbilityType['HERO_ABILITY_' .. k]); "
+         "if o then n = n + math.floor(v or 0) end end; ")
+    X = ("local s = 0; for _, t in ipairs({'GENERAL','STRENGTH','SKILL','WILL'}) do local o, v = pcall(Experience.Get, h, EExperienceType['EXPERIENCE_' .. t]); "
+         "if o then s = s + math.floor(v or 0) end end; ")
+    probes = [
+        ("handler", "print('COOPMIRROR|n=0|xp=0,0,0,0'); print('LFPROBE handler ok')"),
+        ("file", "LFFILE = 1; print('LFPROBE file ' .. tostring(CoopKit and CoopKit.PartnerMirror))"),
+        ("mirror", "CoopKit.PartnerMirror({0,0,0,0}, {[0]=1,[1]=1,[2]=1,[3]=1,[4]=1,[5]=1,[6]=1,}, false); print('LFPROBE mirror ok')"),
+        ("mirror2", "CoopKit.PartnerMirror({0,0,0,0}, {[0]=1,[1]=1,[2]=1,[3]=1,[4]=1,[5]=1,[6]=1,}, true); print('LFPROBE mirror2 ok')"),
+    ]
+    try:
+        if not eq_host_lobby(a, tag, cid) or not partner_continue_join(a, b, tag):
+            return
+        b.send("cvar coop_kit_abilities false")
+        time.sleep(20)
+        b.send("luafile coop_abilities")
+        time.sleep(4)
+        for name, chunk in probes:
+            out = lua_lines(b, chunk, "LFPROBE " + name + " ", 10)
+            time.sleep(3)
+            dead = b.count(r"Unhandled guest")
+            note("FAIL" if dead else "PASS", f"{tag}: probe {name}: {out}; partner crashes {dead}")
+            if dead:
+                break
+        if not b.count(r"Unhandled guest"):
+            b.send("cvar coop_kit_abilities true")
+            time.sleep(20)
+            note("INFO", f"{tag}: full mirror on: {[l[24:200] for l in b.lines() if 'abilities' in l and 'coopkit' in l][-3:]}; "
+                         f"partner crashes {b.count(r'Unhandled guest')}")
         note("INFO", f"{tag}: crashes: partner {b.count(r'Unhandled guest')}, host {a.count(r'Unhandled guest')}")
     finally:
         for g in (a, b):
@@ -4584,6 +4729,10 @@ def run_livefix():
         lf_eqproof()
     if "uptrace" in phases:
         lf_uptrace()
+    if "upproof" in phases:
+        lf_upproof()
+    if "upprobe" in phases:
+        lf_upprobe()
 
 
 def run_dynsync():
