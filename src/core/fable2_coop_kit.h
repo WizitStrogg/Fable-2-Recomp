@@ -811,6 +811,10 @@ inline void OnFrame() {
   const bool as_host = host_active(s), as_joiner = !as_host && joiner_active();
   if (!as_host && !as_joiner) return;
   const Peer peer = as_host ? campaign_partner() : campaign_host(s);  // before mtx(): S().m is the front end's
+  // 001eq: solo with coop_campaign on (Josh's toml) is "in the world, not joined"
+  // too; the host side ran a Lua snapshot every 5-7 s for nobody (graphics thread,
+  // 2026-10-28). Only a hosted co-op campaign with a known partner snapshots.
+  if (as_host && (!fable2::coophero::g_campaign_on.load() || (!peer.xuid && !peer.ip))) return;
   std::lock_guard<std::mutex> l(mtx());
   if (as_host) host_tick(s, peer, now);
   else joiner_tick(peer, now);

@@ -3386,7 +3386,13 @@ def lf_jn():
         for g in (a, b):
             g.stop()
         relay.kill()
-    # The host's solo Continue (the stock main menu's top row) still loads a world.
+    lf_jn_solo(tag)
+
+
+def lf_jn_solo(tag="lf_jn"):
+    """The host's solo Continue (the stock main menu's second row: New Game,
+    Continue, Co-op) still loads a world."""
+    setup_tomls()
     a = Game("mod-a", "host")
     a.start({"FABLE2_TEST_INPUT": "1"})
     try:
@@ -3396,7 +3402,16 @@ def lf_jn():
         time.sleep(2)
         a.shot(f"{tag}_solo_menu.png")
         n = a.count(r"front-end scans paused \(the game's Lua is running\)")
-        a.press("E")  # Continue: the top row
+        a.press("Down")  # New Game -> Continue
+        time.sleep(1.0)
+        a.shot(f"{tag}_solo_on_continue.png")
+        a.press("E")  # Continue: the stock save picker when there are several saves
+        time.sleep(12)  # the rig's 83 saves: the picker loads every card first
+        a.shot(f"{tag}_solo_picker.png")
+        a.press("E")  # the first card (the newest save)
+        time.sleep(4)
+        if not a.count(r"front-end scans paused \(the game's Lua is running\)") > n:
+            a.press("E")  # a card's own confirm, if it asks
         ok = a.wait(f"{tag}: solo Continue loads the world (the game's Lua runs)",
                     r"front-end scans paused \(the game's Lua is running\)", n, 120)
         time.sleep(20)
@@ -3517,6 +3532,8 @@ def run_livefix():
         lf_next()
     if "jn" in phases:
         lf_jn()
+    if "jnsolo" in phases:
+        lf_jn_solo()
     if "eqprobe" in phases:
         lf_eqprobe()
 

@@ -967,8 +967,13 @@ inline void partner_return_watchdog(int64_t now) {
 // teardown: the hold ends and the chunks run.
 constexpr int64_t kTeardownHoldMs = 60000;
 inline int64_t g_hold_since_ms = 0;
+inline int64_t g_next_hold_check_ms = 0;
 inline void teardown_hold_tick(int64_t now) {
   namespace fl = fable2::f5lua;
+  // Every 250 ms while no hold runs (the arming needs no frame precision: the
+  // runner itself latches the hold), every frame while one does.
+  if (!fl::g_teardown_hold.load() && now < g_next_hold_check_ms) return;
+  g_next_hold_check_ms = now + 250;
   const bool in_campaign = g_purse_host_xuid.load() != 0 && lobby::GetLobbyStatus().joined_host_ip != 0;
   const int s = fable2::stateprobe::CurrentState();
   const bool front = s == fable2::stateprobe::kMainMenuMovie || s == fable2::stateprobe::kPressAScreen;

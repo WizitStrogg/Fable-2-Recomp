@@ -148,10 +148,10 @@ inline int64_t g_screen_seen_open = 0, g_screen_last_a_ms = 0;
 inline int g_screen_a = 0;
 inline bool g_screen_cover_dropped = false;
 inline void partner_screen_tick() {
+  const int64_t open = g_open_ms.load(std::memory_order_relaxed);  // solo: 0, nothing else runs
+  if (!open || !g_controller.load()) return;
   if (!REXCVAR_GET(coop_campaign) || !REXCVAR_GET(coop_join_screens_auto) || REXCVAR_GET(coop_join_screen_skip))
     return;
-  const int64_t open = g_open_ms.load();
-  if (!open || !g_controller.load()) return;
   if (rex::kernel::xam::lobby::GetLobbyStatus().joined_host_ip == 0) return;  // the host keeps its timed answers
   if (open != g_screen_seen_open) {
     g_screen_seen_open = open;
