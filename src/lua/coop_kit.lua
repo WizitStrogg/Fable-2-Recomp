@@ -201,9 +201,42 @@ local function share_xp(p2)
   CoopKitEarned = {h = h, p = p}
 end
 
+-- 001up: the stock henchman default weapon ("DefaultWeaponHenchman", the "Hal's Sword"
+-- Calvin saw) never stays on player 2 once a real melee weapon is in the bag. The swap at
+-- the join misses it when it is unequipped first: it then sits in the bag and the game
+-- arms from there at the first attack (rig 2026-10-30). From the slots it is replaced by
+-- that weapon; from the bag it is only removed, so a Y unequip stays unequipped.
+local DEFAULT_WEAPON = "BDFE364C"
+local function strip_default_weapon(entity)
+  local items = collect(entity)
+  local real
+  for hex, i in pairs(items) do
+    if hex ~= DEFAULT_WEAPON and i.cat == "WEAPONS" and i.entity and not is_ranged(i.entity) then real = i.entity end
+  end
+  local slot_found
+  for _, slot in ipairs(WEAPON_SLOTS) do
+    local w = try("GetEntityInSlot", Carrying.GetEntityInSlot, entity, slot)
+    if w and w:IsAlive() and record_hex(w) == DEFAULT_WEAPON then slot_found = slot end
+  end
+  if not real and not slot_found and not items[DEFAULT_WEAPON] then return end
+  local melee = weapons(entity)
+  local armed = melee ~= "" and melee ~= DEFAULT_WEAPON
+  if not real and not armed then return end  -- nothing else to fight with yet
+  if slot_found and real then
+    try("RemoveEntityFromSlot", Carrying.RemoveEntityFromSlot, entity, slot_found)
+    try("EquipWeapon", WeaponSetManager.EquipWeapon, entity, real)
+    print("[coopkit] the default henchman weapon in a slot replaced")
+  end
+  if items[DEFAULT_WEAPON] then
+    try("RemoveAllItemsOfType", Inventory.RemoveAllItemsOfType, entity, "#" .. DEFAULT_WEAPON)
+    print("[coopkit] the default henchman weapon taken out of the bag")
+  end
+end
+
 function CoopKit.Snapshot(entity, rev)
   CoopKit.Tick()
   share_xp(entity)
+  strip_default_weapon(entity)
   local items, order = collect(entity)
   local list = {}
   for _, hex in ipairs(order) do
