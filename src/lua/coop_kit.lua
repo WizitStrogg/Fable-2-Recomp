@@ -180,7 +180,11 @@ local function share_xp(p2)
   local hero = GetPlayerHero()
   if not hero or not p2 or hero == p2 then return end
   local h, p = earned(hero), earned(p2)
-  if CoopKitEarned then
+  -- The first snapshots of a session only take the base: player 2's saved experience
+  -- comes back after the join and is not newly earned (rig 2026-10-30: 20800 paid to
+  -- the host's hero on a rejoin).
+  CoopKitShareWait = (CoopKitShareWait or 20) - 1
+  if CoopKitEarned and CoopKitShareWait < 0 then
     local dh, dp = h - CoopKitEarned.h, p - CoopKitEarned.p
     if dh >= 1 then try("Experience.Modify", Experience.Modify, p2, EExperienceType.EXPERIENCE_GENERAL, dh, false) end
     if dp >= 1 then try("Experience.Modify", Experience.Modify, hero, EExperienceType.EXPERIENCE_GENERAL, dp, false) end

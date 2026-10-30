@@ -4792,7 +4792,9 @@ def lf_uplevels():
         # the soak (coordinator 16:36Z): 15 minutes in the world with the mirror running
         t = time.time()
         passes = b.count(r"\[lua\] COOPMIRROR")
-        while time.time() - t < 900 and not b.count(r"Unhandled guest") and not a.count(r"Unhandled guest"):
+        soak = 60 if "--nosoak" in sys.argv else 900
+        note("INFO", f"{tag}: hero XP after the rejoin (no inflation expected): {eq_xp(a, 'hero')}; player 2 {eq_xp(a, 'p2')}")
+        while time.time() - t < soak and not b.count(r"Unhandled guest") and not a.count(r"Unhandled guest"):
             time.sleep(30)
         note("PASS" if not b.count(r"Unhandled guest") and not a.count(r"Unhandled guest") else "FAIL",
              f"{tag}: soak {time.time() - t:.0f} s: {b.count(r'[[]lua[]] COOPMIRROR') - passes} mirror passes; "
@@ -4833,6 +4835,8 @@ def up_kill(a, attacker, ent, tag, label, key="X"):
     time.sleep(1)
     attacker.shot(f"{tag}_{label}_start.png")
     hp = lambda: (lua_lines(a, "print('LFBH ' .. tostring(LFB and Health.Get(LFB)))", "LFBH", 10) or ["?"])[-1]
+    # The starter sword does 1 damage (the page: "Damage: 1.0"): the bandit starts nearly dead.
+    lua_lines(a, "print('LFBS ' .. tostring(pcall(Health.Set, LFB, 3)))", "LFBS", 10)
     hp0 = hp()
     for k in range(90):
         attacker.send(f"press {key} 150")
@@ -4878,6 +4882,7 @@ def lf_upkill():
         note("INFO", f"{tag}: mannequin helpers: {[l[24:130] for l in b.lines() if 'mannequin helper' in l][:12]}")
         up_kill(a, a, "GetPlayerHero()", tag, "host1")
         # the sharing rule, both ways
+        time.sleep(150)  # the first snapshots only take the base
         x0 = (eq_xp(a, 'p2'), eq_xp(a, 'hero'))
         lua_lines(a, "pcall(Experience.Modify, GetPlayerHero(), EExperienceType.EXPERIENCE_STRENGTH, 300, false); print('LFG1 ok')", "LFG1", 10)
         time.sleep(15)
