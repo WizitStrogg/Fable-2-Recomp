@@ -166,8 +166,35 @@ function CoopKit.Tick()
   CoopKitEffects = running
 end
 
+-- 001up: co-op experience (Josh's rule): the earner keeps what they earned in its
+-- style, the other hero gets the same amount as general experience. Read from the
+-- totals earned at each snapshot; what this adds is not shared again.
+local function earned(entity)
+  local sum = 0
+  for _, t in ipairs(xp_types()) do
+    sum = sum + (try("Experience.GetTotalEarned", Experience.GetTotalEarned, entity, t) or 0)
+  end
+  return sum
+end
+local function share_xp(p2)
+  local hero = GetPlayerHero()
+  if not hero or not p2 or hero == p2 then return end
+  local h, p = earned(hero), earned(p2)
+  if CoopKitEarned then
+    local dh, dp = h - CoopKitEarned.h, p - CoopKitEarned.p
+    if dh >= 1 then try("Experience.Modify", Experience.Modify, p2, EExperienceType.EXPERIENCE_GENERAL, dh, false) end
+    if dp >= 1 then try("Experience.Modify", Experience.Modify, hero, EExperienceType.EXPERIENCE_GENERAL, dp, false) end
+    if dh >= 1 or dp >= 1 then
+      print("[coopkit] experience shared: hero earned " .. math.floor(dh) .. ", player 2 earned " .. math.floor(dp))
+      h, p = earned(hero), earned(p2)
+    end
+  end
+  CoopKitEarned = {h = h, p = p}
+end
+
 function CoopKit.Snapshot(entity, rev)
   CoopKit.Tick()
+  share_xp(entity)
   local items, order = collect(entity)
   local list = {}
   for _, hex in ipairs(order) do

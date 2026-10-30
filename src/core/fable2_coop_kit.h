@@ -1574,3 +1574,69 @@ extern "C" void sub_8251C0A8(PPCContext& ctx, uint8_t* base) {
   }
   __imp__sub_8251C0A8(ctx, base);
 }
+
+// 001up: the Clothing page's 3D preview is a mannequin (sub_823FD238, the builder), which
+// takes its source from the game's local-player list (the global at 0x83496920, +12,
+// +88, +4, [0], resolved by sub_8222C210). On the partner that entry is the host's hero,
+// so the preview drew the host. While the builder runs on the partner, that one lookup
+// answers with player 2's copy. Off the builder: one thread-local check.
+namespace fable2::coopkit {
+inline thread_local bool t_in_mannequin = false;
+inline std::atomic<uint32_t> g_mann_hero{0};
+inline int g_mann_logs = 0;
+}
+// The mannequin's dressing helper (rig 2026-10-30: this one call, r4 = the hero, is what
+// put the host's clothes on the preview): the hero entity becomes player 2's copy.
+#define FABLE2_MANN_HOOK(addr)                                                                       \
+  extern "C" void __imp__sub_##addr(PPCContext& ctx, uint8_t* base);                                 \
+  extern "C" void sub_##addr(PPCContext& ctx, uint8_t* base) {                                       \
+    namespace ck = fable2::coopkit;                                                                  \
+    if (const uint32_t hero = ck::g_mann_hero.load(std::memory_order_relaxed); hero) {               \
+      const uint32_t p2 = fable2::coopcam::g_p2_entity.load(std::memory_order_relaxed);              \
+      if (ck::g_mann_logs < 40 && (ctx.r3.u32 == hero || ctx.r4.u32 == hero || ctx.r5.u32 == hero)) { \
+        ++ck::g_mann_logs;                                                                           \
+        REXSYS_INFO("[coopkit] mannequin helper " #addr ": r3 0x{:08X} r4 0x{:08X} r5 0x{:08X} lr 0x{:08X}", \
+                    ctx.r3.u32, ctx.r4.u32, ctx.r5.u32, static_cast<uint32_t>(ctx.lr));              \
+      }                                                                                              \
+      if (p2 && ctx.r4.u32 == hero) ctx.r4.u64 = p2;                                                 \
+      if (p2 && ctx.r5.u32 == hero) ctx.r5.u64 = p2;                                                 \
+    }                                                                                                \
+    __imp__sub_##addr(ctx, base);                                                                    \
+  }
+FABLE2_MANN_HOOK(82707FB0)
+extern "C" void __imp__sub_823FD238(PPCContext& ctx, uint8_t* base);
+extern "C" void sub_823FD238(PPCContext& ctx, uint8_t* base) {
+  namespace ck = fable2::coopkit;
+  const bool on = ck::joiner_active() && fable2::coopcam::g_p2_entity.load() != 0;
+  if (on) REXSYS_INFO("[coopkit] mannequin build: r4 0x{:08X}, player 2 0x{:08X}", ctx.r4.u32, fable2::coopcam::g_p2_entity.load());
+  if (on && ctx.r4.u32) {
+    ck::g_mann_hero = ctx.r4.u32;
+    ctx.r4.u64 = fable2::coopcam::g_p2_entity.load();  // the hero it would copy
+  }
+  ck::t_in_mannequin = on;
+  __imp__sub_823FD238(ctx, base);
+  ck::t_in_mannequin = false;
+}
+extern "C" void __imp__sub_8222C210(PPCContext& ctx, uint8_t* base);
+extern "C" void sub_8222C210(PPCContext& ctx, uint8_t* base) {
+  if (!fable2::coopkit::t_in_mannequin) {
+    __imp__sub_8222C210(ctx, base);
+    return;
+  }
+  namespace ck = fable2::coopkit;
+  namespace ta = fable2::textappend;
+  const uint32_t arg = ctx.r3.u32;
+  uint32_t first = 0, v = 0x83496920;
+  bool ok = ta::rdable2(base, v, 4);
+  if (ok) v = ta::load_be(base, v);
+  for (uint32_t off : {12u, 88u, 4u, 0u}) {
+    ok = ok && v && ta::rdable2(base, v + off, 4);
+    if (ok) v = ta::load_be(base, v + off);
+  }
+  if (ok) first = v;
+  __imp__sub_8222C210(ctx, base);
+  if (first && arg == first) {
+    REXSYS_INFO("[coopkit] mannequin source: 0x{:08X} -> player 2 0x{:08X}", ctx.r3.u32, fable2::coopcam::g_p2_entity.load());
+    ctx.r3.u64 = fable2::coopcam::g_p2_entity.load();
+  }
+}

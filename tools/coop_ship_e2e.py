@@ -1094,7 +1094,13 @@ def menu_then_coop(g, tag, n_menu):
     t0 = time.time()
     # 240 s: a slow boot must not fail a proof run (2026-10-28: a partner boot took
     # ~3 min while heavy file scans ran on the PC); the boot time is logged.
-    g.wait(f"{tag}: main menu built with the Co-op entry", r"main menu: Co-op entry added", n_menu, 240)
+    # A title A sent before the title takes input is lost (2026-10-30: 5 minutes on
+    # "Press A" until the next A; the entry came 2 s after it): A again until the menu is built.
+    while time.time() - t0 < 240 and g.count(r"main menu: Co-op entry added") <= n_menu:
+        time.sleep(15)
+        if g.count(r"main menu: Co-op entry added") <= n_menu and g.test_input:
+            g.send("press A 60")
+    g.wait(f"{tag}: main menu built with the Co-op entry", r"main menu: Co-op entry added", n_menu, 5)
     note("INFO", f"{tag}: {g.who}: menu after {time.time() - t0:.0f} s of waiting")
     time.sleep(2)  # the menu's slide-in
     return open_coop_entry(g, tag)
@@ -4778,6 +4784,110 @@ def lf_uplevels():
         eq_page_path(b, 0, [("Down", None), ("Down", None), ("A", None)], tag)
         b.shot(f"{tag}_r_p_will.png")
         eq_close_pages(b)
+        # the Clothing preview: player 2's clothes
+        eq_page_path(b, 3, [(None, "r_clothing_page"), ("A", "r_clothing_list")], tag)
+        eq_close_pages(b)
+        # a finished kill by the partner where it stands (no other creature within 8 m)
+        up_kill(a, b, "GetPlayerHenchman()", tag, "r_kill")
+        # the soak (coordinator 16:36Z): 15 minutes in the world with the mirror running
+        t = time.time()
+        passes = b.count(r"\[lua\] COOPMIRROR")
+        while time.time() - t < 900 and not b.count(r"Unhandled guest") and not a.count(r"Unhandled guest"):
+            time.sleep(30)
+        note("PASS" if not b.count(r"Unhandled guest") and not a.count(r"Unhandled guest") else "FAIL",
+             f"{tag}: soak {time.time() - t:.0f} s: {b.count(r'[[]lua[]] COOPMIRROR') - passes} mirror passes; "
+             f"level syncs {b.count(r'level sync:')}; crashes partner {b.count(r'Unhandled guest')}, host {a.count(r'Unhandled guest')}")
+        note("INFO", f"{tag}: crashes: partner {b.count(r'Unhandled guest')}, host {a.count(r'Unhandled guest')}")
+    finally:
+        for g in (a, b):
+            g.stop()
+        relay.kill()
+
+
+
+def up_pos(a, ent):
+    out = lua_lines(a, f"local p = {ent}:GetPosition(); print('LFPOS ' .. p:GetX() .. ' ' .. p:GetY() .. ' ' .. p:GetZ())", "LFPOS", 10)
+    try:
+        return tuple(float(v) for v in out[-1].split())
+    except (IndexError, ValueError):
+        return None
+
+
+def up_kill(a, attacker, ent, tag, label, key="X"):
+    """A bandit next to `ent` where it stands (read on the host), `ent` hits hard,
+    `attacker` presses X until it is down. No attack with another creature within 8 m
+    (never hit villagers)."""
+    pos = up_pos(a, ent)
+    near = lua_lines(a, (f"local s = SearchTools.StartNewSearch('object'); SearchTools.FilterWithinDistanceOfPos(s, {ent}:GetPosition(), 8); "
+                         "local n = 0; for _, o in pairs(SearchTools.GetSearchResults(s)) do local ok, t = pcall(function() return o:GetRecord():GetName() end); "
+                         "if ok and tostring(t):find('Creature') and not tostring(t):find('Hero') and not tostring(t):find('Dog') then n = n + 1 end end; print('LFNEAR ' .. n)"), "LFNEAR", 10)
+    if not pos or not near or near[-1].strip() != "0":
+        note("INFO", f"{tag}: {label}: {ent} at {pos}, creatures within 8 m {near}: no attack")
+        return
+    nm = f"LF{label}"
+    lua_lines(a, f"print('LFMULT ' .. tostring(pcall(Combat.SetDamageMultiplier, {ent}, 100)))", "LFMULT", 10)
+    out = lua_lines(a, (f"local ok, e = pcall(Debug.CreateEntityAtPosition, 'CreatureVillagerBandit', '{nm}', CVector3({pos[0] + 1.5:.2f}, {pos[1]:.2f}, {pos[2]:.2f})); "
+                        "LFB = e; print('LFBANDIT ' .. tostring(ok))"), "LFBANDIT", 10)
+    alive = lambda: (lua_lines(a, "print('LFBA ' .. tostring(LFB and LFB:IsAlive()))", "LFBA", 10) or ["?"])[-1]
+    note("INFO", f"{tag}: {label}: at {pos}; spawn {out}; XP before: player 2 {eq_xp(a, 'p2')}, hero {eq_xp(a, 'hero')}")
+    time.sleep(1)
+    attacker.shot(f"{tag}_{label}_start.png")
+    hp = lambda: (lua_lines(a, "print('LFBH ' .. tostring(LFB and Health.Get(LFB)))", "LFBH", 10) or ["?"])[-1]
+    hp0 = hp()
+    for k in range(90):
+        attacker.send(f"press {key} 150")
+        time.sleep(0.8)
+        if k % 5 == 4 and alive() != "true":
+            break
+    attacker.shot(f"{tag}_{label}.png")
+    time.sleep(10)  # the orbs drift to whoever is near
+    note("INFO", f"{tag}: {label}: bandit health {hp0} -> {hp()}")
+    note("INFO", f"{tag}: {label}: bandit alive {alive()}; XP after: player 2 {eq_xp(a, 'p2')}, hero {eq_xp(a, 'hero')}")
+    lua_lines(a, f"print('LFMULT ' .. tostring(pcall(Combat.SetDamageMultiplier, {ent}, 1)))", "LFMULT", 10)
+
+
+def lf_upkill():
+    """001up: who earns what from a kill. Partner-only attacks, then a host kill."""
+    tag = "lf_upkill"
+    slot, cid = eq_fresh_slot()
+    if not cid:
+        note("FAIL", f"{tag}: no fresh slot")
+        return
+    setup_tomls()
+    relay_log = open(os.path.join(OUT, f"relay_{tag}.log"), "w")
+    relay = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                           "coop_relay.py")], stdout=relay_log, stderr=relay_log)
+    a, b = Game("mod-a", "host"), Game("mod-b", "partner")
+    a.start({"FABLE2_TEST_INPUT": "1"})
+    b.start({"FABLE2_TEST_INPUT": "1"})
+    try:
+        if not eq_host_lobby(a, tag, cid) or not partner_continue_join(a, b, tag):
+            return
+        a.window_capture = b.window_capture = True
+        b.wait(f"{tag}: the Learn check is armed", r"Learn check armed", 0, 60)
+        # the Clothing page's 3D preview first (player 2 wears the starter kit; the host armour)
+        eq_page_path(b, 3, [(None, "clothing_page"), ("A", "clothing_list")], tag)
+        eq_close_pages(b)
+        note("INFO", f"{tag}: mannequin: {[l[24:150] for l in b.lines() if 'mannequin' in l][-4:]}; crashes {b.count(r'Unhandled guest')}")
+        # the forest arena, away from villagers
+        x, y, z = EQ_ARENA
+        lua_lines(a, f"Physics.TeleportToPosition(GetPlayerHero(), CVector3({x:.2f}, {y + 3:.2f}, {z:.2f})); print('LFAR ok')", "LFAR", 10)
+        time.sleep(5)
+        up_kill(a, b, "GetPlayerHenchman()", tag, "partner1")
+        up_kill(a, b, "GetPlayerHenchman()", tag, "partner2")
+        note("INFO", f"{tag}: mannequin helpers: {[l[24:130] for l in b.lines() if 'mannequin helper' in l][:12]}")
+        up_kill(a, a, "GetPlayerHero()", tag, "host1")
+        # the sharing rule, both ways
+        x0 = (eq_xp(a, 'p2'), eq_xp(a, 'hero'))
+        lua_lines(a, "pcall(Experience.Modify, GetPlayerHero(), EExperienceType.EXPERIENCE_STRENGTH, 300, false); print('LFG1 ok')", "LFG1", 10)
+        time.sleep(15)
+        x1 = (eq_xp(a, 'p2'), eq_xp(a, 'hero'))
+        lua_lines(a, "pcall(Experience.Modify, GetPlayerHenchman(), EExperienceType.EXPERIENCE_WILL, 200, false); print('LFG2 ok')", "LFG2", 10)
+        time.sleep(15)
+        x2 = (eq_xp(a, 'p2'), eq_xp(a, 'hero'))
+        note("INFO", f"{tag}: sharing (player 2, hero): start {x0}; hero +300 Strength {x1}; player 2 +200 Will {x2}")
+        note("INFO", f"{tag}: host: {[l[24:130] for l in a.lines() if 'experience shared' in l][-4:]}")
+        note("INFO", f"{tag}: partner page xp: {[l[24:170] for l in b.lines() if 'put on the page' in l][-3:]}")
         note("INFO", f"{tag}: crashes: partner {b.count(r'Unhandled guest')}, host {a.count(r'Unhandled guest')}")
     finally:
         for g in (a, b):
@@ -4831,6 +4941,8 @@ def run_livefix():
         lf_upprobe()
     if "uplevels" in phases:
         lf_uplevels()
+    if "upkill" in phases:
+        lf_upkill()
 
 
 def run_dynsync():
