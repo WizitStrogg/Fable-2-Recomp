@@ -19,11 +19,12 @@
 #include <rex/logging.h>
 #include <rex/ppc/context.h>
 
+
 REXCVAR_DEFINE_BOOL(coop_trace_xp, false, "Network",
                     "Testing: log the experience / ability calls (001eq trace), each distinct call once");
 
 namespace fable2::eqtrace {
-constexpr int kMaxLines = 120;
+constexpr int kMaxLines = 200;
 inline std::mutex g_mu;
 inline std::set<std::tuple<uint32_t, uint32_t, uint32_t, uint32_t>> g_seen;
 inline void log(const char* fn, uint32_t id, PPCContext& ctx, uint32_t r3, uint32_t r4, uint32_t r5, float f1,
@@ -55,6 +56,7 @@ inline void log(const char* fn, uint32_t id, PPCContext& ctx, uint32_t r3, uint3
   }
 
 FABLE2_EQTRACE_HOOK(8251C068, "Experience.Get", 1)
-FABLE2_EQTRACE_HOOK(8251C0A8, "Experience.Modify core", 2)
+FABLE2_EQTRACE_HOOK(8251C088, "Experience.GetTotalEarned", 5)
+// sub_8251C0A8 (the Modify core) is overridden in fable2_coop_kit.h (001up spend capture).
 FABLE2_EQTRACE_HOOK(824AA728, "Stats 0x824AA728 (SetHeroAbilityLevel?)", 3)
 FABLE2_EQTRACE_HOOK(824AA140, "Stats 0x824AA140 (GetHeroAbilityLevel?)", 4)

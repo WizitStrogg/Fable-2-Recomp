@@ -14,9 +14,12 @@
 //             COOPCMD:v1|sid=<session>|seq=<n>|op=equip|rec=<record hex>
 //   kit_ack   (host)   COOPKITACK:v1|sid=<session>|upto=<n>|rev=<state rev>|res=<seq>:ok,<seq>:no:<reason>
 //   kit_state (host)   COOPKIT:v1|rev=<n>|hp=..|hpm=..|melee=<rec>|ranged=<rec>|worn=<rec>,..
+//                      |xp=<g>,<s>,<k>,<w>|xpt=..|lvl=<ability>:<level>,..
 //                      |items=<rec>:<count>:<category>:<name tag>,..
 //
-// ops: equip (weapon), wear / unwear (clothing), use (potion, food, drink).
+// ops: equip (weapon), wear / unwear (clothing), use (potion, food, drink),
+// unequipw, learn (rec = <ability index><level>0000, the kit's ability list),
+// xpspend (rec = <type index><amount>, 1 + 7 hex digits).
 // Rules (contract): the host applies each seq of a session once, in order; a
 // gap stops it. The joiner keeps a command until upto >= seq. kit_state.rev
 // only increases; a lower or equal rev is ignored.
@@ -89,7 +92,7 @@ inline std::string Clean(std::string_view s) {
 
 // --- commands ------------------------------------------------------------------
 
-enum class Op { kEquip, kWear, kUnwear, kUse, kUnequipWeapon };
+enum class Op { kEquip, kWear, kUnwear, kUse, kUnequipWeapon, kLearn, kXpSpend };
 
 inline const char* OpName(Op op) {
   switch (op) {
@@ -98,6 +101,8 @@ inline const char* OpName(Op op) {
     case Op::kUnwear: return "unwear";
     case Op::kUse: return "use";
     case Op::kUnequipWeapon: return "unequipw";
+    case Op::kLearn: return "learn";
+    case Op::kXpSpend: return "xpspend";
   }
   return "?";
 }
@@ -107,6 +112,8 @@ inline std::optional<Op> ParseOp(std::string_view s) {
   if (s == "unwear") return Op::kUnwear;
   if (s == "use") return Op::kUse;
   if (s == "unequipw") return Op::kUnequipWeapon;
+  if (s == "learn") return Op::kLearn;
+  if (s == "xpspend") return Op::kXpSpend;
   return std::nullopt;
 }
 
@@ -296,6 +303,14 @@ struct KitState {
   std::string melee, ranged;      // record hex of the equipped weapons ("" = none)
   std::vector<std::string> worn;  // record hex
   std::vector<Item> items;        // sorted by record hex
+  // 001up: experience by type (general, strength, skill, will) and the totals earned;
+  // has_xp false when the line carries none (an older host).
+  bool has_xp = false;
+  int xp[4] = {0, 0, 0, 0}, xpt[4] = {0, 0, 0, 0};
+  // 001up: ability levels above 0 (index into the kit's ability list -> level);
+  // has_lvl false when the line carries none (an older host).
+  bool has_lvl = false;
+  std::map<int, int> lvl;
 };
 
 inline std::string Format(const KitState& k) {
@@ -304,9 +319,24 @@ inline std::string Format(const KitState& k) {
   for (const auto& i : k.items)
     items += (items.empty() ? "" : ",") + Clean(i.rec) + ":" + std::to_string(i.count) + ":" + Clean(i.category) +
              ":" + Clean(i.tag);
+  // 001up (proof run 1): the xp fields were dropped here, so the partner never had them.
+  std::string extra;
+  if (k.has_xp) {
+    std::string xp, xpt;
+    for (int i = 0; i < 4; ++i) {
+      xp += (i ? "," : "") + std::to_string(k.xp[i]);
+      xpt += (i ? "," : "") + std::to_string(k.xpt[i]);
+    }
+    extra += "|xp=" + xp + "|xpt=" + xpt;
+  }
+  if (k.has_lvl) {
+    std::string lvl;
+    for (const auto& [a, l] : k.lvl) lvl += (lvl.empty() ? "" : ",") + std::to_string(a) + ":" + std::to_string(l);
+    extra += "|lvl=" + (lvl.empty() ? std::string("-") : lvl);
+  }
   return "COOPKIT:v1|rev=" + std::to_string(k.rev) + "|hp=" + std::to_string(k.hp) + "|hpm=" +
          std::to_string(k.hpmax) + "|melee=" + Clean(k.melee) + "|ranged=" + Clean(k.ranged) + "|worn=" + worn +
-         "|items=" + items;
+         extra + "|items=" + items;
 }
 inline std::optional<KitState> ParseKitState(std::string_view line) {
   auto f = ParseRecord(line, "COOPKIT");
@@ -319,6 +349,23 @@ inline std::optional<KitState> ParseKitState(std::string_view line) {
   k.ranged = (*f)["ranged"];
   for (auto w : Split((*f)["worn"], ','))
     if (IsRecordHex(w)) k.worn.emplace_back(w);
+  if (const auto xp = Split((*f)["xp"], ','), xpt = Split((*f)["xpt"], ','); xp.size() == 4 && xpt.size() == 4) {
+    k.has_xp = true;
+    for (int i = 0; i < 4; ++i) {
+      k.xp[i] = std::atoi(std::string(xp[i]).c_str());
+      k.xpt[i] = std::atoi(std::string(xpt[i]).c_str());
+    }
+  }
+  if (f->count("lvl")) {
+    k.has_lvl = true;
+    for (auto part : Split((*f)["lvl"], ',')) {
+      const auto p = Split(part, ':');
+      if (p.size() == 2) {
+        const int a = std::atoi(std::string(p[0]).c_str()), l = std::atoi(std::string(p[1]).c_str());
+        if (a >= 0 && a < 32 && l > 0 && l <= 5) k.lvl[a] = l;
+      }
+    }
+  }
   for (auto part : Split((*f)["items"], ',')) {
     const auto p = Split(part, ':');
     if (p.size() < 4 || !IsRecordHex(p[0])) continue;

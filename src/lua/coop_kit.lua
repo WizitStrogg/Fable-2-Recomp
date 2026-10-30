@@ -1,6 +1,7 @@
 -- CoopKit (feature 002, slice 1): player 2's kit on the host.
 --   CoopKit.Snapshot(entity, rev) -> one COOPKIT:v1 line (src/core/fable2_coop_kit_proto.h)
---   CoopKit.Apply(entity, op, hex) -> "ok" or "no:<reason>"; op = equip, wear, unwear, use, unequipw
+--   CoopKit.Apply(entity, op, hex) -> "ok" or "no:<reason>"; op = equip, wear, unwear, use, unequipw,
+--     learn, xpspend
 -- Run as a file (luafile coop_kit) it defines CoopKit and prints the
 -- henchman's snapshot. Every engine call is wrapped in pcall.
 -- Record ids travel as 8 hex digits; "#XXXXXXXX" names resolve to that id
@@ -15,6 +16,27 @@ local function try(label, fn, ...)
     return nil
   end
   return res
+end
+
+-- 001up: the abilities by a fixed index (the commands and kit_state carry the
+-- index; the names are the game's debug menu's; the same list is in coop_abilities.lua), and the experience types in
+-- the snapshot's order: general, strength, skill, will.
+local ABILITIES = {
+  "HERO_ABILITY_STRENGTH_MELEE_WEAPONS", "HERO_ABILITY_STRENGTH_PHYSIQUE", "HERO_ABILITY_STRENGTH_TOUGHNESS",
+  "HERO_ABILITY_SKILL_RANGED_WEAPONS", "HERO_ABILITY_SKILL_ACCURACY", "HERO_ABILITY_SKILL_SPEED",
+  "HERO_ABILITY_WILL_LIGHTNING", "HERO_ABILITY_WILL_FIREBALL", "HERO_ABILITY_WILL_SLOW_TIME",
+  "HERO_ABILITY_WILL_SWORDS", "HERO_ABILITY_WILL_VORTEX", "HERO_ABILITY_WILL_CHAOS",
+  "HERO_ABILITY_WILL_FORCE_PUSH", "HERO_ABILITY_WILL_DEAD_RISING",
+}
+local function xp_types()
+  return {EExperienceType.EXPERIENCE_GENERAL, EExperienceType.EXPERIENCE_STRENGTH,
+          EExperienceType.EXPERIENCE_SKILL, EExperienceType.EXPERIENCE_WILL}
+end
+-- index (0-based) -> level, or nil when the game has no such ability
+local function ability_level(entity, i)
+  local a = EHeroAbilityType[ABILITIES[i + 1]]
+  if a == nil then return nil end
+  return math.floor(try("GetHeroAbilityLevel", Stats.GetHeroAbilityLevel, entity, a) or 0)
 end
 
 local function hex_of(id)
@@ -144,8 +166,44 @@ function CoopKit.Tick()
   CoopKitEffects = running
 end
 
+-- 001up: co-op experience (Josh's rule): the earner keeps what they earned in its
+-- style, the other hero gets the same amount as general experience. Read from the
+-- totals earned at each snapshot; what this adds is not shared again.
+local function earned(entity)
+  local sum = 0
+  for _, t in ipairs(xp_types()) do
+    sum = sum + (try("Experience.GetTotalEarned", Experience.GetTotalEarned, entity, t) or 0)
+  end
+  return sum
+end
+local function share_xp(p2)
+  local hero = GetPlayerHero()
+  if not hero or not p2 or hero == p2 then return end
+  -- Kills drop orbs; player 2 collects its own (the flag is off for a henchman).
+  if not CoopKitOrbsOn then
+    CoopKitOrbsOn = true
+    print("[coopkit] player 2 collects orbs: " .. tostring(pcall(Player.SetAbleToCollectExperienceOrbs, p2, true)))
+  end
+  local h, p = earned(hero), earned(p2)
+  -- The first snapshots of a session only take the base: player 2's saved experience
+  -- comes back after the join and is not newly earned (rig 2026-10-30: 20800 paid to
+  -- the host's hero on a rejoin).
+  CoopKitShareWait = (CoopKitShareWait or 20) - 1
+  if CoopKitEarned and CoopKitShareWait < 0 then
+    local dh, dp = h - CoopKitEarned.h, p - CoopKitEarned.p
+    if dh >= 1 then try("Experience.Modify", Experience.Modify, p2, EExperienceType.EXPERIENCE_GENERAL, dh, false) end
+    if dp >= 1 then try("Experience.Modify", Experience.Modify, hero, EExperienceType.EXPERIENCE_GENERAL, dp, false) end
+    if dh >= 1 or dp >= 1 then
+      print("[coopkit] experience shared: hero earned " .. math.floor(dh) .. ", player 2 earned " .. math.floor(dp))
+      h, p = earned(hero), earned(p2)
+    end
+  end
+  CoopKitEarned = {h = h, p = p}
+end
+
 function CoopKit.Snapshot(entity, rev)
   CoopKit.Tick()
+  share_xp(entity)
   local items, order = collect(entity)
   local list = {}
   for _, hex in ipairs(order) do
@@ -156,8 +214,22 @@ function CoopKit.Snapshot(entity, rev)
   melee, ranged = CoopKitWeaponRec[melee] or melee, CoopKitWeaponRec[ranged] or ranged
   local hp = try("Health.Get", Health.Get, entity) or 0
   local hpm = try("Health.GetMax", Health.GetMax, entity) or 0
+  -- 001up: player 2's experience (general, strength, skill, will) and the totals
+  -- earned, for the partner's Abilities page (its copy has no Experience component).
+  local xp, xpt = {}, {}
+  for i, t in ipairs(xp_types()) do
+    xp[i] = math.floor(try("Experience.Get", Experience.Get, entity, t) or 0)
+    xpt[i] = math.floor(try("Experience.GetTotalEarned", Experience.GetTotalEarned, entity, t) or 0)
+  end
+  local lvl = {}
+  for i = 0, #ABILITIES - 1 do
+    local l = ability_level(entity, i)
+    if l and l > 0 then lvl[#lvl + 1] = i .. ":" .. l end
+  end
   return "COOPKIT:v1|rev=" .. tostring(rev or 0) .. "|hp=" .. math.floor(hp) .. "|hpm=" .. math.floor(hpm) ..
     "|melee=" .. melee .. "|ranged=" .. ranged .. "|worn=" .. table.concat(worn_list(entity), ",") ..
+    "|xp=" .. table.concat(xp, ",") .. "|xpt=" .. table.concat(xpt, ",") ..
+    "|lvl=" .. (#lvl > 0 and table.concat(lvl, ",") or "-") ..
     "|items=" .. table.concat(list, ",")
 end
 
@@ -191,6 +263,26 @@ function CoopKit.Apply(entity, op, hex)
   if not entity or not entity:IsAlive() then return "no:busy" end
   -- 001eq: take the carried weapon back into the bag (the stock pages have no
   -- unequip). hex 00000001 = the melee weapon, 00000002 = the ranged one.
+  -- 001up: a level the partner learned on its Abilities page (hex = index, level,
+  -- 0000), and the experience it spent there (hex = type index, amount). The
+  -- caller applies each command once (CoopKitDone), so a spend is never repeated.
+  if op == "learn" then
+    local i, want = tonumber(hex:sub(1, 2), 16), tonumber(hex:sub(3, 4), 16)
+    local a = ABILITIES[i + 1] and EHeroAbilityType[ABILITIES[i + 1]]
+    if a == nil or want < 1 or want > 5 then return "no:fail" end
+    if ability_level(entity, i) ~= want then
+      try("SetHeroAbilityLevel", Stats.SetHeroAbilityLevel, entity, a, want)
+    end
+    return ability_level(entity, i) == want and "ok" or "no:fail"
+  end
+  if op == "xpspend" then
+    local t = xp_types()[tonumber(hex:sub(1, 1), 16) + 1]
+    local amount = tonumber(hex:sub(2), 16)
+    if t == nil or amount <= 0 then return "no:fail" end
+    local have = try("Experience.Get", Experience.Get, entity, t) or 0
+    try("Experience.Modify", Experience.Modify, entity, t, -math.min(amount, have), false)
+    return "ok"
+  end
   if op == "unequipw" then
     local want_ranged = hex == "00000002"
     local done = 0
