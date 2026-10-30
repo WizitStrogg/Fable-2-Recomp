@@ -4971,6 +4971,139 @@ def lf_upfinal():
         relay.kill()
 
 
+
+def lf_uporbs():
+    """001up, the exact frozen files: do a kill's orbs pay? (1) The partner kills, the host
+    far away; the partner walks a square around the spot: player 2 collects? (2) The
+    partner kills, then the host is moved onto the spot: the host collects, and the
+    sharing rule pays player 2 General?"""
+    tag = "lf_uporbs"
+    slot, cid = eq_fresh_slot()
+    if not cid:
+        note("FAIL", f"{tag}: no fresh slot")
+        return
+    setup_tomls()
+    relay_log = open(os.path.join(OUT, f"relay_{tag}.log"), "w")
+    relay = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                           "coop_relay.py")], stdout=relay_log, stderr=relay_log)
+    a, b = Game("mod-a", "host"), Game("mod-b", "partner")
+    a.start({"FABLE2_TEST_INPUT": "1"})
+    b.start({"FABLE2_TEST_INPUT": "1"})
+    crashes = lambda: f"partner {b.count(r'Unhandled guest')}, host {a.count(r'Unhandled guest')}"
+    xp = lambda: f"player 2 {eq_xp(a, 'p2')}, hero {eq_xp(a, 'hero')}"
+    try:
+        if not eq_host_lobby(a, tag, cid) or not partner_continue_join(a, b, tag):
+            return
+        a.window_capture = b.window_capture = True
+        b.wait(f"{tag}: the Learn check is armed", r"Learn check armed", 0, 60)
+        time.sleep(170)  # the sharing rule's first snapshots only take the base
+        # the host away from the first kill
+        x, y, z = EQ_ARENA
+        lua_lines(a, f"Physics.TeleportToPosition(GetPlayerHero(), CVector3({x:.2f}, {y + 3:.2f}, {z:.2f})); print('LFAR ok')", "LFAR", 10)
+        time.sleep(5)
+        up_kill(a, b, "GetPlayerHenchman()", tag, "kill1")
+        b.shot(f"{tag}_kill1_orbs.png")
+        for sx, sy in ((1, 0), (0, 1), (-1, 0), (-1, 0), (0, -1), (0, -1), (1, 0), (1, 0), (0, 1)):
+            b.send(f"stick L {sx} {sy} 1200")
+            time.sleep(1.6)
+        time.sleep(15)
+        note("INFO", f"{tag}: kill1, player 2 walked around: {xp()}; shared {[l[24:110] for l in a.lines() if '[lua] [coopkit] experience shared' in l][-2:]}; crashes {crashes()}")
+        # the host onto the second kill's spot
+        pos = up_pos(a, "GetPlayerHenchman()")
+        up_kill(a, b, "GetPlayerHenchman()", tag, "kill2")
+        spot = lua_lines(a, "local p = LFB:GetPosition(); Physics.TeleportToPosition(GetPlayerHero(), p); print('LFSPOT ' .. p:GetX() .. ' ' .. p:GetY())", "LFSPOT", 10)
+        note("INFO", f"{tag}: kill2: player 2 at {pos}; the host moved to the bandit at {spot}")
+        time.sleep(4)
+        a.shot(f"{tag}_kill2_host_on_orbs.png")
+        for sx, sy in ((1, 0), (0, 1), (-1, 0), (0, -1)):
+            a.send(f"stick L {sx} {sy} 1000")
+            time.sleep(1.4)
+        time.sleep(20)
+        note("INFO", f"{tag}: kill2, the host on the orbs: {xp()}; shared {[l[24:110] for l in a.lines() if '[lua] [coopkit] experience shared' in l][-2:]}; crashes {crashes()}")
+    finally:
+        for g in (a, b):
+            g.stop()
+        relay.kill()
+
+
+
+def up_kit(a, tag, label):
+    kit = [l for l in a.lines() if "[lua] COOPKIT:v1" in l][-1:]
+    m = re.search(r"melee=([^|]*)[|]ranged=([^|]*)", kit[0]) if kit else None
+    bad = bool(kit) and "BDFE364C" in kit[0]
+    note("FAIL" if bad or not kit else "PASS", f"{tag}: {label}: melee {m.group(1) if m else '?'}, ranged {m.group(2) if m else '?'}; "
+                                               f"default sword anywhere in the kit: {bad}")
+
+
+def up_send(b, tag, line):
+    n = b.count(r"coopkit\] command [0-9]+: ")
+    b.send(f"cvar coop_kit_send_line {line}")
+    t = time.time()
+    while time.time() - t < 20 and b.count(r"coopkit\] command [0-9]+: ") <= n:
+        time.sleep(0.5)
+    note("INFO", f"{tag}: {line}: {[l[24:120] for l in b.lines() if re.search(r'coopkit[]] command [0-9]+: ', l)][-1:]}")
+
+
+def lf_upsword():
+    """001up: the default henchman weapon stays gone (unequipped before the join's swap;
+    both weapons unequipped after it; attacks after each), and a kill's orbs with the
+    host moved onto the spot."""
+    tag = "lf_upsword"
+    slot, cid = eq_fresh_slot()
+    if not cid:
+        note("FAIL", f"{tag}: no fresh slot")
+        return
+    setup_tomls()
+    relay_log = open(os.path.join(OUT, f"relay_{tag}.log"), "w")
+    relay = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                           "coop_relay.py")], stdout=relay_log, stderr=relay_log)
+    a, b = Game("mod-a", "host"), Game("mod-b", "partner")
+    a.start({"FABLE2_TEST_INPUT": "1"})
+    b.start({"FABLE2_TEST_INPUT": "1"})
+    try:
+        if not eq_host_lobby(a, tag, cid) or not partner_continue_join(a, b, tag):
+            return
+        a.window_capture = b.window_capture = True
+        time.sleep(3)
+        up_send(b, tag, "unequipw 00000001")  # before the game's swap
+        time.sleep(90)
+        up_kit(a, tag, "unequipped before the swap, 90 s later")
+        up_kill(a, b, "GetPlayerHenchman()", tag, "sword1")
+        time.sleep(8)
+        up_kit(a, tag, "after attacking with no melee weapon")
+        up_send(b, tag, "equip 98F97077")
+        time.sleep(8)
+        up_kit(a, tag, "the sword equipped")
+        up_send(b, tag, "unequipw 00000001")
+        up_send(b, tag, "unequipw 00000002")
+        time.sleep(8)
+        up_kit(a, tag, "both weapons unequipped")
+        up_kill(a, b, "GetPlayerHenchman()", tag, "sword2")
+        time.sleep(8)
+        up_kit(a, tag, "after attacking, both unequipped")
+        up_send(b, tag, "equip 98F97077")
+        # the orbs: the host onto the kill's spot
+        pos = up_pos(a, "GetPlayerHenchman()")
+        up_kill(a, b, "GetPlayerHenchman()", tag, "orbs")
+        b.shot(f"{tag}_orbs_partner.png")
+        lua_lines(a, f"Physics.TeleportToPosition(GetPlayerHero(), CVector3({pos[0] + 1.5:.2f}, {pos[1]:.2f}, {pos[2]:.2f})); print('LFAR ok')", "LFAR", 10)
+        time.sleep(3)
+        a.shot(f"{tag}_orbs_host.png")
+        for sx, sy in ((1, 0), (0, 1), (-1, 0), (-1, 0), (0, -1), (0, -1), (1, 0), (1, 0)):
+            a.send(f"stick L {sx} {sy} 700")
+            time.sleep(1.1)
+        time.sleep(20)
+        a.shot(f"{tag}_orbs_host_after.png")
+        note("INFO", f"{tag}: orbs, the host walked the spot: player 2 {eq_xp(a, 'p2')}, hero {eq_xp(a, 'hero')}; "
+                     f"shared {[l[24:110] for l in a.lines() if '[lua] [coopkit] experience shared' in l][-2:]}")
+        note("INFO", f"{tag}: host: {[l[24:110] for l in a.lines() if '[lua] [coopkit] the default' in l][-4:]}")
+        note("INFO", f"{tag}: crashes: partner {b.count(r'Unhandled guest')}, host {a.count(r'Unhandled guest')}")
+    finally:
+        for g in (a, b):
+            g.stop()
+        relay.kill()
+
+
 def run_livefix():
     phases = sys.argv[sys.argv.index("--phases") + 1].split(",") if "--phases" in sys.argv else ["empty", "male", "female"]
     if "empty" in phases:
@@ -5021,6 +5154,10 @@ def run_livefix():
         lf_upkill()
     if "upfinal" in phases:
         lf_upfinal()
+    if "uporbs" in phases:
+        lf_uporbs()
+    if "upsword" in phases:
+        lf_upsword()
 
 
 def run_dynsync():
