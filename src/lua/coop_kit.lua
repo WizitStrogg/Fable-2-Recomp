@@ -179,6 +179,11 @@ end
 local function share_xp(p2)
   local hero = GetPlayerHero()
   if not hero or not p2 or hero == p2 then return end
+  -- Kills drop orbs; player 2 collects its own (the flag is off for a henchman).
+  if not CoopKitOrbsOn then
+    CoopKitOrbsOn = true
+    print("[coopkit] player 2 collects orbs: " .. tostring(pcall(Player.SetAbleToCollectExperienceOrbs, p2, true)))
+  end
   local h, p = earned(hero), earned(p2)
   -- The first snapshots of a session only take the base: player 2's saved experience
   -- comes back after the join and is not newly earned (rig 2026-10-30: 20800 paid to

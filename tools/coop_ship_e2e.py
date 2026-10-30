@@ -4836,7 +4836,11 @@ def up_kill(a, attacker, ent, tag, label, key="X"):
     attacker.shot(f"{tag}_{label}_start.png")
     hp = lambda: (lua_lines(a, "print('LFBH ' .. tostring(LFB and Health.Get(LFB)))", "LFBH", 10) or ["?"])[-1]
     # The starter sword does 1 damage (the page: "Damage: 1.0"): the bandit starts nearly dead.
-    lua_lines(a, "print('LFBS ' .. tostring(pcall(Health.Set, LFB, 3)))", "LFBS", 10)
+    keys = lua_lines(a, "local t = {}; for k, _ in pairs(Health) do t[#t + 1] = tostring(k) end; print('LFHK ' .. table.concat(t, ','))", "LFHK", 10)
+    res = lua_lines(a, ("local r = {}; for _, n in ipairs({'SetCurrent','SetHealth','Modify','Change','Damage','Reduce'}) do local f = Health[n]; "
+                        "if f then r[#r + 1] = n .. '=' .. tostring(pcall(f, LFB, n == 'Modify' and -147 or n == 'Change' and -147 or n == 'Damage' and 147 or n == 'Reduce' and 147 or 3)) .. ':' .. tostring(Health.Get(LFB)) end end; "
+                        "print('LFBS ' .. table.concat(r, ','))"), "LFBS", 10)
+    note("INFO", f"{tag}: {label}: Health functions {keys}; tried {res}")
     hp0 = hp()
     for k in range(90):
         attacker.send(f"press {key} 150")
@@ -4844,7 +4848,7 @@ def up_kill(a, attacker, ent, tag, label, key="X"):
         if k % 5 == 4 and alive() != "true":
             break
     attacker.shot(f"{tag}_{label}.png")
-    time.sleep(10)  # the orbs drift to whoever is near
+    time.sleep(25)  # the orbs drift to whoever is near
     note("INFO", f"{tag}: {label}: bandit health {hp0} -> {hp()}")
     note("INFO", f"{tag}: {label}: bandit alive {alive()}; XP after: player 2 {eq_xp(a, 'p2')}, hero {eq_xp(a, 'hero')}")
     lua_lines(a, f"print('LFMULT ' .. tostring(pcall(Combat.SetDamageMultiplier, {ent}, 1)))", "LFMULT", 10)
@@ -4877,22 +4881,19 @@ def lf_upkill():
         x, y, z = EQ_ARENA
         lua_lines(a, f"Physics.TeleportToPosition(GetPlayerHero(), CVector3({x:.2f}, {y + 3:.2f}, {z:.2f})); print('LFAR ok')", "LFAR", 10)
         time.sleep(5)
-        up_kill(a, b, "GetPlayerHenchman()", tag, "partner1")
-        up_kill(a, b, "GetPlayerHenchman()", tag, "partner2")
-        note("INFO", f"{tag}: mannequin helpers: {[l[24:130] for l in b.lines() if 'mannequin helper' in l][:12]}")
-        up_kill(a, a, "GetPlayerHero()", tag, "host1")
-        # the sharing rule, both ways
-        time.sleep(150)  # the first snapshots only take the base
-        x0 = (eq_xp(a, 'p2'), eq_xp(a, 'hero'))
-        lua_lines(a, "pcall(Experience.Modify, GetPlayerHero(), EExperienceType.EXPERIENCE_STRENGTH, 300, false); print('LFG1 ok')", "LFG1", 10)
+        time.sleep(150)  # the sharing rule's first snapshots only take the base
+        note("INFO", f"{tag}: {[l[24:120] for l in a.lines() if 'collects orbs' in l][-1:]}")
+        up_kill(a, b, "GetPlayerHenchman()", tag, "far")  # the host is at the arena, far away
         time.sleep(15)
-        x1 = (eq_xp(a, 'p2'), eq_xp(a, 'hero'))
-        lua_lines(a, "pcall(Experience.Modify, GetPlayerHenchman(), EExperienceType.EXPERIENCE_WILL, 200, false); print('LFG2 ok')", "LFG2", 10)
+        note("INFO", f"{tag}: far + share: player 2 {eq_xp(a, 'p2')}, hero {eq_xp(a, 'hero')}")
+        # the host next to player 2
+        pos = up_pos(a, "GetPlayerHenchman()")
+        lua_lines(a, f"Physics.TeleportToPosition(GetPlayerHero(), CVector3({pos[0] - 1.5:.2f}, {pos[1]:.2f}, {pos[2]:.2f})); print('LFAR ok')", "LFAR", 10)
+        time.sleep(5)
+        up_kill(a, b, "GetPlayerHenchman()", tag, "near")
         time.sleep(15)
-        x2 = (eq_xp(a, 'p2'), eq_xp(a, 'hero'))
-        note("INFO", f"{tag}: sharing (player 2, hero): start {x0}; hero +300 Strength {x1}; player 2 +200 Will {x2}")
-        note("INFO", f"{tag}: host: {[l[24:130] for l in a.lines() if 'experience shared' in l][-4:]}")
-        note("INFO", f"{tag}: partner page xp: {[l[24:170] for l in b.lines() if 'put on the page' in l][-3:]}")
+        note("INFO", f"{tag}: near + share: player 2 {eq_xp(a, 'p2')}, hero {eq_xp(a, 'hero')}")
+        note("INFO", f"{tag}: host: {[l[24:120] for l in a.lines() if '[lua] [coopkit] experience shared' in l][-4:]}")
         note("INFO", f"{tag}: crashes: partner {b.count(r'Unhandled guest')}, host {a.count(r'Unhandled guest')}")
     finally:
         for g in (a, b):
