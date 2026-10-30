@@ -4836,11 +4836,11 @@ def up_kill(a, attacker, ent, tag, label, key="X"):
     attacker.shot(f"{tag}_{label}_start.png")
     hp = lambda: (lua_lines(a, "print('LFBH ' .. tostring(LFB and Health.Get(LFB)))", "LFBH", 10) or ["?"])[-1]
     # The starter sword does 1 damage (the page: "Damage: 1.0"): the bandit starts nearly dead.
-    keys = lua_lines(a, "local t = {}; for k, _ in pairs(Health) do t[#t + 1] = tostring(k) end; print('LFHK ' .. table.concat(t, ','))", "LFHK", 10)
-    res = lua_lines(a, ("local r = {}; for _, n in ipairs({'SetCurrent','SetHealth','Modify','Change','Damage','Reduce'}) do local f = Health[n]; "
-                        "if f then r[#r + 1] = n .. '=' .. tostring(pcall(f, LFB, n == 'Modify' and -147 or n == 'Change' and -147 or n == 'Damage' and 147 or n == 'Reduce' and 147 or 3)) .. ':' .. tostring(Health.Get(LFB)) end end; "
-                        "print('LFBS ' .. table.concat(r, ','))"), "LFBS", 10)
-    note("INFO", f"{tag}: {label}: Health functions {keys}; tried {res}")
+    # Not Health.Modify: that call crashed the host (restart 48).
+    res = lua_lines(a, "print('LFBS ' .. tostring(pcall(Health.SetMax, LFB, 3)) .. ' ' .. tostring(Health.Get(LFB)))", "LFBS", 10)
+    note("INFO", f"{tag}: {label}: Health.SetMax {res}")
+    if "Hero()" in ent:
+        lua_lines(a, "pcall(Physics.SetFacingVector, GetPlayerHero(), CVector3(1, 0, 0)); print('LFFACE ok')", "LFFACE", 10)
     hp0 = hp()
     for k in range(90):
         attacker.send(f"press {key} 150")
@@ -4901,6 +4901,76 @@ def lf_upkill():
         relay.kill()
 
 
+
+def lf_upfinal():
+    """001up, the exact frozen files (coordinator 18:48Z): join; unequip and equip; one
+    Learn; the Clothing preview; a kill by the partner and one by the host with the host
+    near (orbs, both heroes' XP, the sharing rule); a 15-minute soak."""
+    tag = "lf_upfinal"
+    slot, cid = eq_fresh_slot()
+    if not cid:
+        note("FAIL", f"{tag}: no fresh slot")
+        return
+    setup_tomls()
+    relay_log = open(os.path.join(OUT, f"relay_{tag}.log"), "w")
+    relay = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                           "coop_relay.py")], stdout=relay_log, stderr=relay_log)
+    a, b = Game("mod-a", "host"), Game("mod-b", "partner")
+    a.start({"FABLE2_TEST_INPUT": "1"})
+    b.start({"FABLE2_TEST_INPUT": "1"})
+    crashes = lambda: f"partner {b.count(r'Unhandled guest')}, host {a.count(r'Unhandled guest')}"
+    try:
+        if not eq_host_lobby(a, tag, cid) or not partner_continue_join(a, b, tag):
+            return
+        a.window_capture = b.window_capture = True
+        b.wait(f"{tag}: the Learn check is armed", r"Learn check armed", 0, 60)
+        # unequip, equip
+        for line in ("unequipw 00000001", "equip 98F97077"):
+            n = b.count(r"coopkit\] command [0-9]+: ")
+            b.send(f"cvar coop_kit_send_line {line}")
+            t = time.time()
+            while time.time() - t < 20 and b.count(r"coopkit\] command [0-9]+: ") <= n:
+                time.sleep(0.5)
+            done = [l[24:120] for l in b.lines() if re.search(r"coopkit\] command [0-9]+: ", l)][-1:]
+            note("PASS" if done and ": ok" in done[0] else "FAIL", f"{tag}: {line}: {done}")
+        # one Learn
+        lua_lines(a, "pcall(Experience.Modify, GetPlayerHenchman(), EExperienceType.EXPERIENCE_STRENGTH, 5000, false); print('LFXPSET ok')", "LFXPSET", 10)
+        time.sleep(10)
+        lv = "local o, l = pcall(Stats.GetHeroAbilityLevel, GetPlayerHenchman(), EHeroAbilityType.HERO_ABILITY_STRENGTH_MELEE_WEAPONS); print('LFLVL ' .. tostring(o and l))"
+        l0 = lua_lines(a, lv, "LFLVL", 10)
+        eq_page_path(b, 0, [(None, "p_abilities"), ("A", "p_strength"), ("A", "p_learned"), ("A", "p_continue")], tag)
+        eq_close_pages(b)
+        time.sleep(12)
+        l1 = lua_lines(a, lv, "LFLVL", 10)
+        note("PASS" if l0 and l1 and l1[-1] != l0[-1] else "FAIL", f"{tag}: Learn: Brutal Styles {l0} -> {l1}; XP {eq_xp(a, 'p2')}")
+        # the Clothing preview
+        eq_page_path(b, 3, [(None, "clothing_page"), ("A", "clothing_list")], tag)
+        eq_close_pages(b)
+        # the kills, the host next to player 2
+        time.sleep(max(0, 170 - 40))  # the sharing rule's first snapshots only take the base
+        note("INFO", f"{tag}: {[l[24:120] for l in a.lines() if 'collects orbs' in l][-1:]}")
+        for label, attacker, ent in (("kill_partner", b, "GetPlayerHenchman()"), ("kill_host", a, "GetPlayerHero()")):
+            pos = up_pos(a, "GetPlayerHenchman()")
+            if pos:
+                lua_lines(a, f"Physics.TeleportToPosition(GetPlayerHero(), CVector3({pos[0] - 1.5:.2f}, {pos[1]:.2f}, {pos[2]:.2f})); print('LFAR ok')", "LFAR", 10)
+            time.sleep(5)
+            up_kill(a, attacker, ent, tag, label)
+            time.sleep(15)
+            note("INFO", f"{tag}: {label} + share: player 2 {eq_xp(a, 'p2')}, hero {eq_xp(a, 'hero')}; "
+                         f"shared {[l[24:110] for l in a.lines() if '[lua] [coopkit] experience shared' in l][-2:]}; crashes {crashes()}")
+        # the soak
+        t = time.time()
+        passes = b.count(r"[[]lua[]] COOPMIRROR")
+        while time.time() - t < 900 and not b.count(r"Unhandled guest") and not a.count(r"Unhandled guest"):
+            time.sleep(30)
+        note("PASS" if not b.count(r"Unhandled guest") and not a.count(r"Unhandled guest") else "FAIL",
+             f"{tag}: soak {time.time() - t:.0f} s: {b.count(r'[[]lua[]] COOPMIRROR') - passes} mirror passes; crashes {crashes()}")
+    finally:
+        for g in (a, b):
+            g.stop()
+        relay.kill()
+
+
 def run_livefix():
     phases = sys.argv[sys.argv.index("--phases") + 1].split(",") if "--phases" in sys.argv else ["empty", "male", "female"]
     if "empty" in phases:
@@ -4949,6 +5019,8 @@ def run_livefix():
         lf_uplevels()
     if "upkill" in phases:
         lf_upkill()
+    if "upfinal" in phases:
+        lf_upfinal()
 
 
 def run_dynsync():
