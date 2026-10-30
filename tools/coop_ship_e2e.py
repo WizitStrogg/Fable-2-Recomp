@@ -4719,7 +4719,11 @@ def lf_uplevels():
         if not eq_host_lobby(a, tag, cid) or not partner_continue_join(a, b, tag):
             return
         a.window_capture = b.window_capture = True
-        time.sleep(15)
+        b.wait(f"{tag}: the Learn check is armed", r"Learn check armed", 0, 60)
+        time.sleep(3)
+        if b.count(r"Unhandled guest"):
+            note("FAIL", f"{tag}: the partner crashed at the first mirror pass")
+            return
         lua_lines(a, ("local h = GetPlayerHenchman(); local t = EExperienceType; "
                       "pcall(Experience.Modify, h, t.EXPERIENCE_GENERAL, 1500, false); pcall(Experience.Modify, h, t.EXPERIENCE_STRENGTH, 5000, false); "
                       "pcall(Experience.Modify, h, t.EXPERIENCE_WILL, 20000, false); print('LFXPSET ok')"), "LFXPSET", 10)
@@ -4731,14 +4735,9 @@ def lf_uplevels():
         eq_page_path(b, 0, [(None, "p_abilities"), ("A", "p_strength"), ("A", "p_learned"), ("A", "p_continue")], tag)
         eq_close_pages(b)
         time.sleep(12)
-        # a Will ability: Strength, Skill, Will rows (collapsed): two Downs, A opens Will's list
-        b.send("press Start 200")
-        time.sleep(2.5)
-        b.shot(f"{tag}_p_will_0.png")
-        for k, key in enumerate(("Down", "Down", "A", "A", "A")):
-            b.send(f"press {key} 200")
-            time.sleep(2.5)
-            b.shot(f"{tag}_p_will_{k + 1}_{key}.png")
+        # a Will ability: the Abilities list opens on Strength; two Downs, A opens Will's list
+        eq_page_path(b, 0, [(None, "p_will_0"), ("Down", "p_will_1"), ("Down", "p_will_2"), ("A", "p_will_3"),
+                            ("A", "p_will_learned"), ("A", "p_will_continue")], tag)
         eq_close_pages(b)
         time.sleep(15)
         lv1 = lua_lines(a, UP_LEVELS, "LFLV14", 10)
@@ -4756,7 +4755,11 @@ def lf_uplevels():
         n = a.count(r"host: back at the front end")
         a.wait(f"{tag}: host saves and returns to the menu", r"host: back at the front end", n, 240)
         time.sleep(15)
-        a.window_capture = False
+        # Both games restart and continue the co-op save (a later evening's rejoin). The
+        # menu's Co-op entry can take minutes to come back after a quit to the front end.
+        a.stop()
+        a = Game("mod-a", "host")
+        a.start({"FABLE2_TEST_INPUT": "1"})
         if not host_continue_lobby(a, tag + "_r"):
             return
         b = Game("mod-b", "partner")
@@ -4764,7 +4767,7 @@ def lf_uplevels():
         if not partner_continue_join(a, b, tag + "_r"):
             return
         a.window_capture = b.window_capture = True
-        time.sleep(25)
+        b.wait(f"{tag}_r: the Learn check is armed", r"Learn check armed", 0, 60)
         lv2 = lua_lines(a, UP_LEVELS, "LFLV14", 10)
         hero2 = lua_lines(a, UP_LEVELS.replace("GetPlayerHenchman()", "GetPlayerHero()"), "LFLV14", 10)
         note("INFO", f"{tag}: after the rejoin: player 2 levels {lv2}, host hero levels {hero2}")
@@ -4772,11 +4775,7 @@ def lf_uplevels():
         eq_page_path(b, 0, [(None, "r_p_abilities"), ("A", "r_p_strength")], tag)
         eq_close_pages(b)
         time.sleep(5)
-        b.send("press Start 200")
-        time.sleep(2.5)
-        for k, key in enumerate(("Down", "Down", "A")):
-            b.send(f"press {key} 200")
-            time.sleep(2.5)
+        eq_page_path(b, 0, [("Down", None), ("Down", None), ("A", None)], tag)
         b.shot(f"{tag}_r_p_will.png")
         eq_close_pages(b)
         note("INFO", f"{tag}: crashes: partner {b.count(r'Unhandled guest')}, host {a.count(r'Unhandled guest')}")

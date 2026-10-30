@@ -730,13 +730,22 @@ inline void ack_toast(const Result& r) {
 // The page reads the joiner's own hero record (GetPlayerHero(), like the purse;
 // rig 2026-10-28: the mirrored purse 1456 and 0 XP while the host's player 2 had
 // 1500/5000), not player 2's copy. coop_abilities.lua puts kit_state's experience
-// and levels (1 and up) on that record outside the page (the open page pauses the
-// game, and queued Lua waits). The page's own Learn raises the record's level, and
-// a rise above the levels seen when the check was armed is sent with the
+// and levels (1 and up, see abilities_tick) on that record outside the page (the open
+// page pauses the game, and queued Lua waits). The page's own Learn raises the record's
+// level, and a rise above the levels seen when the check was armed is sent with the
 // experience it cost (OnLearnLine); the mirror then waits until kit_state shows both.
-constexpr int64_t kAbilitiesEveryMs = 2000, kLearnWaitMs = 20000;
+// The first chunk waits for the join to settle. Ready = player 2's copy spawned with
+// its appearance component, and the game unpaused for kUnpausedMs, at least kSettleMs
+// into the join; kSettleBackstopMs if a signal never comes.
+constexpr int64_t kAbilitiesEveryMs = 2000, kLearnWaitMs = 20000, kSettleMs = 10000, kUnpausedMs = 5000,
+                  kSettleBackstopMs = 60000;
+inline std::atomic<bool> g_menu_paused{false};  // the pause hooks (PauseGame, UnpauseGame)
+inline std::atomic<int64_t> g_unpaused_ms{0};
+inline bool g_ab_ready = false;
 inline bool g_ab_armed = false;
+inline int64_t g_ab_seen_ms = 0, g_ab_join_ms = 0;  // the last tick and this join's first
 inline std::map<int, int> g_ab_base;  // the record's levels when armed (and after each Learn)
+inline std::map<int, int> g_ab_cur;   // the record's levels at the last pass
 // The experience the next chunk writes natively (coop_abilities.lua: Experience.Get with
 // kXpWriteType, answered by the Experience thunk override at the end of this file).
 constexpr uint32_t kXpWriteType = 99;
@@ -774,9 +783,31 @@ inline std::map<int, int> parse_levels(std::string_view list) {
 
 inline void abilities_tick(int64_t now) {
   auto& j = joiner();
+  // Ticks stop while not joined: a gap is a new join, and the record has been reloaded.
+  if (now - g_ab_seen_ms > 5000) {
+    g_ab_join_ms = now;
+    g_ab_armed = false;
+    g_ab_ready = false;
+    g_ab_base.clear();
+    g_ab_cur.clear();
+    g_learn_lvl.clear();
+    for (auto& v : g_page_spend) v = 0;
+  }
+  g_ab_seen_ms = now;
   if (!j.state || !j.state->has_xp || !j.state->has_lvl || !REXCVAR_GET(coop_kit_abilities)) {
     g_ab_armed = false;
     return;
+  }
+  if (!g_ab_ready) {
+    const uint32_t p2 = fable2::coopcam::g_p2_entity.load();
+    const uint8_t* base = fable2::f5lua::g_base;
+    const bool spawned = p2 && base && component(base, p2, kAppearanceEC) != 0;
+    const bool settled = !g_menu_paused.load() && now - g_unpaused_ms.load() >= kUnpausedMs;
+    const bool backstop = now - g_ab_join_ms >= kSettleBackstopMs;
+    if (!backstop && !(spawned && settled && now - g_ab_join_ms >= kSettleMs)) return;
+    g_ab_ready = true;
+    REXSYS_INFO("[coopkit] abilities: join settled after {} ms (spawned {}, settled {}{})", now - g_ab_join_ms, spawned,
+                settled, backstop ? ", backstop" : "");
   }
   if (!g_learn_lvl.empty()) {
     const bool landed = learn_landed(*j.state);
@@ -787,8 +818,39 @@ inline void abilities_tick(int64_t now) {
   }
   if (j.state->rev == g_ab_mirrored_rev && now < g_ab_next_ms) return;
   if (fable2::f5lua::g_queued.load() > 0) return;  // paused (a page is open): queued Lua waits
-  // A flat body with its inputs as locals, not the kit library (see coop_abilities.lua).
-  const std::string body = read_recomp_script("coop_abilities.lua");
+  // Player 2's levels on the record (a rejoin reloads it from the host save's hero):
+  // one small chunk per ability, apart from the regular pass. Every build whose regular
+  // chunk also held the Stats.SetHeroAbilityLevel call crashed the partner soon after
+  // (in the collector's table walk), the same pass without it did not, and these
+  // one-shot sets were safe on their own (probe, 2026-10-28). A 0 is never written:
+  // kit_state does not list it, and a pass setting 0s crashed.
+  for (const auto& [a, want] : j.state->lvl) {
+    const auto have = g_ab_cur.find(a);
+    if (a < 0 || a >= 14 || want < 1 || have == g_ab_cur.end() || have->second == want) continue;
+    static const char* const kNames[14] = {
+        "STRENGTH_MELEE_WEAPONS", "STRENGTH_PHYSIQUE", "STRENGTH_TOUGHNESS", "SKILL_RANGED_WEAPONS", "SKILL_ACCURACY",
+        "SKILL_SPEED", "WILL_LIGHTNING", "WILL_FIREBALL", "WILL_SLOW_TIME", "WILL_SWORDS", "WILL_VORTEX", "WILL_CHAOS",
+        "WILL_FORCE_PUSH", "WILL_DEAD_RISING"};
+    if (fable2::luaconsole::RunChunk(std::string("pcall(Stats.SetHeroAbilityLevel, GetPlayerHero(), "
+                                                 "EHeroAbilityType.HERO_ABILITY_") + kNames[a] + ", " +
+                                     std::to_string(want) + ")")) {
+      REXSYS_INFO("[coopkit] abilities: level sync: {} {} -> {} on the page's hero", kNames[a], have->second, want);
+      have->second = want;
+      if (g_ab_armed) g_ab_base[a] = want;
+      g_ab_next_ms = now + kAbilitiesEveryMs;
+    }
+    return;  // one per pass
+  }
+  // A flat body with its inputs as locals, not the kit library (see coop_abilities.lua),
+  // without its comment lines.
+  std::string body;
+  {
+    std::istringstream in(read_recomp_script("coop_abilities.lua"));
+    for (std::string line; std::getline(in, line);) {
+      const size_t first = line.find_first_not_of(" \t\r");
+      if (first != std::string::npos && line.compare(first, 2, "--") != 0) body += line + "\n";
+    }
+  }
   if (body.empty()) return;
   std::string xp, base;
   for (int i = 0; i < 4; ++i) {
@@ -796,10 +858,8 @@ inline void abilities_tick(int64_t now) {
     g_xp_write[i] = j.state->xp[i];
   }
   g_xp_write_valid = true;
-  std::string lvl;
   for (const auto& [a, l] : g_ab_base) base += "[" + std::to_string(a) + "]=" + std::to_string(l) + ",";
-  for (const auto& [a, l] : j.state->lvl) lvl += "[" + std::to_string(a) + "]=" + std::to_string(l) + ",";
-  if (!fable2::luaconsole::RunChunk("local XP, LVL, BASE, ARMED = {" + xp + "}, {" + lvl + "}, {" + base + "}, " +
+  if (!fable2::luaconsole::RunChunk("local XP, BASE, ARMED = {" + xp + "}, {" + base + "}, " +
                                     (g_ab_armed ? "true" : "false") + "\n" + body))
     return;
   g_ab_mirrored_rev = j.state->rev;
@@ -815,9 +875,14 @@ inline void OnMirrorLine(std::string_view line) {
   if (!f) return;
   const int n = std::atoi((*f)["n"].c_str());
   if (n) REXSYS_INFO("[coopkit] abilities: {} change(s) put on the page's hero (xp {}, levels before {})", n, (*f)["xp"], (*f)["cur"]);
-  if (n == 0 && !g_ab_armed) {
+  g_ab_cur = parse_levels((*f)["cur"]);
+  bool levels_match = true;
+  if (const auto& j = joiner(); j.state)
+    for (const auto& [a, want] : j.state->lvl)
+      if (const auto it = g_ab_cur.find(a); want >= 1 && it != g_ab_cur.end() && it->second != want) levels_match = false;
+  if (n == 0 && levels_match && !g_ab_armed) {
     g_ab_armed = true;
-    g_ab_base = parse_levels((*f)["cur"]);
+    g_ab_base = g_ab_cur;
     for (auto& v : g_page_spend) v = 0;
     REXSYS_INFO("[coopkit] abilities: the page's hero has player 2's experience ({}); Learn check armed, levels {}",
                 (*f)["xp"], (*f)["cur"]);
@@ -859,6 +924,7 @@ inline void OnLearnLine(std::string_view line) {
     REXSYS_INFO("[coopkit] partner: command {} xpspend {} ({} of type {})", seq, hex, spent, i);
   }
   g_ab_base = parse_levels((*f)["cur"]);  // the next rise is counted from here
+  g_ab_cur = g_ab_base;
   if (!g_learn_lvl.empty()) g_learn_until_ms = now_ms() + kLearnWaitMs;
 }
 
@@ -1270,6 +1336,7 @@ extern "C" void sub_82336D70(PPCContext& ctx, uint8_t* base) {
     return;
   }
   if (fable2::coopkit::joiner_active()) fable2::coopkit::menu_event(true, "PauseGame (sub_82336D70)");
+  fable2::coopkit::g_menu_paused = true;
   __imp__sub_82336D70(ctx, base);
 }
 
@@ -1279,6 +1346,8 @@ extern "C" void sub_82336D70(PPCContext& ctx, uint8_t* base) {
 extern "C" void __imp__sub_82336F98(PPCContext& ctx, uint8_t* base);
 extern "C" void sub_82336F98(PPCContext& ctx, uint8_t* base) {
   if (fable2::coopkit::joiner_active()) REXSYS_INFO("[coopkit] partner menu: UnpauseGame (sub_82336F98)");
+  fable2::coopkit::g_menu_paused = false;
+  fable2::coopkit::g_unpaused_ms = fable2::coopkit::now_ms();
   __imp__sub_82336F98(ctx, base);
 }
 extern "C" void __imp__sub_825832B0(PPCContext& ctx, uint8_t* base);
